@@ -1,0 +1,20 @@
+# `trunk build --release` writes dist/, which crates/fwd/build.rs and serve.rs embed into the
+# `fwd` binary (scripts/build-web.sh runs it). Stable file names: the daemon serves them with
+# no-cache headers, so hashes buy nothing here.
+#
+# Live-reload loop against a running daemon: start the daemon with FWD_DEV_ORIGIN=http://127.0.0.1:8080
+# in its environment (it refuses other hosts and origins), open the dev server's page with the
+# `?p=<project uuid>` that `fwd ui --no-open` prints, and give trunk one proxy per backend path
+# (trunk takes a single --proxy-backend on the command line, so they go here):
+#
+#   [[proxy]]
+#   backend = "http://127.0.0.1:<port>/p/"      # each project's socket
+#   ws = true
+#   [[proxy]]
+#   backend = "http://127.0.0.1:<port>/health"
+#   [[proxy]]
+#   backend = "http://127.0.0.1:<port>/projects"
+[build]
+target = "index.html"
+dist = "dist"
+filehash = false

@@ -1,0 +1,477 @@
+<title>Implementer and Triage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#F4F5F8; --surface:#FFFFFF; --ink:#1B1F24; --muted:#5C6572; --line:#D9DDE3; --line-strong:#B9BFC8;
+  --human:#5B50D1; --human-bg:#ECEAFA;
+  --impl:#1D7F8E; --impl-bg:#E1F2F4;
+  --sup:#B4720A; --sup-bg:#FBF0DC;
+  --graph:#6B7482; --graph-bg:#ECEEF1;
+  --ok:#2E7D4F; --warn:#B5401A; --ghost:#9AA3AE;
+  --code-bg:#EEF0F3;
+  --font-display:"Bricolage Grotesque","IBM Plex Sans",system-ui,sans-serif;
+  --font-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#131619; --surface:#1B1F25; --ink:#E7EAEE; --muted:#9AA3AE; --line:#2B3139; --line-strong:#3E4650;
+    --human:#A39BF5; --human-bg:#26244A;
+    --impl:#5FBCCB; --impl-bg:#16333A;
+    --sup:#E3A63C; --sup-bg:#3A2D14;
+    --graph:#8E98A6; --graph-bg:#232830;
+    --ok:#5FBF87; --warn:#E5734B; --ghost:#6B7480;
+    --code-bg:#20252C;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#131619; --surface:#1B1F25; --ink:#E7EAEE; --muted:#9AA3AE; --line:#2B3139; --line-strong:#3E4650;
+  --human:#A39BF5; --human-bg:#26244A;
+  --impl:#5FBCCB; --impl-bg:#16333A;
+  --sup:#E3A63C; --sup-bg:#3A2D14;
+  --graph:#8E98A6; --graph-bg:#232830;
+  --ok:#5FBF87; --warn:#E5734B; --ghost:#6B7480;
+  --code-bg:#20252C;
+}
+body{background:var(--bg);color:var(--ink);font-family:var(--font-body);font-size:16px;line-height:1.55;}
+.wrap{max-width:1000px;margin:0 auto;padding-block:28px 72px;padding-inline:20px;}
+header.top{display:grid;gap:12px;padding-bottom:28px;border-bottom:1px solid var(--line);margin-bottom:36px;}
+.eyebrow{font-family:var(--font-mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);}
+h1{font-family:var(--font-display);font-weight:700;font-size:clamp(34px,5.5vw,52px);line-height:1.02;margin:0;text-wrap:balance;letter-spacing:-.01em;}
+.lede{max-width:70ch;font-size:18px;color:var(--ink);margin:0;}
+h2{font-family:var(--font-display);font-weight:700;font-size:clamp(24px,3.4vw,30px);line-height:1.15;margin:52px 0 12px;text-wrap:balance;}
+h3{font-family:var(--font-display);font-weight:600;font-size:19px;margin:28px 0 8px;}
+p,li{max-width:72ch;}
+p{margin:0 0 14px;}
+ul,ol{margin:0 0 14px;padding-left:22px;}
+li{margin-bottom:6px;}
+code{font-family:var(--font-mono);font-size:.9em;background:var(--code-bg);padding:1px 5px;border-radius:4px;}
+.role{display:inline-block;padding:1px 8px;border-radius:999px;font-family:var(--font-mono);font-size:12px;font-weight:500;vertical-align:middle;border:1px solid transparent;}
+.role.human{color:var(--human);background:var(--human-bg);}
+.role.impl{color:var(--impl);background:var(--impl-bg);}
+.role.sup{color:var(--sup);background:var(--sup-bg);}
+.role.graph{color:var(--graph);background:var(--graph-bg);}
+.cast{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:18px 0 8px;}
+@media (max-width:640px){.cast{grid-template-columns:1fr;}}
+.cast > div{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px 16px;border-top:3px solid var(--line-strong);}
+.cast > div.human{border-top-color:var(--human);} .cast > div.impl{border-top-color:var(--impl);} .cast > div.sup{border-top-color:var(--sup);} .cast > div.graph{border-top-color:var(--graph);}
+.cast h4{margin:0 0 6px;font-family:var(--font-display);font-size:17px;font-weight:600;}
+.cast p{margin:0;font-size:14.5px;color:var(--muted);max-width:none;}
+.objects{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px 18px;margin:14px 0 6px;}
+.objects div{font-size:14.5px;}
+.objects b{display:block;font-family:var(--font-mono);font-weight:500;font-size:13px;}
+figure{margin:22px 0 26px;}
+figure svg{width:100%;height:auto;display:block;background:var(--surface);border:1px solid var(--line);border-radius:8px;}
+figcaption{font-size:14px;color:var(--muted);margin-top:8px;max-width:80ch;}
+.scroll{overflow-x:auto;}
+.steps{counter-reset:s;list-style:none;padding:0;max-width:80ch;}
+.steps li{counter-increment:s;position:relative;padding-left:40px;margin-bottom:10px;}
+.steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:26px;height:26px;border-radius:50%;border:1px solid var(--line-strong);font-family:var(--font-mono);font-size:12px;display:grid;place-items:center;color:var(--muted);}
+table{border-collapse:collapse;width:100%;font-size:14.5px;background:var(--surface);}
+th,td{text-align:left;vertical-align:top;padding:9px 11px;border-bottom:1px solid var(--line);}
+th{font-family:var(--font-mono);font-weight:500;font-size:12.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);background:var(--bg);}
+td.k{font-family:var(--font-mono);font-size:13px;white-space:nowrap;}
+.pill{display:inline-block;padding:0 7px;border-radius:4px;font-family:var(--font-mono);font-size:12.5px;line-height:20px;}
+.pill.direct{background:var(--impl-bg);color:var(--impl);} .pill.propose{background:var(--sup-bg);color:var(--sup);} .pill.no{background:var(--code-bg);color:var(--muted);} .pill.human{background:var(--human-bg);color:var(--human);}
+.pov{border-left:3px solid var(--line-strong);padding:4px 0 4px 16px;margin:18px 0 22px;max-width:74ch;}
+.pov .eyebrow{margin-bottom:6px;}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px 28px;}
+.note{font-size:14px;color:var(--muted);}
+a{color:var(--impl);}
+a:focus-visible,button:focus-visible{outline:2px solid var(--impl);outline-offset:2px;}
+@media (prefers-reduced-motion: no-preference){ figure svg{transition:none;} }
+</style>
+
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">fwdcentaur · design note · 24 September 2026 · preliminary</div>
+  <h1>Implementer and Triage</h1>
+  <p class="lede">Two agent roles share one graph with the people on a team. This page shows how they interact, what lands in each inbox, what each may do without asking, and a first point of view on why the lines are drawn where they are. Every mechanism here is a proposal until it has run. The second role was the supervising agent, a role any number of principals could hold, until 29 September 2026; it is now the role triage, which one agent in a project holds, one of the four roles each agent selects for its own principal: lead, triage, implementer and reviewer (Daniel, 29 September 2026; <code>../DECISIONS.md</code>, D106, “Each project has its own triager user in place of the supervisor role, and a project’s pickers list only the principals that belong to it”).</p>
+</header>
+
+<h2>The cast</h2>
+<div class="cast">
+  <div class="human"><h4>The person <span class="role human">human</span></h4><p>Comments on code and tasks, asks and answers questions, approves Proposed tasks, accepts reviewed work. Works in scopes too, when working by hand.</p></div>
+  <div class="impl"><h4>Implementing agent <span class="role impl">implementer</span></h4><p>Works in a scope, an area of work it may share: an intention, a branch, a set of tasks, owned by no one (D108, “A scope has no owner”). Takes ready work, does it, files what it discovers, and hears about comments on its code while it works.</p></div>
+  <div class="sup"><h4>Triage agent <span class="role sup">triage</span></h4><p>The one agent in a project that holds the role triage; the questions asked of no one in particular reach it, and comments on scopes. Works in no scope. Keeps the graph tidy: links comments to tasks, turns musings into proposed tasks, approves within its policy, answers what it can, forwards the rest.</p></div>
+  <div class="graph"><h4>The graph <span class="role graph">daemon</span></h4><p>The durable node. Every write is an ordinary transaction; a routing service decides who needs to know and creates notifications; nothing is sent, only pointed at.</p></div>
+</div>
+
+<h3>The objects they share</h3>
+<div class="objects">
+  <div><b>Task</b> what, why, done-when; one status; readiness derived from dependencies.</div>
+  <div><b>Relation</b> a typed edge with its own status and provenance: depends_on, subtask_of, motivated_by, discovered_from, concerns, assigned_to.</div>
+  <div><b>Message</b> free text, durable and visible, with a context map saying what it is about and who it is for. Some messages ask questions or make proposals; that is the writer’s choice, not a type.</div>
+  <div><b>Notification</b> a thin pointer created only when a specific party needs to know: recipient, type, Unread / Read / Dismissed, target, originator.</div>
+  <div><b>Scope</b> an area of work anyone may work in: intention, branches, the tasks worked in it. No owner and no heartbeat since 2026-09-29.</div>
+  <div><b>Anchor</b> a line range in a file at a blob, with its own identity, so comments on code survive commits.</div>
+</div>
+
+<h2>One conversation, end to end</h2>
+<p>Daniel is looking at task T60 and wonders aloud. Nothing here requires him to open the CLI; the triage agent turns the musing into a proposed task, Daniel is told the task exists and looks at it, one approval makes it real, the implementer picks it up, and a later comment on the code reaches the implementer while it is working.</p>
+
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 1000 720" width="1000" height="720" role="img" aria-label="Sequence of a comment becoming a proposed task, its approval, the implementer claiming it, a code comment reaching the implementer mid-task, and review and acceptance" xmlns="http://www.w3.org/2000/svg" style="min-width:760px;aspect-ratio:1000/720">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+    <marker id="ahm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
+  </defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor" style="color:var(--ink)">
+    <!-- lifeline headers -->
+    <rect x="40" y="18" width="140" height="40" rx="6" fill="var(--human-bg)" stroke="var(--human)"/>
+    <text x="110" y="43" text-anchor="middle" font-weight="600" fill="var(--human)">Daniel</text>
+    <rect x="300" y="18" width="140" height="40" rx="6" fill="var(--graph-bg)" stroke="var(--graph)"/>
+    <text x="370" y="43" text-anchor="middle" font-weight="600" fill="var(--graph)">graph (daemon)</text>
+    <rect x="560" y="18" width="140" height="40" rx="6" fill="var(--sup-bg)" stroke="var(--sup)"/>
+    <text x="630" y="43" text-anchor="middle" font-weight="600" fill="var(--sup)">triage</text>
+    <rect x="820" y="18" width="140" height="40" rx="6" fill="var(--impl-bg)" stroke="var(--impl)"/>
+    <text x="890" y="43" text-anchor="middle" font-weight="600" fill="var(--impl)">implementer · S3</text>
+    <!-- lifelines -->
+    <g stroke="var(--line-strong)" stroke-dasharray="3 5">
+      <line x1="110" y1="58" x2="110" y2="700"/><line x1="370" y1="58" x2="370" y2="700"/><line x1="630" y1="58" x2="630" y2="700"/><line x1="890" y1="58" x2="890" y2="700"/>
+    </g>
+    <!-- legend -->
+    <g transform="translate(40,682)" font-size="11" fill="var(--muted)">
+      <line x1="0" y1="0" x2="34" y2="0" stroke="currentColor" marker-end="url(#ah)" style="color:var(--ink)"/><text x="42" y="4">write to the graph</text>
+      <line x1="170" y1="0" x2="204" y2="0" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ahm)"/><text x="212" y="4">notification created by routing</text>
+    </g>
+    <!-- 1 -->
+    <line x1="112" y1="96" x2="366" y2="96" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="238" y="90" text-anchor="middle">comment on T60: “what if we retried on disconnect?”</text>
+    <!-- 2 -->
+    <line x1="372" y1="138" x2="626" y2="138" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ahm)"/>
+    <text x="498" y="132" text-anchor="middle" fill="var(--muted)">TaskCommented</text>
+    <!-- 3 -->
+    <line x1="628" y1="190" x2="374" y2="190" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="500" y="184" text-anchor="middle">create T80 in Proposed, discovered_from the comment</text>
+    <!-- 4 -->
+    <line x1="368" y1="246" x2="114" y2="246" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ahm)"/>
+    <text x="240" y="240" text-anchor="middle" fill="var(--muted)">TaskCreated: T80, from your comment</text>
+    <!-- 5 -->
+    <line x1="112" y1="298" x2="366" y2="298" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="238" y="292" text-anchor="middle">approve T80 → Open</text>
+    <!-- 6 -->
+    <line x1="888" y1="340" x2="374" y2="340" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="630" y="334" text-anchor="middle">task next --claim → T80 InProgress, assigned to S3</text>
+    <!-- 7 -->
+    <line x1="112" y1="392" x2="366" y2="392" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="238" y="386" text-anchor="middle">comment on ws.rs lines 120–134: “back off, don’t hammer”</text>
+    <!-- 8 -->
+    <line x1="372" y1="430" x2="626" y2="430" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ahm)"/>
+    <text x="498" y="424" text-anchor="middle" fill="var(--muted)">CodeCommented</text>
+    <line x1="372" y1="458" x2="886" y2="458" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ahm)"/>
+    <text x="700" y="452" text-anchor="middle" fill="var(--muted)">CodeCommented (S3’s branch touches ws.rs), injected before its next model call</text>
+    <!-- 9 -->
+    <line x1="628" y1="500" x2="374" y2="500" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="500" y="494" text-anchor="middle">link comment concerns T80; append to done-when</text>
+    <!-- 10 -->
+    <line x1="888" y1="542" x2="374" y2="542" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="630" y="536" text-anchor="middle">reply: “added exponential backoff and a test”</text>
+    <!-- 11 -->
+    <line x1="368" y1="584" x2="114" y2="584" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ahm)"/>
+    <text x="240" y="578" text-anchor="middle" fill="var(--muted)">Replied</text>
+    <!-- 12 -->
+    <line x1="888" y1="620" x2="374" y2="620" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="630" y="614" text-anchor="middle">submit T80 → InReview, evidence: commit + test</text>
+    <!-- 13 -->
+    <line x1="368" y1="650" x2="114" y2="650" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ahm)"/>
+    <text x="240" y="644" text-anchor="middle" fill="var(--muted)">ReviewRequested</text>
+    <!-- 14 -->
+    <line x1="112" y1="672" x2="366" y2="672" stroke="currentColor" marker-end="url(#ah)"/>
+    <text x="238" y="666" text-anchor="middle">accept T80 → Done</text>
+  </g>
+</svg>
+</div>
+<figcaption>Solid arrows are ordinary writes to the graph; dashed arrows are notifications the routing service creates. The triage agent never waits on a human click to link the code comment, and the implementer hears the comment before its next model call.</figcaption>
+</figure>
+
+<ol class="steps">
+  <li>Daniel writes a comment on T60. It is a message with <code>task_id</code> in its context. Routing gives the triage agent a <code>TaskCommented</code> notification; nobody else needs to know yet.</li>
+  <li>The triage agent reads it as a suggestion, not an order. It creates T80 in <code>Proposed</code> status with a <code>discovered_from</code> relation back to the comment. Because the task came from Daniel’s message, routing gives Daniel a <code>TaskCreated</code> notification pointing straight at T80. No reply to read first; he looks at the task, which is what he wanted to do anyway. The triage agent replies only when something needs explaining.</li>
+  <li>Daniel approves. One verb: T80 goes <code>Open</code>. Had he written “do X” rather than “what if”, the triage agent could have created it <code>Open</code> directly; the difference between a musing and an instruction is the triage agent’s judgment, and when unsure it creates the task as Proposed.</li>
+  <li>The implementer’s next <code>task next --claim</code> returns T80 with its what, why and done-when, and claims it into scope S3 in one transaction.</li>
+  <li>While S3 works, Daniel comments on lines of the file it is changing. That comment carries an anchor. Routing notifies the triage agent and, because S3’s branch touches that file, the implementer. The implementer’s hook injects it before the next model call; on Claude Code the daemon also pushes it into the session between tool calls.</li>
+  <li>The triage agent links the comment to T80 with <code>concerns</code> and appends the requirement to T80’s done-when, so the acceptance criterion now says what Daniel said.</li>
+  <li>The implementer acts and replies with what it did. Its reply is a message in the same thread; Daniel sees it as a notification and, in the editor, as a resolved comment on those lines.</li>
+  <li>The implementer submits with evidence. T80 needs review, so the triage agent gets <code>ReviewRequested</code> (its card shows T80’s done-when beside the evidence), accepts when the evidence settles it, and otherwise asks Daniel. T80 is <code>Done</code>; anything that depended on it is now ready and its assignees are told.</li>
+</ol>
+
+<h2>The implementing agent</h2>
+<p><b>What it is for.</b> It turns ready tasks into changes without losing the reasons, and it stays steerable while it works. The graph is its memory across compaction and sessions: why a task exists, what done means, which lines people care about. The inbox is the person’s steering wheel mid-task.</p>
+
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 980 300" width="980" height="300" role="img" aria-label="The implementer's loop: attach scope and prime, take the next ready task, work while inbox notifications arrive, file discoveries and questions on the side, submit, repeat" xmlns="http://www.w3.org/2000/svg" style="min-width:700px;aspect-ratio:980/300">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12.5" fill="currentColor" style="color:var(--ink)">
+    <g stroke="var(--impl)" fill="var(--impl-bg)">
+      <rect x="30" y="110" width="170" height="54" rx="8"/>
+      <rect x="260" y="110" width="170" height="54" rx="8"/>
+      <rect x="490" y="110" width="170" height="54" rx="8"/>
+      <rect x="720" y="110" width="170" height="54" rx="8"/>
+    </g>
+    <text x="115" y="132" text-anchor="middle" font-weight="600">attach scope</text><text x="115" y="150" text-anchor="middle" fill="var(--muted)">prime: intention, tasks, unread</text>
+    <text x="345" y="132" text-anchor="middle" font-weight="600">next ready task</text><text x="345" y="150" text-anchor="middle" fill="var(--muted)">claim into the scope</text>
+    <text x="575" y="132" text-anchor="middle" font-weight="600">work</text><text x="575" y="150" text-anchor="middle" fill="var(--muted)">what · why · done-when · anchors</text>
+    <text x="805" y="132" text-anchor="middle" font-weight="600">submit</text><text x="805" y="150" text-anchor="middle" fill="var(--muted)">evidence → InReview or Done</text>
+    <g stroke="currentColor" fill="none" marker-end="url(#ah2)">
+      <line x1="200" y1="137" x2="258" y2="137"/><line x1="430" y1="137" x2="488" y2="137"/><line x1="660" y1="137" x2="718" y2="137"/>
+      <path d="M805,110 C805,60 345,60 345,108"/>
+    </g>
+    <text x="575" y="68" text-anchor="middle" fill="var(--muted)">repeat until no ready task</text>
+    <!-- inbox input -->
+    <rect x="450" y="200" width="250" height="44" rx="8" fill="var(--surface)" stroke="var(--line-strong)" stroke-dasharray="5 4"/>
+    <text x="575" y="219" text-anchor="middle" font-weight="600">inbox, before each model call</text>
+    <text x="575" y="236" text-anchor="middle" fill="var(--muted)">hook pop · socket push on Claude Code</text>
+    <line x1="575" y1="200" x2="575" y2="166" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ah2)"/>
+    <!-- side effects -->
+    <rect x="170" y="200" width="230" height="44" rx="8" fill="var(--surface)" stroke="var(--line-strong)"/>
+    <text x="285" y="219" text-anchor="middle" font-weight="600">discovered work</text>
+    <text x="285" y="236" text-anchor="middle" fill="var(--muted)">subtask of own task: create · else: propose</text>
+    <path d="M500,150 C440,150 420,198 400,220" stroke="currentColor" fill="none" marker-end="url(#ah2)"/>
+    <rect x="750" y="200" width="200" height="44" rx="8" fill="var(--surface)" stroke="var(--line-strong)"/>
+    <text x="850" y="219" text-anchor="middle" font-weight="600">blocked by a question</text>
+    <text x="850" y="236" text-anchor="middle" fill="var(--muted)">ask, then move to the next task</text>
+    <path d="M650,150 C710,150 730,198 750,220" stroke="currentColor" fill="none" marker-end="url(#ah2)"/>
+    <!-- stop guard -->
+    <text x="805" y="185" text-anchor="middle" font-size="11.5" fill="var(--warn)">stop guard: unread notifications keep the session going (max 8)</text>
+  </g>
+</svg>
+</div>
+<figcaption>The loop is driven by two CLI calls and four hooks. Discoveries and questions leave the loop as graph writes and never as idle waiting.</figcaption>
+</figure>
+
+<div class="two">
+<div>
+<h3>What lands in its inbox</h3>
+<div class="scroll"><table>
+<tr><th>type</th><th>when</th><th>expected response</th></tr>
+<tr><td class="k">CodeCommented</td><td>a comment on lines near a task assigned to it, or on a step of one</td><td>act if it concerns current work; reply with what was done</td></tr>
+<tr><td class="k">TaskCommented</td><td>a comment on a task assigned to it</td><td>read; act or reply</td></tr>
+<tr><td class="k">Mentioned</td><td>@its handle in any message</td><td>reply</td></tr>
+<tr><td class="k">QuestionAsked</td><td>a question addressed to it</td><td>answer, or forward to the project</td></tr>
+<tr><td class="k">Replied</td><td>a reply in a thread it is part of, including answers to its own questions</td><td>resume the blocked task if the answer unblocks it</td></tr>
+<tr><td class="k">TaskAssigned</td><td>someone assigned a task to it</td><td>it appears in <code>task next</code></td></tr>
+<tr><td class="k">TaskUnblocked</td><td>a dependency of one of its tasks finished</td><td>it appears in <code>task next</code></td></tr>
+</table></div>
+</div>
+<div>
+<h3>What it may do</h3>
+<ul>
+  <li><span class="pill direct">direct</span> start, submit, return-to-work, hold and release its own assigned tasks.</li>
+  <li><span class="pill direct">direct</span> create subtasks of its own tasks, and <code>discovered_from</code> and <code>motivated_by</code> relations for them.</li>
+  <li><span class="pill direct">direct</span> comment, ask, reply, forward, dismiss its own notifications.</li>
+  <li><span class="pill propose">as Proposed</span> any other task, any <code>depends_on</code> between tasks it does not own.</li>
+  <li><span class="pill propose">ask, in a message</span> cancelling anything, retracting a relation, changing another task’s text, reassigning work.</li>
+  <li><span class="pill no">never</span> approve its own Proposed tasks, accept its own submissions.</li>
+</ul>
+<h3>The hooks that drive it</h3>
+<ul class="note" style="font-size:14px">
+  <li><code>SessionStart</code>: attach the session to its scope, print the primed context.</li>
+  <li><code>PostToolBatch</code> and <code>UserPromptSubmit</code>: pop unread notifications into context.</li>
+  <li><code>Stop</code>: refuse to end with unread notifications, up to eight times.</li>
+  <li><code>PreCompact</code>: re-prime, so the tracker survives compaction.</li>
+</ul>
+</div>
+</div>
+
+<div class="pov">
+<div class="eyebrow">preliminary point of view</div>
+<p>The implementer’s rights stop at the edge of its own tasks because that edge is where an agent’s confidence is well founded. It knows what it is doing; it does not know what the rest of the team intends. So subtasks of its own work are direct, and anything that touches someone else’s work is created as Proposed and costs a person one approval. The one exception is discovery: an agent that finds necessary work mid-task must be able to record it instantly, in Proposed status, without stopping to ask, because the alternative is that the discovery lives only in a transcript that will be compacted.</p>
+</div>
+
+<h2>The triage agent</h2>
+<p><b>What it is for.</b> People should be able to talk to the graph in plain language, on code or on tasks, and have it stay correct without clicking through a form. The triage agent is the interpreter: it turns comments into links, requirements and proposed tasks, answers what the graph already knows, and routes the rest to whoever can answer. It is also the janitor: orphaned anchors, Proposed tasks nobody decided.</p>
+
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 980 330" width="980" height="330" role="img" aria-label="The triage agent's loop: watch the inbox, classify each notification, act within caps, reply with what was done, repeat; idle sweeps feed the same loop" xmlns="http://www.w3.org/2000/svg" style="min-width:700px;aspect-ratio:980/330">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12.5" fill="currentColor" style="color:var(--ink)">
+    <g stroke="var(--sup)" fill="var(--sup-bg)">
+      <rect x="30" y="120" width="160" height="54" rx="8"/>
+      <rect x="250" y="120" width="160" height="54" rx="8"/>
+      <rect x="470" y="120" width="220" height="54" rx="8"/>
+      <rect x="750" y="120" width="200" height="54" rx="8"/>
+    </g>
+    <text x="110" y="142" text-anchor="middle" font-weight="600">watch the inbox</text><text x="110" y="160" text-anchor="middle" fill="var(--muted)">pop, or a blocking watch</text>
+    <text x="330" y="142" text-anchor="middle" font-weight="600">classify</text><text x="330" y="160" text-anchor="middle" fill="var(--muted)">what is this, and how sure am I</text>
+    <text x="580" y="142" text-anchor="middle" font-weight="600">act, within caps</text><text x="580" y="160" text-anchor="middle" fill="var(--muted)">10 links · 5 tasks · 3 decisions per run</text>
+    <text x="850" y="142" text-anchor="middle" font-weight="600">reply with what it did</text><text x="850" y="160" text-anchor="middle" fill="var(--muted)">or a skip reason</text>
+    <g stroke="currentColor" fill="none" marker-end="url(#ah3)">
+      <line x1="190" y1="147" x2="248" y2="147"/><line x1="410" y1="147" x2="468" y2="147"/><line x1="690" y1="147" x2="748" y2="147"/>
+      <path d="M850,120 C850,70 110,70 110,118"/>
+    </g>
+    <text x="480" y="78" text-anchor="middle" fill="var(--muted)">every action attributed and revertible</text>
+    <!-- actions fan -->
+    <g fill="var(--surface)" stroke="var(--line-strong)">
+      <rect x="290" y="220" width="120" height="40" rx="6"/><rect x="420" y="220" width="130" height="40" rx="6"/><rect x="560" y="220" width="120" height="40" rx="6"/><rect x="690" y="220" width="130" height="40" rx="6"/><rect x="830" y="220" width="120" height="40" rx="6"/>
+    </g>
+    <text x="350" y="237" text-anchor="middle">link concerns</text><text x="350" y="252" text-anchor="middle" fill="var(--muted)">comment → task</text>
+    <text x="485" y="237" text-anchor="middle">append why / done-when</text><text x="485" y="252" text-anchor="middle" fill="var(--muted)">what the person said</text>
+    <text x="620" y="237" text-anchor="middle">create a Proposed task</text><text x="620" y="252" text-anchor="middle" fill="var(--muted)">the requester is notified</text>
+    <text x="755" y="237" text-anchor="middle">approve / reject</text><text x="755" y="252" text-anchor="middle" fill="var(--muted)">within policy</text>
+    <text x="890" y="237" text-anchor="middle">answer / forward</text><text x="890" y="252" text-anchor="middle" fill="var(--muted)">to who can answer</text>
+    <g stroke="var(--muted)" fill="none" marker-end="url(#ah3)" style="color:var(--muted)">
+      <line x1="540" y1="174" x2="370" y2="218"/><line x1="560" y1="174" x2="490" y2="218"/><line x1="585" y1="174" x2="615" y2="218"/><line x1="610" y1="174" x2="740" y2="218"/><line x1="630" y1="174" x2="870" y2="218"/>
+    </g>
+    <!-- sweeps -->
+    <rect x="30" y="220" width="200" height="54" rx="6" fill="var(--surface)" stroke="var(--line-strong)" stroke-dasharray="5 4"/>
+    <text x="130" y="240" text-anchor="middle" font-weight="600">idle sweeps</text>
+    <text x="130" y="257" text-anchor="middle" fill="var(--muted)">orphaned anchors · undecided Proposed tasks</text>
+    <line x1="110" y1="220" x2="110" y2="176" stroke="var(--muted)" stroke-dasharray="5 4" marker-end="url(#ah3)"/>
+    <text x="490" y="305" text-anchor="middle" font-size="11.5" fill="var(--warn)">below a confidence threshold it asks instead of acting; a per-day budget bounds cost when it runs unattended</text>
+  </g>
+</svg>
+</div>
+<figcaption>Version one is a plain session running a skill over the CLI. A headless driver comes later; hosting it is the paid tier. The loop does not change between them.</figcaption>
+</figure>
+
+<div class="two">
+<div>
+<h3>What lands in its inbox</h3>
+<div class="scroll"><table>
+<tr><th>type</th><th>when</th><th>expected response</th></tr>
+<tr><td class="k">CodeCommented</td><td>every comment on code, anywhere in the project</td><td>link to the tasks it concerns; capture requirements; propose a task if it implies new work</td></tr>
+<tr><td class="k">TaskCommented</td><td>every comment on a task</td><td>same; answer if the graph already knows</td></tr>
+<tr><td class="k">QuestionAsked</td><td>a question asked of no one in particular, of a scope it serves (or, serving the whole project, of no scope)</td><td>answer, or forward to the person or agent who can</td></tr>
+<tr><td class="k">TaskProposed</td><td>a task or relation appeared in Proposed status</td><td>approve, reject with reason, or leave for a person and say so</td></tr>
+<tr><td class="k">TaskUnblocked</td><td>a task with no assignee became ready</td><td>nothing; it is on the frontier for the next claim</td></tr>
+<tr><td class="k">Replied</td><td>a reply in a thread it is in</td><td>read; close the loop if it can</td></tr>
+</table></div>
+</div>
+<div>
+<h3>What it may do</h3>
+<ul>
+  <li><span class="pill direct">direct</span> link a comment to tasks (<code>concerns</code>), add <code>relates_to</code>, <code>motivated_by</code>, <code>discovered_from</code>.</li>
+  <li><span class="pill direct">direct</span> append to a task’s why, what and done-when; never rewrite them wholesale.</li>
+  <li><span class="pill direct">direct</span> create tasks in Proposed status; create subtasks under an existing task.</li>
+  <li><span class="pill direct">direct</span> approve or reject Proposed tasks and relations within its policy; re-triage a message’s priority.</li>
+  <li><span class="pill direct">direct</span> answer, reply, forward.</li>
+  <li><span class="pill propose">ask, in a message</span> cancelling a task, retracting an accepted relation, reassigning work, replacing a task’s text.</li>
+  <li><span class="pill no">never</span> accept a submission (that is review, and review is a person’s), start tasks, edit code, dismiss someone else’s notifications.</li>
+</ul>
+<h3>Guardrails</h3>
+<ul class="note" style="font-size:14px">
+  <li>Caps per run; dedupe by target; a hop count on forwards.</li>
+  <li>A confidence threshold below which it asks (“I think this concerns T72; confirm?”).</li>
+  <li>A reply on everything it touches, a skip reason on everything it leaves; all of it in <code>fwd log</code>.</li>
+  <li>One-command revert for each direct power: unlink, reject, edit.</li>
+</ul>
+</div>
+</div>
+
+<div class="pov">
+<div class="eyebrow">preliminary point of view</div>
+<p>The triage agent is cheap, observable and optional, or it will burn down. The evidence is Gas Town, whose mayor cost ten times a normal session and merged a pull request despite failing tests, and whose author declared it dead while keeping the work graph underneath. GitHub’s agentic workflows answer the same risk with hard caps per run and a written failure record; Linear prices its grooming agent per run with tokens at cost. So the triage agent here gets exactly the powers whose worst case is one revert: linking, appending, proposing, approving within a policy. The powers whose worst case is lost work, cancelling and retracting, cost a person one approval. Daniel expects to have stronger opinions once he has watched it run; this split is the starting point, not the verdict.</p>
+</div>
+
+<h2>The person</h2>
+<p>Comments on code or on tasks are the normal way to talk to either agent; a message addressed to someone is the way to talk about anything else. Approvals, review acceptance and re-triage are single verbs in the panel or the CLI. A person’s inbox holds questions from agents, replies, forwards, review requests and “a task was created from your comment” pointers, with the same three statuses, and it never fills with the fine-grained churn of proposed subtasks unless they are mentioned.</p>
+
+<h2>Who may do what</h2>
+<div class="scroll"><table>
+<tr><th>action</th><th>person</th><th>triage</th><th>implementer</th></tr>
+<tr><td>create a task as Open</td><td><span class="pill human">direct</span></td><td><span class="pill propose">proposed status</span></td><td><span class="pill direct">subtask of own task</span> otherwise <span class="pill propose">proposed status</span></td></tr>
+<tr><td>approve or reject a proposed task</td><td><span class="pill human">direct</span></td><td><span class="pill direct">within policy</span></td><td><span class="pill no">never</span></td></tr>
+<tr><td>add depends_on / subtask_of</td><td><span class="pill human">direct</span></td><td><span class="pill direct">direct</span></td><td><span class="pill direct">among own tasks</span> otherwise <span class="pill propose">proposed status</span></td></tr>
+<tr><td>retract an accepted relation</td><td><span class="pill human">direct</span></td><td><span class="pill propose">ask in a message</span></td><td><span class="pill propose">ask in a message</span></td></tr>
+<tr><td>link a comment to tasks (concerns)</td><td><span class="pill human">direct</span></td><td><span class="pill direct">direct</span></td><td><span class="pill direct">own tasks</span></td></tr>
+<tr><td>append to why / what / done-when</td><td><span class="pill human">direct</span></td><td><span class="pill direct">direct</span></td><td><span class="pill direct">own tasks</span></td></tr>
+<tr><td>replace a task’s text</td><td><span class="pill human">direct</span></td><td><span class="pill propose">ask in a message</span></td><td><span class="pill propose">ask in a message</span></td></tr>
+<tr><td>start / submit a task</td><td><span class="pill human">direct</span></td><td><span class="pill no">never</span></td><td><span class="pill direct">in the scope it works in</span></td></tr>
+<tr><td>accept a reviewed task</td><td><span class="pill human">direct</span></td><td><span class="pill no">never</span></td><td><span class="pill no">never</span></td></tr>
+<tr><td>cancel a task</td><td><span class="pill human">direct</span></td><td><span class="pill propose">ask in a message</span></td><td><span class="pill propose">ask in a message</span></td></tr>
+<tr><td>reassign a task</td><td><span class="pill human">direct</span></td><td><span class="pill propose">ask in a message</span></td><td><span class="pill propose">ask in a message</span></td></tr>
+<tr><td>comment, ask, reply, forward</td><td><span class="pill human">direct</span></td><td><span class="pill direct">direct</span></td><td><span class="pill direct">direct</span></td></tr>
+<tr><td>re-triage a message’s priority</td><td><span class="pill human">direct</span></td><td><span class="pill direct">direct</span></td><td><span class="pill direct">own questions</span></td></tr>
+<tr><td>dismiss a notification</td><td><span class="pill human">own</span></td><td><span class="pill direct">own</span></td><td><span class="pill direct">own</span></td></tr>
+</table></div>
+<p class="note" style="margin-top:10px">“Proposed status” means the task or relation is created and drawn as a ghost until approved; the requester is notified it exists. “Ask in a message” means plain text to someone who may do it; there is no proposal object. Policy is configuration, not code; this table is the default.</p>
+
+<h2>Statuses</h2>
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 980 360" width="980" height="360" role="img" aria-label="Task status transitions: create to Open or Proposed; Proposed to Open by approve or Rejected by reject; Open to InProgress by start; InProgress to InReview by submit; InReview to Done by accept or back by return; Open or InProgress to Proposed by rejustify; non-terminal to Cancelled; terminal states reopen to Open" xmlns="http://www.w3.org/2000/svg" style="min-width:760px;aspect-ratio:980/360">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g font-family="IBM Plex Sans, system-ui, sans-serif" font-size="12" fill="currentColor" style="color:var(--ink)">
+    <!-- nodes -->
+    <g stroke="var(--line-strong)" fill="var(--surface)">
+      <circle cx="95" cy="170" r="7" fill="var(--ink)" stroke="none"/>
+      <rect x="220" y="60" width="120" height="40" rx="20" stroke-dasharray="5 4" stroke="var(--ghost)"/>
+      <rect x="400" y="150" width="110" height="40" rx="20" stroke="var(--impl)" stroke-width="1.5"/>
+      <rect x="580" y="150" width="130" height="40" rx="20"/>
+      <rect x="780" y="150" width="120" height="40" rx="20"/>
+      <rect x="780" y="260" width="120" height="40" rx="20" stroke="var(--ok)"/>
+      <rect x="580" y="260" width="130" height="40" rx="20" stroke="var(--warn)"/>
+      <rect x="220" y="260" width="120" height="40" rx="20" stroke="var(--warn)"/>
+    </g>
+    <text x="95" y="200" text-anchor="middle" fill="var(--muted)">create</text>
+    <text x="280" y="85" text-anchor="middle" font-weight="600" fill="var(--ghost)">Proposed</text>
+    <text x="455" y="175" text-anchor="middle" font-weight="600">Open</text>
+    <text x="645" y="175" text-anchor="middle" font-weight="600">InProgress</text>
+    <text x="840" y="175" text-anchor="middle" font-weight="600">InReview</text>
+    <text x="840" y="285" text-anchor="middle" font-weight="600" fill="var(--ok)">Done</text>
+    <text x="645" y="285" text-anchor="middle" font-weight="600" fill="var(--warn)">Cancelled</text>
+    <text x="280" y="285" text-anchor="middle" font-weight="600" fill="var(--warn)">Rejected</text>
+    <!-- edges -->
+    <g stroke="currentColor" fill="none" marker-end="url(#ah4)">
+      <line x1="104" y1="170" x2="398" y2="170"/>
+      <path d="M100,164 C150,120 190,98 218,86"/>
+      <path d="M340,84 C370,100 400,130 430,148"/>
+      <path d="M280,100 C280,160 280,220 280,258"/>
+      <line x1="510" y1="170" x2="578" y2="170"/>
+      <line x1="710" y1="165" x2="778" y2="165"/>
+      <path d="M778,176 C740,176 720,178 712,178" />
+      <path d="M840,190 C840,220 840,240 840,258"/>
+      <path d="M580,160 C520,110 420,90 342,80"/>
+      <path d="M645,190 C645,220 645,240 645,258"/>
+      <path d="M455,190 C455,240 560,270 578,278"/>
+      <path d="M780,290 C700,320 500,320 455,192"/>
+    </g>
+    <!-- labels -->
+    <text x="270" y="162" text-anchor="middle">as Open (people; agents for own subtasks)</text>
+    <text x="140" y="112" text-anchor="middle">as Proposed (--propose)</text>
+    <text x="405" y="112" text-anchor="middle">approve</text>
+    <text x="300" y="180" text-anchor="start">reject</text>
+    <text x="544" y="162" text-anchor="middle">start (claims)</text>
+    <text x="744" y="156" text-anchor="middle">submit</text>
+    <text x="744" y="192" text-anchor="middle" fill="var(--muted)">return</text>
+    <text x="852" y="222" text-anchor="start">accept</text><text x="852" y="237" text-anchor="start" fill="var(--muted)">by another principal</text>
+    <text x="480" y="90" text-anchor="middle" fill="var(--muted)">rejustify (assignment stays)</text>
+    <text x="660" y="228" text-anchor="start" fill="var(--muted)">cancel, with reason</text>
+    <text x="500" y="256" text-anchor="middle" fill="var(--muted)">cancel</text>
+    <text x="600" y="322" text-anchor="middle" fill="var(--muted)">reopen, with reason (also from Cancelled and Rejected)</text>
+    <text x="40" y="350" font-size="11" fill="var(--muted)">Readiness is not a status: a task is ready when it is Open, not held, and every dependency is Done. “Blocked” is derived, never stored.</text>
+  </g>
+</svg>
+</div>
+<figcaption>Task statuses and the verbs that move them. There is no Draft: Proposed is “I think this should exist; tell me if not”. Assignment is a separate relation, which is why a task can be Proposed and assigned at once.</figcaption>
+</figure>
+
+<div class="two">
+<div>
+<h3>Message status</h3>
+<p>Free text with no type. <code>Active</code> until someone settles it; <code>Resolved</code> when the question is answered, the suggestion acted on or declined, or the comment addressed; <code>Deleted</code> only by its author. Priority (<code>now</code>, <code>next</code>, <code>later</code>) is set by the author and may be re-triaged.</p>
+</div>
+<div>
+<h3>Notification status</h3>
+<p><code>Unread</code> when routing creates it; <code>Read</code> when injected into an agent’s context or opened by a person; <code>Dismissed</code> by its recipient. What the recipient did is never on the notification; it is a reply in the thread.</p>
+</div>
+</div>
+
+<h2>Preliminary, and what to watch for</h2>
+<ul>
+  <li><b>The rights split is provisional.</b> Daniel will revise it after watching real sessions. The first thing to watch: how often a link of the triage agent’s gets reverted, and how often a proposed task sits undecided.</li>
+  <li><b>Musing versus instruction.</b> The triage agent decides whether “what if we…” becomes a Proposed task or an Open one. If it guesses wrong in either direction the cost is one verb, but the pattern will tell us whether a default (always Proposed) is safer.</li>
+  <li><b>Notify, don’t narrate.</b> When an agent creates a task from someone’s message, that person gets a pointer to the task, not a paragraph. Watch whether people still want the one-line “why I did this”; if so it belongs in the task’s why, which they will read anyway.</li>
+  <li><b>Which questions belong in the graph.</b> Not every implementer question should be a message; some are better asked in the session that raised them. The working rule is: record it if someone other than the current session needs it or if it blocks a task; mark it <code>now</code> only if the answer changes what gets built next. A real standard comes after a few weeks of this.</li>
+  <li><b>Delivery reliability.</b> Hooks are the portable path; the Claude Code socket push is a bonus that may change underneath us. The Stop guard is the last line: an implementer should not end a session with unread notifications.</li>
+  <li><b>Cost.</b> The triage agent’s per-run caps and per-day budget are guesses. They exist so the first surprise is a skipped notification, not a bill.</li>
+</ul>
+<p class="note">Sources: <code>docs/design/agents-and-inbox.md</code>, <code>docs/design/data-model.md</code>, <code>docs/research/findings.md</code> (sections 4 to 6), and the decisions log. The simplikeys notification and message models are the reference for the shapes.</p>
+</div>

@@ -1,0 +1,5 @@
+# getrandom 0.3 picks its browser backend from this cfg (plus the `wasm_js` feature, which
+# crates/fwd-core turns on under its `wasm` feature); scoped to the wasm target so native builds
+# never see it. getrandom 0.2 and 0.4 select the backend from their features alone.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]

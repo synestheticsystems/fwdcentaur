@@ -1,0 +1,20 @@
+{
+  "name": "fwdcentaur",
+  "interface": {
+    "displayName": "fwdcentaur"
+  },
+  "plugins": [
+    {
+      "name": "fwd",
+      "source": {
+        "source": "local",
+        "path": "./plugins/fwd"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+[package]
+name = "fwd-host"
+description = "fwdcentaur extension host: fwd-core as an ephemeral Ankurah node in Node.js over node:sqlite"
+version = "0.0.1"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+# Its own workspace: this crate only ever targets wasm32-unknown-unknown (`wasm-pack build
+# --target nodejs` builds it into pkg/ for the VS Code extension host), so the root workspace
+# excludes it and `cargo build --workspace` there stays native.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fwd-core = { path = "../fwd-core", default-features = false, features = ["wasm"] }
+ankurah = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0", features = ["derive", "wasm"] }
+ankurah-websocket-client-wasm = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
+ankurah-storage-sqlite-node = { path = "../../../ankurah-storage-node-sqlite/storage/sqlite-node" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+console_error_panic_hook = "0.1"
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-wasm = "0.2"
+
+# Until Daniel pushes the Ankurah branch that carries storage/sqlite-node, that crate comes by
+# path from his worktree, whose own `../../core` path dependencies would otherwise be a second
+# copy of every Ankurah crate beside the git ones above. These entries point the two git
+# dependencies (`ankurah`, which fwd-core names too, and the WebSocket client) at the same
+# worktree (same commit); inside the worktree every other Ankurah dependency is a path, so the
+# graph has one copy of each crate. When the branch is pushed, every Ankurah dependency becomes
+# `git = ..., rev = <that commit>` and this section goes away.
+[patch."https://github.com/ankurah/ankurah"]
+ankurah = { path = "../../../ankurah-storage-node-sqlite/ankurah" }
+ankurah-websocket-client-wasm = { path = "../../../ankurah-storage-node-sqlite/connectors/websocket-client-wasm" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

@@ -1,0 +1,5 @@
+# fwd project marker: the project this repository belongs to. Commit it so a fresh clone knows;
+# on a machine where any checkout of this repository's upstream has joined the project, it is
+# not needed (the local index knows the upstream).
+id = "19c0864d-e165-4414-a6d3-e477759588be"
+name = "Fwd Centaur"

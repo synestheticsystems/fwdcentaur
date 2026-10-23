@@ -1,0 +1,18 @@
+{
+  "description": "fwd: stamps each Bash command made only of fwd, cd and filters of fwd's output with the ids of the Claude Code session and agent that run it, and approves it (README.md beside this folder says why); leaves every other command alone.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stamp",
+            "args": [],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

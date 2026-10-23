@@ -1,0 +1,98 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    # cargo test --workspace takes about three minutes here and the whole job about thirteen; on 2026-09-30 a test waited for good and the job ran on toward the six-hour limit until cancelled (run 36783874154).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain rust-toolchain.toml pins, so that CI and a developer's machine run the same
+      # clippy; the action takes the channel as an input, so it is read from the file first.
+      - id: pin
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pin.outputs.channel }}
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/fwd-web
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: 'v0.21.14'
+      - run: cargo fmt --all --check
+      - run: cargo fmt --all --check --manifest-path crates/fwd-web/Cargo.toml
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path crates/fwd-web/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo test --workspace
+      - run: bash scripts/build-web.sh   # the web UI into crates/fwd-web/dist; the next build embeds it
+      - run: cargo build --workspace
+      - run: bash scripts/smoke-roles.sh   # the fixed roles through the CLI against a scratch workspace; checks the served UI
+  # The VS Code extension's suite (extensions/vscode, `npm test`) with VS Code on a virtual display,
+  # as scripts/test-extension-headless.sh runs it in its container on a person's machine.
+  extension:
+    runs-on: ubuntu-latest
+    # A run of the suite takes under twenty minutes, three launches included (scripts/test-extension-headless.sh); a job past an hour is stuck, not slow.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # crates/fwd-host takes ankurah-storage-sqlite-node by path from ../ankurah-storage-node-sqlite,
+      # Daniel's Ankurah worktree on the branch feat/storage-node-sqlite-wasm, and no public Ankurah
+      # ref carries that crate yet. This clones the branch there from GitHub; until the branch is on
+      # GitHub with the crate, the job says so in a notice and runs nothing more. Once fwd-host takes
+      # every Ankurah crate from git (its Cargo.toml says when), nothing needs cloning.
+      - id: deps
+        run: |
+          if ! grep -q '"\.\./\.\./\.\./ankurah-storage-node-sqlite/' crates/fwd-host/Cargo.toml; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          elif git clone --quiet --depth 1 --branch feat/storage-node-sqlite-wasm https://github.com/ankurah/ankurah ../ankurah-storage-node-sqlite &&
+               [ -d ../ankurah-storage-node-sqlite/storage/sqlite-node ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=VS Code extension suite not run::crates/fwd-host takes ankurah-storage-sqlite-node by path from ../ankurah-storage-node-sqlite, and github.com/ankurah/ankurah has no branch feat/storage-node-sqlite-wasm with storage/sqlite-node yet"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      # The toolchain rust-toolchain.toml pins, read from the file as the rust job reads it.
+      - if: steps.deps.outputs.ready == 'true'
+        id: pin
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - if: steps.deps.outputs.ready == 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pin.outputs.channel }}
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - if: steps.deps.outputs.ready == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/fwd-web
+            crates/fwd-host
+      # trunk and wasm-pack at the versions scripts/test-extension-headless.Dockerfile installs.
+      - if: steps.deps.outputs.ready == 'true'
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: 'v0.21.14'
+      - if: steps.deps.outputs.ready == 'true'
+        run: |
+          curl -sSfL https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-x86_64-unknown-linux-musl.tar.gz |
+            tar -xz -C ~/.cargo/bin --strip-components=1 wasm-pack-v0.14.0-x86_64-unknown-linux-musl/wasm-pack
+      # Node 24, which VS Code runs extensions on.
+      - if: steps.deps.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: extensions/vscode/package-lock.json
+      - if: steps.deps.outputs.ready == 'true'
+        run: command -v xvfb-run || { sudo apt-get update && sudo apt-get install -y xvfb; }
+      - if: steps.deps.outputs.ready == 'true'
+        run: bash scripts/test-extension-headless.sh --here

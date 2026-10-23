@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = ["crates/fwd-core", "crates/fwd"]
+# The web UI and the extension host's node target wasm32 only and are their own workspaces
+# (crates/fwd-web/Cargo.toml, crates/fwd-host/Cargo.toml), so the native
+# `cargo build|test|clippy --workspace` never tries to build them for this machine.
+exclude = ["crates/fwd-web", "crates/fwd-host"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/synestheticsystems/fwdcentaur"
+
+[workspace.dependencies]
+# Pinned by hash to Ankurah's feat/storage-node-sqlite-wasm branch, which carries storage/sqlite-node
+# and the durable node's publication fix (task 46J1eGA4); see docs/DECISIONS.md, D23 (fwdcentaur
+# tracks the storage-engine-contract line, pinned by hash).
+ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0", features = ["derive"] }
+ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
+ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
+ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
+# The connection pool ankurah-storage-sqlite is built on, the same major: the CLI builds the pool
+# of its in-memory store itself (crates/fwd-core/src/daemon.rs, `ephemeral_store`).
+bb8                    = "0.9"
+fs4                    = { version = "0.13", features = ["sync"] }
+libc                   = "0.2"
+uuid                   = { version = "1.10", features = ["v4", "serde"] }
+toml                   = "0.8"
+dirs                   = "6.0"
+tracing-subscriber     = { version = "0.3", features = ["env-filter"] }
+axum                   = { version = "0.8", features = ["ws"] }
+serde                  = { version = "1.0", features = ["derive"] }
+serde_json             = "1.0"
+strum                  = { version = "0.27", features = ["derive"] }
+anyhow                 = "1.0"
+thiserror              = "2.0"
+tokio                  = { version = "1.40", features = ["full"] }
+tracing                = "0.1"
+clap                   = { version = "4.5", features = ["derive", "env"] }
+tempfile               = "3.10"
+tower                  = { version = "0.5", features = ["util"] }
+similar                = "2.6"
+include_dir            = "0.7"
+local-ip-address       = "0.6"
+sha2                   = "0.10"
+# The anchors' local store beside a project's database (crates/fwd-core/src/sidecar.rs): the same
+# version and `bundled` feature as ankurah-storage-sqlite's, so the build links one SQLite.
+# `backup` adds SQLite's online backup, which `fwd admin backup` copies the live databases with
+# (crates/fwd-core/src/backup.rs).
+rusqlite               = { version = "0.32", features = ["bundled", "backup"] }
+# The Model Context Protocol's official Rust SDK: the daemon serves MCP over Streamable HTTP at
+# `/mcp` (crates/fwd/src/mcp.rs). Only the server and its HTTP transport; the tests add its client.
+rmcp                   = { version = "3.5", default-features = false, features = ["server", "transport-streamable-http-server"] }
+wasm-bindgen           = "0.2"
+js-sys                 = "0.3"

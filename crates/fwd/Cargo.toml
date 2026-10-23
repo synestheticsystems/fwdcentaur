@@ -1,0 +1,40 @@
+[package]
+name = "fwd"
+description = "fwdcentaur CLI: an ephemeral Ankurah node for people and agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fwd"
+path = "src/main.rs"
+
+[dependencies]
+fwd-core = { path = "../fwd-core" }
+ankurah = { workspace = true }
+ankurah-storage-sqlite = { workspace = true }
+ankurah-websocket-server = { workspace = true }
+axum = { workspace = true }
+dirs = { workspace = true }
+include_dir = { workspace = true }
+libc = { workspace = true }
+local-ip-address = { workspace = true }
+rmcp = { workspace = true }
+fs4 = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# A real MCP client for the tests that call the daemon's `/mcp` (tests/mcp.rs).
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+tempfile = { workspace = true }
+tower = { workspace = true }

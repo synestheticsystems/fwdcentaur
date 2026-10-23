@@ -1,0 +1,154 @@
+{
+  "name": "fwdcentaur",
+  "displayName": "fwdcentaur",
+  "description": "A shared task graph, code anchors and inboxes for people and coding agents.",
+  "publisher": "synestheticsystems",
+  "version": "0.0.2",
+  "icon": "media/icon.png",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished", "onWebviewPanel:fwdPage"],
+  "contributes": {
+    "commands": [
+      { "command": "fwd.showGraph", "title": "fwd: Show Task Graph" },
+      { "command": "fwd.showInbox", "title": "fwd: Show Inbox Page" },
+      { "command": "fwd.refreshInbox", "title": "fwd: Refresh Inbox", "icon": "$(refresh)" },
+      { "command": "fwd.createComment", "title": "Send to agents", "enablement": "!commentIsEmpty" },
+      { "command": "fwd.createTaskComment", "title": "Comment on the task", "enablement": "!commentIsEmpty" },
+      { "command": "fwd.createQuestion", "title": "Ask", "enablement": "!commentIsEmpty" },
+      { "command": "fwd.replyComment", "title": "Reply", "enablement": "!commentIsEmpty" },
+      { "command": "fwd.resolveThread", "title": "fwd: Resolve", "icon": "$(check)" },
+      { "command": "fwd.resolveThreadAndCheckStep", "title": "fwd: Resolve and Check the Step", "icon": "$(check-all)" },
+      { "command": "fwd.unresolveThread", "title": "fwd: Unresolve", "icon": "$(discard)" },
+      { "command": "fwd.unresolveThreadAndUncheckStep", "title": "fwd: Unresolve and Uncheck the Step", "icon": "$(discard)" },
+      { "command": "fwd.createStep", "title": "Add as a Step of the Current Task", "icon": "$(tasklist)" },
+      { "command": "fwd.editComment", "title": "Edit", "icon": "$(edit)" },
+      { "command": "fwd.saveComment", "title": "Save", "enablement": "!commentIsEmpty" },
+      { "command": "fwd.cancelEditComment", "title": "Cancel" },
+      { "command": "fwd.openThread", "title": "fwd: Open Comment Thread" },
+      { "command": "fwd.openReference", "title": "fwd: Open What a Comment Names" },
+      { "command": "fwd.openHighlightPage", "title": "fwd: Open the Highlight on the Page", "icon": "$(open-preview)" },
+      { "command": "fwd.commentOnSelection", "title": "fwd: Comment on These Lines" },
+      { "command": "fwd.askOnSelection", "title": "fwd: Ask About These Lines…" },
+      { "command": "fwd.stepOnSelection", "title": "fwd: Add These Lines as a Step of the Current Task…" },
+      { "command": "fwd.commentOnFile", "title": "fwd: Comment on the Whole File" },
+      { "command": "fwd.stepOnFile", "title": "fwd: Add the Whole File as a Step of the Current Task…" },
+      { "command": "fwd.clearCurrentTask", "title": "fwd: Clear the Current Task" },
+      { "command": "fwd.readNotification", "title": "Mark read" },
+      { "command": "fwd.dismissNotification", "title": "Dismiss" },
+      { "command": "fwd.replyNotification", "title": "Reply…" },
+      { "command": "fwd.openNotification", "title": "Open" }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "fwd.createComment", "when": "false" },
+        { "command": "fwd.createTaskComment", "when": "false" },
+        { "command": "fwd.createQuestion", "when": "false" },
+        { "command": "fwd.replyComment", "when": "false" },
+        { "command": "fwd.resolveThread", "when": "false" },
+        { "command": "fwd.resolveThreadAndCheckStep", "when": "false" },
+        { "command": "fwd.unresolveThread", "when": "false" },
+        { "command": "fwd.unresolveThreadAndUncheckStep", "when": "false" },
+        { "command": "fwd.createStep", "when": "false" },
+        { "command": "fwd.editComment", "when": "false" },
+        { "command": "fwd.saveComment", "when": "false" },
+        { "command": "fwd.cancelEditComment", "when": "false" },
+        { "command": "fwd.openThread", "when": "false" },
+        { "command": "fwd.openReference", "when": "false" },
+        { "command": "fwd.openHighlightPage", "when": "false" },
+        { "command": "fwd.commentOnSelection", "when": "editorHasSelection && resourceScheme =~ /^(file|git)$/" },
+        { "command": "fwd.askOnSelection", "when": "editorHasSelection && resourceScheme =~ /^(file|git)$/" },
+        { "command": "fwd.stepOnSelection", "when": "editorHasSelection && resourceScheme =~ /^(file|git)$/ && fwd.hasCurrentTask" },
+        { "command": "fwd.commentOnFile", "when": "resourceScheme == file" },
+        { "command": "fwd.stepOnFile", "when": "resourceScheme == file && fwd.hasCurrentTask" },
+        { "command": "fwd.clearCurrentTask", "when": "fwd.hasCurrentTask" },
+        { "command": "fwd.readNotification", "when": "false" },
+        { "command": "fwd.dismissNotification", "when": "false" },
+        { "command": "fwd.replyNotification", "when": "false" },
+        { "command": "fwd.openNotification", "when": "false" }
+      ],
+      "editor/context": [
+        { "command": "fwd.commentOnSelection", "group": "0_fwd@1", "when": "editorHasSelection && (!isInDiffEditor && resourceScheme == file || isInDiffLeftEditor && diffEditorOriginalUri =~ /^(file|git):/ || isInDiffRightEditor && diffEditorModifiedUri =~ /^(file|git):/)" },
+        { "command": "fwd.askOnSelection", "group": "0_fwd@2", "when": "editorHasSelection && (!isInDiffEditor && resourceScheme == file || isInDiffLeftEditor && diffEditorOriginalUri =~ /^(file|git):/ || isInDiffRightEditor && diffEditorModifiedUri =~ /^(file|git):/)" },
+        { "command": "fwd.stepOnSelection", "group": "0_fwd@3", "when": "editorHasSelection && fwd.hasCurrentTask && (!isInDiffEditor && resourceScheme == file || isInDiffLeftEditor && diffEditorOriginalUri =~ /^(file|git):/ || isInDiffRightEditor && diffEditorModifiedUri =~ /^(file|git):/)" },
+        { "command": "fwd.commentOnFile", "group": "0_fwd@4", "when": "!isInDiffEditor && resourceScheme == file || isInDiffLeftEditor && diffEditorOriginalUri =~ /^file:/ || isInDiffRightEditor && diffEditorModifiedUri =~ /^file:/" },
+        { "command": "fwd.stepOnFile", "group": "0_fwd@5", "when": "fwd.hasCurrentTask && (!isInDiffEditor && resourceScheme == file || isInDiffLeftEditor && diffEditorOriginalUri =~ /^file:/ || isInDiffRightEditor && diffEditorModifiedUri =~ /^file:/)" }
+      ],
+      "editor/title": [
+        { "command": "fwd.commentOnFile", "group": "0_fwd@1", "when": "activeEditor == workbench.editors.files.textFileEditor && resourceScheme == file" },
+        { "command": "fwd.stepOnFile", "group": "0_fwd@2", "when": "activeEditor == workbench.editors.files.textFileEditor && resourceScheme == file && fwd.hasCurrentTask" }
+      ],
+      "comments/commentThread/context": [
+        { "command": "fwd.createComment", "group": "inline@1", "when": "commentController == fwd && commentThreadIsEmpty && !fwd.hasCurrentTask" },
+        { "command": "fwd.createTaskComment", "group": "inline@1", "when": "commentController == fwd && commentThreadIsEmpty && fwd.hasCurrentTask" },
+        { "command": "fwd.createQuestion", "group": "inline@2", "when": "commentController == fwd && commentThreadIsEmpty" },
+        { "command": "fwd.replyComment", "group": "inline", "when": "commentController == fwd && !commentThreadIsEmpty" }
+      ],
+      "comments/commentThread/title": [
+        { "command": "fwd.resolveThread", "group": "inline", "when": "commentController == fwd && commentThread == unresolved" },
+        { "command": "fwd.resolveThreadAndCheckStep", "group": "inline", "when": "commentController == fwd && commentThread == unresolvedStep" },
+        { "command": "fwd.unresolveThread", "group": "inline", "when": "commentController == fwd && commentThread == resolved" },
+        { "command": "fwd.unresolveThreadAndUncheckStep", "group": "inline", "when": "commentController == fwd && commentThread == resolvedStep" },
+        { "command": "fwd.openHighlightPage", "group": "inline@1", "when": "commentController == fwd && commentThread =~ /^(un)?resolved(Step)?$/" },
+        { "command": "fwd.createStep", "group": "inline@2", "when": "commentController == fwd && fwd.hasCurrentTask && commentThread =~ /^(un)?resolved(Step)?$/" }
+      ],
+      "comments/comment/title": [
+        { "command": "fwd.editComment", "group": "inline", "when": "commentController == fwd && comment == own" }
+      ],
+      "comments/comment/context": [
+        { "command": "fwd.cancelEditComment", "group": "inline@1", "when": "commentController == fwd" },
+        { "command": "fwd.saveComment", "group": "inline@2", "when": "commentController == fwd" }
+      ],
+      "view/title": [
+        { "command": "fwd.refreshInbox", "when": "view == fwdInbox", "group": "navigation" },
+        { "command": "fwd.showGraph", "when": "view == fwdInbox", "group": "navigation" }
+      ],
+      "view/item/context": [
+        { "command": "fwd.readNotification", "when": "view == fwdInbox && viewItem == unread", "group": "inline" },
+        { "command": "fwd.replyNotification", "when": "view == fwdInbox", "group": "inline" },
+        { "command": "fwd.dismissNotification", "when": "view == fwdInbox" }
+      ]
+    },
+    "views": { "explorer": [ { "id": "fwdInbox", "name": "fwd inbox" } ] },
+    "colors": [
+      {
+        "id": "fwd.highlightBackground",
+        "description": "Background of the lines of a highlight: code with a comment thread not resolved yet.",
+        "defaults": { "dark": "#f5c5421f", "light": "#f5c54233", "highContrast": "#f5c5423d", "highContrastLight": "#f5c54233" }
+      },
+      {
+        "id": "fwd.highlightRuler",
+        "description": "A highlight's mark in the overview ruler.",
+        "defaults": { "dark": "#e0a800", "light": "#c08f00", "highContrast": "#e0a800", "highContrastLight": "#c08f00" }
+      }
+    ],
+    "configuration": {
+      "title": "fwdcentaur",
+      "properties": {
+        "fwd.path": { "type": "string", "default": "", "description": "Path to the fwd binary; the daemon is that same binary, started by it when none runs. Empty: fwd on the PATH, else ~/.cargo/bin/fwd." },
+        "fwd.as": { "type": "string", "default": "", "description": "Act as this principal handle; empty means your own identity." }
+      }
+    }
+  },
+  "scripts": {
+    "stamp": "node version.mjs --write",
+    "copy-host": "mkdir -p dist && cp ../../crates/fwd-host/pkg/fwd_host.js ../../crates/fwd-host/pkg/fwd_host_bg.wasm dist/",
+    "copy-web": "([ -f ../../crates/fwd-web/dist/fwd-web_bg.wasm ] || bash ../../scripts/build-web.sh) && rm -rf dist/web && mkdir -p dist/web && cp ../../crates/fwd-web/dist/* dist/web/",
+    "build": "npm run stamp && npm run copy-host && npm run copy-web && esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:./fwd_host.js --format=cjs --platform=node --sourcemap",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && esbuild src/test/*.ts --outdir=out/test --format=cjs --platform=node --sourcemap && vscode-test",
+    "package": "npx @vscode/vsce package \"$(node version.mjs --read)\" --no-update-package-json --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  }
+}

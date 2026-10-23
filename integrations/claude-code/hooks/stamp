@@ -1,0 +1,12 @@
+#!/bin/sh
+# The fwd plugin's PreToolUse hook on Bash (hooks.json beside this file). Claude Code hands it the
+# hook's JSON on standard input, and fwd prints the JSON that stamps the command with the ids of
+# the session and the agent that run it and approves it, for a command made only of fwd, cd and
+# filters of fwd's output, or nothing for any other command, which then runs as it would without
+# the plugin (crates/fwd/src/claude_code.rs; README.md one folder up says why it approves).
+#
+# It prints nothing, and exits 0, when fwd is not on the PATH or is too old to stamp: a hook that
+# exits 2 would block the command, and this hook runs before every Bash command of every session
+# on the machine, so it must never stop one.
+command -v fwd >/dev/null 2>&1 || exit 0
+fwd session stamp 2>/dev/null || exit 0

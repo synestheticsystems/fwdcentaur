@@ -1,0 +1,8 @@
+# The toolchain every check runs with, on this machine and in CI (.github/workflows/ci.yml
+# reads the channel from this file), so that a lint a newer clippy gains fails the local check
+# before the push, not the CI run after it. Moving the pin is a deliberate commit.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

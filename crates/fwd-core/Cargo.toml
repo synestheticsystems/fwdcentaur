@@ -1,0 +1,68 @@
+[package]
+name = "fwd-core"
+description = "fwdcentaur: Ankurah models, rules, routing and anchoring shared by the daemon, the CLI and the web UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["native"]
+# Everything that needs a file system, sockets or the `git` executable: the daemon client, the
+# workspace directories, git-driven anchoring and the operations that call them.
+native = [
+    "dep:ankurah-storage-sqlite",
+    "dep:bb8",
+    "dep:ankurah-websocket-client",
+    "dep:fs4",
+    "dep:libc",
+    "dep:uuid",
+    "dep:toml",
+    "dep:dirs",
+    "dep:tokio",
+    "dep:similar",
+    "dep:sha2",
+    "dep:rusqlite",
+]
+# The browser (crates/fwd-web): models, rules, operations and routing plans on wasm32. Ankurah's
+# `wasm` feature makes the Model derive emit wasm-bindgen wrappers, whose getters need every
+# property type to cross the ABI; the string enums get that from `#[wasm_bindgen]` (C-style
+# enums). The getrandom lines turn on the browser entropy backends for every getrandom major in
+# the graph.
+wasm = [
+    "ankurah/wasm",
+    "dep:wasm-bindgen",
+    "dep:js-sys",
+    "dep:getrandom02",
+    "dep:getrandom03",
+    "dep:getrandom04",
+]
+
+[dependencies]
+ankurah = { workspace = true }
+ankurah-storage-sqlite = { workspace = true, optional = true }
+bb8 = { workspace = true, optional = true }
+ankurah-websocket-client = { workspace = true, optional = true }
+fs4 = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+similar = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+wasm-bindgen = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"], optional = true }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"], optional = true }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"], optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

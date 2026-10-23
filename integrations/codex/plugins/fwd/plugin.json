@@ -1,0 +1,25 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "fwd",
+  "version": "0.0.1",
+  "description": "fwdcentaur's shared task graph in Codex: the fwd daemon's tools, with each thread acting as its own agent, and the lead, triage and implementer skills.",
+  "repository": "https://github.com/synestheticsystems/fwdcentaur",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["tasks", "agents", "coordination"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "fwd",
+        "shortDescription": "A shared task graph for people and coding agents",
+        "longDescription": "Plan, hand out, ask about and review work in a fwdcentaur project's task graph. The tools are the fwd CLI's, served by the fwd daemon on this machine; each Codex thread acts as its own agent in the graph without naming a user.",
+        "developerName": "fwdcentaur",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://github.com/synestheticsystems/fwdcentaur",
+        "defaultPrompt": [
+          "Show my fwd inbox and the task I should take next."
+        ]
+      }
+    }
+  }
+}

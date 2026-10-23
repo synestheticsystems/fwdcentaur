@@ -1,0 +1,14 @@
+{
+  "name": "fwdcentaur",
+  "description": "The fwd plugin for Claude Code, read from this fwdcentaur checkout: each agent's fwd commands act as its own user, and the skills for each role.",
+  "owner": {
+    "name": "Daniel Norman"
+  },
+  "plugins": [
+    {
+      "name": "fwd",
+      "source": "./integrations/claude-code",
+      "description": "Stamps each command made only of fwd with the ids of the Claude Code session and agent that run it, so that it acts as the agent's own user, and approves that command without a permission prompt; brings the fwd-lead, fwd-triage and fwd-implementer skills."
+    }
+  ]
+}

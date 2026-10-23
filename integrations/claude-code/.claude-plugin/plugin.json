@@ -1,0 +1,10 @@
+{
+  "name": "fwd",
+  "description": "fwdcentaur for Claude Code: a hook that stamps each command made only of fwd with the ids of the session and agent that run it, so that each agent acts as its own user, and approves that command without a permission prompt (README.md says why); and the skills for each role, lead, triage and implementer.",
+  "author": {
+    "name": "Daniel Norman"
+  },
+  "repository": "https://github.com/synestheticsystems/fwdcentaur",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["fwdcentaur", "task-graph", "agents"]
+}

@@ -1,0 +1,17 @@
+{
+  "_comment": "fwdcentaur hooks for a Claude Code session that plays an agent role. Copy the `hooks` block into .claude/settings.local.json in the agent's own checkout (README.md beside this file says why not the shared settings). Each hook acts for the agent whose hook fired, which Claude Code names in the JSON it hands the hook on standard input: for the principal bound to that agent once it has named itself (`fwd principal add`), when FWD_AS is not read. Before that, a subagent's hook acts for no one and prints nothing, and the session's own thread's hook acts for the principal FWD_AS names, when an `env` block sets it, as settings from before 2026-09-30 do, else for no one. The scope is the one bound to this checkout (`fwd scope attach-dir`, any scope, whoever made it), else the one active scope naming its branch, or set with FWD_SCOPE. SessionStart has no matcher, so it also runs after compaction and primes the session again. Each hook is one `fwd` call; the two pops print nothing when nothing arrived.",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "fwd prime --format hook" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "fwd inbox pop --format hook --hook-event UserPromptSubmit" } ] }
+    ],
+    "PostToolBatch": [
+      { "hooks": [ { "type": "command", "command": "fwd inbox pop --format hook --hook-event PostToolBatch" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "fwd session stop-check --format hook" } ] }
+    ]
+  }
+}

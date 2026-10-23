@@ -1,0 +1,713 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #1d2330;
+  --muted: #6b7382;
+  --line: #e2e5ea;
+  --accent: #2f6fed;
+  --accent-ink: #ffffff;
+  --unread: #fff8e6;
+  --danger: #c23b3b;
+  --ok: #2b8a4b;
+  /* The page's text takes its size and its fonts from what shows it, so that in VS Code's panel
+     it reads as the workbench around it, and its code as the editor. VS Code puts the
+     workbench's font (--vscode-font-size, 13 px by default, and --vscode-font-family) and the
+     editor's (--vscode-editor-font-size, --vscode-editor-font-family) on the root element of a
+     webview's document; a browser puts none there, and the page keeps its own fonts at 14 px.
+     The root's size is the base. Every other size of text is a fraction of it, in rem, written
+     as the pixels it comes to beside a 14 px base, over 14 (calc(12rem / 14) is 12 px in a
+     browser and about 11 px in VS Code), and a line's height is a fraction of its text's size,
+     in em, written the same way (a lozenge's calc(16em / 11) is 16 px beside its 11 px text),
+     so that headings, pills, buttons, lozenges and metadata keep their proportions to the text.
+     The lines of code a highlight shows take the editor's size too; ids, paths and the rest in
+     monospace take the editor's font at the page's sizes. Spacing, widths and borders stay in
+     pixels. */
+  --font: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif);
+  --mono: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  --code-size: var(--vscode-editor-font-size, calc(12rem / 14));
+  font-size: var(--vscode-font-size, 14px);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --panel: #1c2027;
+    --ink: #e6e8ec;
+    --muted: #9aa3b2;
+    --line: #2b313b;
+    --accent: #5b8cff;
+    --unread: #2a2717;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { font: 1rem/1.45 var(--font); color: var(--ink); background: var(--bg); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h2, h3, h4 { margin: 0; font-weight: 600; }
+h4 { font-size: calc(12rem / 14); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
+p { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.boot-error { max-width: 560px; margin: 15vh auto; padding: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.boot-error h1 { margin: 0 0 8px; font-size: calc(20rem / 14); }
+
+.shell { display: flex; flex-direction: column; height: 100%; }
+/* The header wraps rather than widening the page: on a viewport too narrow for every piece (the
+   pane at 1024 px, once the nav had six links, and more widths since the scope joined the
+   project), the pickers and the connection state take a second line. The voice picker is capped,
+   since a voice's name can be long. */
+.topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; row-gap: 6px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: baseline; gap: 8px; }
+/* The name, and before it the project's mark, which goes wherever fwd shows itself
+   (docs/DECISIONS.md, D102, "The project's mark is the blue centaur with a forward arrow"): half
+   as tall again as the name's text, and on the name's line however narrow the header. mark.png is
+   beside this stylesheet, where index.html has trunk copy it; assets/logo/derive.py makes it from
+   the mark's rendering. */
+.brand .mark { font-weight: 700; font-size: calc(16rem / 14); color: var(--accent); white-space: nowrap; }
+.brand .mark::before { content: ""; display: inline-block; width: 1.5em; height: 1.5em; margin-right: 6px; vertical-align: middle; background: url(mark.png) center / contain no-repeat; }
+.brand .ws { color: var(--muted); }
+.brand select.project { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+/* The scope the Questions, Tasks, Decisions and Graph pages list by (scope_filter.rs), right after
+   the project. On a page that lists nothing by scope it is hidden but keeps its place, and its
+   choices read alike on every page, so the nav beside it does not move from page to page; a long
+   scope name is cut short in the closed select. */
+.topbar-scope { display: flex; min-width: 0; }
+.topbar-scope.elsewhere { visibility: hidden; }
+.topbar-scope .scope-filter select { max-width: 16em; }
+.nav { display: flex; align-items: center; gap: 4px; }
+.navlink { padding: 4px 10px; border-radius: 6px; color: var(--ink); }
+.navlink:hover { background: var(--bg); text-decoration: none; }
+.navlink.active { background: var(--accent); color: var(--accent-ink); }
+.badge { background: var(--danger); color: white; border-radius: 10px; padding: 0 7px; font-size: calc(11rem / 14); font-weight: 600; margin-left: -4px; margin-right: 6px; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+.acting { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.acting select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); max-width: 11em; }
+.conn { font-size: calc(11rem / 14); color: var(--muted); padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); }
+.conn-connected { color: var(--ok); border-color: var(--ok); }
+.conn-error, .conn-closed { color: var(--danger); border-color: var(--danger); }
+
+.main { flex: 1; min-height: 0; overflow: auto; }
+.page { padding: 16px 20px; }
+.page-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+.page-head h2 { font-size: calc(18rem / 14); margin-right: 6px; }
+.toggle { color: var(--muted); display: flex; align-items: center; gap: 4px; }
+.search { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); min-width: 220px; }
+.empty, .muted { color: var(--muted); }
+.error { color: var(--danger); }
+.mono { font-family: var(--mono); font-size: calc(12rem / 14); }
+
+.btn { font: inherit; font-size: calc(13rem / 14); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.subtle { border-color: transparent; color: var(--muted); }
+.btn.tiny { font-size: calc(11rem / 14); padding: 1px 6px; }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+/* Start, "in" and the picker of the active scopes for a task worked in none (claim.rs), kept on
+   one line so that they read as one phrase. */
+.start-in { display: inline-flex; gap: 6px; align-items: center; }
+.start-in select { max-width: 14em; }
+
+.pill { display: inline-block; font-size: calc(11rem / 14); padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.status-open { color: var(--accent); border-color: var(--accent); }
+.pill.status-in_progress { color: #b26a00; border-color: #b26a00; }
+.pill.status-in_review { color: #7b3fbf; border-color: #7b3fbf; }
+.pill.status-done { color: var(--ok); border-color: var(--ok); }
+.pill.status-proposed { border-style: dashed; }
+.pill.status-cancelled, .pill.status-rejected { text-decoration: line-through; }
+.pill.hold { color: var(--danger); border-color: var(--danger); }
+.pill.scope-active { color: var(--ok); border-color: var(--ok); }
+
+/* The lists of tasks, decisions and scopes: one line each, a click opens what it names. */
+table.list { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+table.list th { text-align: left; font-size: calc(11rem / 14); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line); }
+table.list td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.list tr.row { cursor: pointer; }
+table.list tr.row:hover { background: var(--bg); }
+table.list tr.selected { background: var(--unread); }
+table.list td.title { font-weight: 500; width: 42%; }
+table.list .copy-id { white-space: nowrap; }
+.ready { font-size: calc(12rem / 14); }
+.ready.ready, .ready-yes { color: var(--ok); }
+.ready.not-ready { color: var(--muted); }
+.ready.unknown { color: var(--danger); }
+
+.split { display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; }
+.split.with-detail { grid-template-columns: minmax(0, 1fr) minmax(380px, 560px); }
+.split > .page { min-width: 0; overflow: auto; }
+.detail-pane { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 16px 20px; }
+.detail-head h3 { font-size: calc(17rem / 14); margin-bottom: 6px; }
+.pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+.prose { margin: 14px 0; }
+.note-box { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+.note-box input { flex: 1; font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+ul.reasons { margin: 0; padding-left: 18px; }
+.rel-label { color: var(--muted); }
+
+.notif { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; }
+.notif.unread { background: var(--unread); }
+/* An inbox card's head: a line per notification, newest first, saying why it is in this inbox. */
+ul.why-lines { list-style: none; margin: 0 0 2px; padding: 0; }
+li.why-line { display: flex; align-items: baseline; gap: 10px; margin: 1px 0; }
+li.why-line .sentence { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+li.why-line.unread .sentence { font-weight: 600; }
+li.why-line .meta { margin-left: auto; color: var(--muted); font-size: calc(12rem / 14); white-space: nowrap; }
+/* A batch's items beneath its line (notification_card.rs, `lines`), newest last: a step's lozenge
+   with the comments on its highlight beside it, or a comment on its own. */
+li.why-batch { margin: 2px 0 6px; }
+ul.batch-items { list-style: none; margin: 0; padding: 0 0 0 10px; border-left: 2px solid var(--line); }
+ul.batch-items > li { margin: 2px 0; overflow-wrap: anywhere; }
+ul.batch-items > li > .list-item { margin-left: 4px; }
+.msg { margin: 8px 0 4px; padding-left: 10px; border-left: 3px solid var(--line); }
+.msg.reply { margin-left: 24px; }
+.msg.resolved { opacity: .7; }
+.msg .author { font-weight: 600; margin-right: 8px; }
+.msg .meta { color: var(--muted); font-size: calc(12rem / 14); }
+.msg .content { margin: 2px 0 4px; }
+.thread { margin-bottom: 10px; }
+.reply-box { margin-top: 8px; }
+.reply-box textarea, .ask-box textarea { width: 100%; min-height: 64px; font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); resize: vertical; }
+.reply-box .keys { color: var(--muted); font-size: calc(11rem / 14); }
+/* The mention search beneath a message box (mentions.rs): the principals whose name starts with
+   what follows an `@`, each with the scopes its work is in beside a name two or more share. */
+.mention-list { list-style: none; margin: 4px 0 0; padding: 3px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); max-width: 100%; }
+.mention-offer { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; padding: 3px 6px; border-radius: 4px; cursor: pointer; }
+.mention-offer.active, .mention-offer:hover { background: var(--bg); box-shadow: inset 2px 0 0 var(--accent); }
+.mention-offer .author { font-weight: 600; }
+/* Above the dormant agents, the last offers: no write for twelve hours (D123). */
+.mention-heading { padding: 4px 6px 2px; margin-top: 3px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.85em; }
+
+/* The Inbox and Questions pages: the selected card and the Ask box. */
+.notif.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.notif:focus { outline: none; }
+.addressee { font-weight: 500; }
+.ask-box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 18px; }
+.ask-waits { color: var(--muted); font-size: calc(13rem / 14); margin: 8px 0 0; }
+.field { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.field select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+/* The scope filter (scope_filter.rs) is never wider than its page: a long scope name is cut short
+   in the closed select, and the list it opens is whole. */
+.field.scope-filter { min-width: 0; max-width: 100%; }
+.field.scope-filter select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+
+/* The Inbox's sections, stacked one above another, each opening and closing on its own (D137;
+   accordion.rs): Waiting on you, each of its groups as a box of its own, and the conversations. A
+   section's heading is one stop of the page's selection, outlined while selected. */
+.inbox-region { margin: 0 0 18px; }
+.section-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; user-select: none; border-radius: 6px; }
+.section-head:focus { outline: none; }
+.section-head.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+.section-head .caret { line-height: 20px; }
+.region-head { padding: 4px 6px; margin: 0 0 6px; }
+.region-head h3 { font-size: calc(16rem / 14); }
+.region-head .toggle { cursor: default; }
+.region-note { color: var(--muted); font-size: calc(12rem / 14); margin: -2px 0 10px 26px; }
+.inbox-region > .empty { margin-left: 26px; }
+.pill.new { color: #7a4500; border-color: #e0c68a; background: var(--unread); }
+.pill.ready-pill { color: var(--ok); border-color: var(--ok); }
+@media (prefers-color-scheme: dark) {
+  .pill.new { color: #e8c27a; border-color: #6b5a2c; }
+}
+.request-group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; overflow: hidden; }
+.group-head { padding: 8px 12px; background: var(--bg); border-radius: 0; }
+.request-group > .group-head:not(.closed) { border-bottom: 1px solid var(--line); }
+.group-head h4 { font-size: calc(13rem / 14); text-transform: none; letter-spacing: 0; color: var(--ink); margin: 0; }
+.group-from { font-size: calc(12rem / 14); }
+.group-acts { margin-left: auto; display: flex; flex-wrap: wrap; gap: 2px; }
+.batch-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 4px 32px; font-size: calc(12rem / 14); color: var(--muted); }
+.batch-head b { color: var(--ink); font-weight: 600; }
+.group-more { padding: 6px 12px 8px 32px; border-top: 1px solid var(--line); }
+/* A row of Waiting on you (request_row.rs): what waits, who sent it and when, and its moves on its
+   right; new while any of its notifications is unread, outlined while selected, quieter once kept
+   after its move. */
+.request-row { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px 8px 12px; border-top: 1px solid var(--line); }
+.request-row:focus { outline: none; }
+.request-row.unread { background: var(--unread); }
+.request-row.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+.request-row.settled .request-title { color: var(--muted); }
+.request-row .caret { line-height: 20px; }
+.request-main { flex: 1; min-width: 0; }
+.request-title { line-height: 20px; overflow-wrap: anywhere; }
+.request-row.unread .request-title { font-weight: 600; }
+.request-title .who { font-weight: 600; margin-right: 2px; }
+/* A row's title leads to its subject's page, in the text's own colour: a column of rows is not a
+   column of links. */
+.request-title a { color: var(--ink); }
+.request-title a:hover { color: var(--accent); }
+.request-meta { font-size: calc(12rem / 14); color: var(--muted); margin-top: 2px; line-height: 18px; overflow-wrap: anywhere; }
+.request-quote { color: var(--ink); }
+.request-moves { flex: none; display: flex; align-items: center; gap: 6px; }
+.request-moves .btn:disabled { opacity: .45; cursor: not-allowed; }
+.xbtn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; padding: 0; font: inherit; font-size: calc(16rem / 14); line-height: 1; }
+.xbtn:hover { background: var(--bg); color: var(--ink); }
+.xbtn:disabled { opacity: .4; cursor: not-allowed; }
+.reason-box { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.reason-label { font-size: calc(12rem / 14); color: var(--muted); }
+.reason-field { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.reason-field input { flex: 1 1 300px; min-width: 0; font: inherit; padding: 5px 8px; border: 1px solid var(--accent); border-radius: 6px; color: var(--ink); background: var(--panel); }
+.reason-box .keys { color: var(--muted); font-size: calc(11rem / 14); }
+.request-reply { margin-top: 8px; }
+.request-beneath { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.request-beneath .prose { margin: 0 0 8px; }
+.request-beneath > .content { margin: 0 0 8px; }
+/* What joins a row (task w4g0qBJY): how many comments and how many are new, the newest one's first
+   line, the task a ruling's row shares itself with, and the box that marks that task done. */
+.request-comments.new { color: #7a4500; font-weight: 600; }
+.request-comment { font-size: calc(13rem / 14); margin-top: 4px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.request-comment .who { font-weight: 600; }
+.request-on { font-size: calc(12rem / 14); color: var(--muted); margin: 8px 0 2px; }
+.reason-box .check { display: inline-flex; align-items: center; gap: 6px; font-size: calc(13rem / 14); }
+@media (prefers-color-scheme: dark) {
+  .request-comments.new { color: #e8c27a; }
+}
+/* Settled before you looked, first among the conversations: a dashed box of one line per task, else
+   per sender, each opening onto its notifications, one line each. */
+.settled { background: var(--panel); border: 1px dashed var(--line); border-radius: 8px; padding: 6px 12px; margin: 0 0 12px; }
+.settled-head { padding: 2px 0; }
+.settled-head h4 { font-size: calc(13rem / 14); text-transform: none; letter-spacing: 0; color: var(--ink); margin: 0; }
+.fold-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; padding: 6px 4px 2px 20px; font-size: calc(13rem / 14); border-radius: 6px; cursor: default; }
+.fold-line:focus { outline: none; }
+.fold-line.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+.fold-words { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+ul.fold-items { list-style: none; margin: 2px 0 6px 38px; padding: 0 0 0 10px; border-left: 2px solid var(--line); }
+li.fold-item { margin: 3px 0; font-size: calc(13rem / 14); overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .request-row { flex-wrap: wrap; }
+  .request-moves { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .batch-head, .group-more { padding-left: 12px; }
+  .region-note, .inbox-region > .empty { margin-left: 6px; }
+}
+
+/* A card's rows: the entity it is about, and beneath each row the rows of what refers to it. */
+ul.thread-rows { list-style: none; margin: 0; padding-left: 0; }
+ul.thread-rows ul.thread-rows { padding-left: 18px; }
+ul.thread-rows[role=group]:not(:has(> li)) { display: none; }
+li.row { margin: 2px 0; }
+li.row:focus { outline: none; }
+li.row:focus > .row-line { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
+.row-line { display: flex; align-items: baseline; gap: 6px; }
+.row-line > .msg, .row-line > .task-ref, .row-line > .decision-ref, .row-line > .scope-ref { flex: 1; min-width: 0; }
+.caret { flex: none; width: 12px; text-align: center; color: var(--muted); cursor: pointer; user-select: none; }
+.caret:empty { cursor: default; }
+ul.thread-rows .msg { margin: 2px 0; padding-left: 0; border-left: 0; }
+ul.thread-rows[role=tree] > li.row > .row-line > .msg { margin: 8px 0 4px; padding-left: 10px; border-left: 3px solid var(--line); }
+.msg .row-actions { display: inline-flex; gap: 2px; }
+.task-ref { margin: 2px 0; }
+/* The task prose a review or a proposal card shows beneath the task's line. */
+.task-fields { margin: 2px 0 4px; }
+.task-fields .prose { margin: 4px 0; }
+li.more { margin: 2px 0 2px 18px; font-size: calc(12rem / 14); }
+/* A row that also shows elsewhere on the page: a small mark at its end, the words on hover. */
+.also-mark { flex: none; font: inherit; font-size: calc(11rem / 14); line-height: 1; color: var(--muted); background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .6; }
+.also-mark:hover, .also-mark:focus { color: var(--accent); opacity: 1; }
+ul.thread-rows .reply-box { margin: 4px 0 8px 18px; }
+ul.thread-rows[role=tree] > li.row > .reply-box { margin-left: 0; }
+/* A thread whose own row is left out (thread::rows_beneath: a task's panel, which names the task at
+   its top): its top rows keep the look of rows beneath a row, only not indented. */
+ul.thread-rows.rows-beneath > li.row > .row-line > .msg { margin: 2px 0; padding-left: 0; border-left: 0; }
+ul.thread-rows.rows-beneath > li.row > .reply-box { margin-left: 18px; }
+ul.thread-rows.rows-beneath > li.more { margin-left: 0; }
+/* A message's text edited in place (thread::edit_box) stands where the text shows, not indented. */
+.msg .reply-box.edit-box { margin: 4px 0; }
+
+.graph-pane { display: flex; flex-direction: column; min-height: 0; }
+.canvas { flex: 1; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-height: 60vh; }
+.canvas-inner { transform-origin: 0 0; display: inline-block; }
+.zoom { display: flex; align-items: center; gap: 2px; }
+.legend { display: flex; gap: 14px; color: var(--muted); font-size: calc(12rem / 14); margin-left: auto; }
+.legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.swatch { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--accent); }
+.swatch.edge-implied { border-top-style: dashed; }
+.swatch.band { width: 24px; height: 8px; border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 2px; background: var(--bg); }
+.swatch.ghost { width: 14px; height: 10px; border: 1px dashed var(--muted); }
+.swatch.stub { width: 14px; height: 10px; border: 1px solid var(--line); background: var(--bg); }
+.canvas > .empty { margin: 0; padding: 16px; }
+svg.dag { display: block; }
+svg.dag .edge { fill: none; stroke: var(--accent); stroke-width: 1.6; opacity: .8; }
+svg.dag .edge-proposed { stroke-dasharray: 6 4; opacity: .5; }
+/* A dependency that a chain of others already says, drawn only while one of its tasks is
+   selected (graph.rs), in dashes shorter than a proposed relation's. */
+svg.dag .edge-implied { stroke-dasharray: 3 3; }
+/* A selected task's chain of dependencies, heavier so that it can be followed through the rest,
+   which fades, a line's arrowhead with it; a proposed relation on the chain stays fainter than an
+   accepted one. */
+svg.dag .edge.lit { stroke-width: 2.2; opacity: 1; }
+svg.dag .edge-proposed.lit { opacity: .6; }
+svg.dag .edge.dim { opacity: .12; }
+svg.dag .node.dim { opacity: .28; }
+svg.dag .arrowhead { fill: var(--accent); }
+svg.dag .node { cursor: pointer; }
+svg.dag .node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+svg.dag .node:hover rect { stroke: var(--accent); }
+svg.dag .node.selected rect { stroke: var(--accent); stroke-width: 2.4; }
+svg.dag .node.status-open rect { stroke: var(--accent); }
+svg.dag .node.status-in_progress rect { stroke: #b26a00; }
+svg.dag .node.status-in_review rect { stroke: #7b3fbf; }
+svg.dag .node.status-done rect { stroke: var(--ok); opacity: .7; }
+svg.dag .node.ghost rect { stroke-dasharray: 5 3; opacity: .8; }
+/* The graph's drawing keeps its text in pixels: its boxes and where its text sits in them are
+   pixels too, and its titles are cut to fit a box at these sizes (graph.rs, layout.rs); the
+   drawing's zoom scales them all together. */
+svg.dag .node .title { font: 500 12.5px var(--font); fill: var(--ink); }
+svg.dag .node .sub { font: 11px var(--font); fill: var(--muted); }
+/* A stub: a task outside the scope filter joined to one inside it, muted so the scope's own tasks
+   stand out; it still shows the pointer over it and its selection. */
+svg.dag .node.stub rect { fill: var(--bg); stroke: var(--line); }
+svg.dag .node.stub .title { font-weight: 400; fill: var(--muted); }
+svg.dag .node.stub .sub { font-style: italic; }
+svg.dag .node.stub:hover rect { stroke: var(--accent); }
+svg.dag .node.stub.selected rect { stroke: var(--accent); stroke-width: 2.4; }
+svg.dag .count circle { fill: var(--accent); }
+svg.dag .count text { font: 600 10px var(--font); fill: var(--accent-ink); }
+/* A parent task's band: the strip that holds its subtasks, labelled at the left with the parent's
+   title, status and how many of its subtasks are done, a click on the label selecting it (graph.rs).
+   A band nested in another takes the canvas's colour, so that the two read apart; a proposed
+   parent's band is outlined in dashes, as its box would be. */
+svg.dag .band { fill: var(--bg); stroke: var(--line); stroke-width: 1; }
+svg.dag .band.nested { fill: var(--panel); }
+svg.dag .band.ghost { stroke-dasharray: 5 3; }
+svg.dag .band.selected { stroke: var(--accent); stroke-width: 2; }
+svg.dag .band-label { cursor: pointer; }
+svg.dag .band-label .title { font: 600 12.5px var(--font); fill: var(--ink); }
+svg.dag .band-label .sub { font: 11px var(--font); fill: var(--muted); }
+svg.dag .band-label:hover .title, svg.dag .band-label.selected .title { fill: var(--accent); }
+svg.dag .band-label.outside .title { font-weight: 400; fill: var(--muted); }
+/* A closed parent, which "show closed" may leave out while it still bands its open subtasks:
+   struck through, as a done part of a tree is on a lozenge. */
+svg.dag .band-label.closed .title { fill: var(--muted); text-decoration: line-through; }
+svg.dag .band-label.dim { opacity: .28; }
+/* Beside a task, above its box, the parents whose band does not hold it. */
+svg.dag .node .also { font: italic 10px var(--font); fill: var(--muted); }
+
+@media (max-width: 900px) {
+  .split.with-detail { grid-template-columns: 1fr; }
+  .detail-pane { border-left: 0; border-top: 1px solid var(--line); }
+}
+/* The task panel (panel.rs). At every width the button in its corner lets it fill the page
+   beneath the header, the list hidden, until the button or Escape gives the list its place back:
+   beneath its list (below 900 px: the VS Code panel, a phone) the panel otherwise gets only part
+   of the view's height. Wider than 900 px, beside its list, its left edge also lies over its
+   border and moves when dragged, the panel staying between 320 px and what leaves the list 240 px
+   (560 px until someone drags it; panel.rs keeps a drag within the same bounds); beneath its list
+   it has no edge. */
+.panel-edge { display: none; }
+@media not all and (max-width: 900px) {
+  .split.resizable.with-detail { grid-template-columns: minmax(0, 1fr) clamp(320px, var(--panel-width, 560px), calc(100% - 240px)); }
+  .split.resizable > .panel-edge, .split.resizable > .detail-pane { grid-area: 1 / 2; }
+  .panel-edge { display: block; justify-self: start; z-index: 1; width: 9px; margin-left: -5px; cursor: col-resize; touch-action: none; }
+  .panel-edge:hover, .split.dragging > .panel-edge { background: linear-gradient(var(--accent), var(--accent)) center / 3px 100% no-repeat; }
+  .split.dragging { cursor: col-resize; user-select: none; -webkit-user-select: none; }
+}
+.full-screen-toggle { float: right; margin: 0 0 6px 10px; }
+/* A full-screen split keeps its `with-detail` class, and the wide rule giving that class two
+   columns is as specific as the next rule, which gives a full-screen split one: of the two, the
+   later wins, so these rules come after the wide ones. */
+.split.resizable.full-screen { grid-template-columns: minmax(0, 1fr); }
+.split.resizable.full-screen > .list-pane, .split.resizable.full-screen > .panel-edge { display: none; }
+.split.resizable.full-screen > .detail-pane { grid-column: 1; border-left: 0; border-top: 0; }
+
+/* Decisions and scopes as rows; a short id that copies the whole. */
+.decision-ref, .scope-ref { margin: 2px 0; }
+.decision-number { font-weight: 600; font-family: var(--mono); }
+.decision-ref .meta, .scope-ref .meta { color: var(--muted); font-size: calc(12rem / 14); margin-left: 6px; }
+.decision-ref .content { margin: 2px 0 4px; color: var(--muted); }
+.decision-full { margin: 2px 0 4px; }
+.decision-full > summary { cursor: pointer; color: var(--muted); }
+.decision-full[open] > summary { color: var(--ink); }
+.decision-full .prose { margin: 4px 0; }
+.decision-full .prose p { white-space: pre-wrap; }
+/* A decision's panel shows the whole record above its row, so the row's folded copy of it goes. */
+.decision-detail .decision-full { display: none; }
+.scope-name { font-weight: 600; }
+.pill.decision-accepted { color: var(--ok); border-color: var(--ok); }
+.pill.decision-proposed { border-style: dashed; }
+.pill.decision-rejected, .pill.decision-superseded, .pill.decision-repealed { text-decoration: line-through; }
+.pill.area { color: var(--ink); }
+/* "project-wide", where a ruling attached to no scope names the scope it governs: kept on one line
+   in a narrow list's column. */
+.governs { white-space: nowrap; }
+/* Lozenges: every entity joined to a row's entity by a relation, on the row's own line, a group
+   per kind and direction (lozenges.rs). Each kind keeps its own look: rulings with their number
+   in monospace, a fallen one in the warning colour; dependencies in their task's state; subtasks
+   behind a quiet glyph; lineage muted; association quietest; the scope in green; code in
+   monospace. A group past its cap ends in "+N more", and a counted group is one lozenge; both
+   show the rest in place. Each row puts a space before its strip, which parts the first group
+   from what precedes it on the line at every width: below 640 px a group's margin is on its
+   right instead. */
+.loz-strip { display: inline; }
+.loz-group { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 3px; margin-left: 6px; max-width: 100%; }
+.loz-label { font-size: calc(11rem / 14); color: var(--muted); white-space: nowrap; }
+.loz-label.warn { color: var(--danger); }
+.loz { display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%; min-width: 0; font: inherit; font-size: calc(11rem / 14); line-height: calc(16em / 11); padding: 0 7px; border-radius: 10px; border: 1px solid var(--line); background: none; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+a.loz:hover { text-decoration: none; border-color: var(--accent); }
+.loz:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.loz-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.loz-num { font-family: var(--mono); font-weight: 600; }
+.loz-who { font-weight: 600; }
+.loz-glyph { color: var(--muted); }
+.loz-mark { font-size: calc(10rem / 14); font-style: italic; color: var(--muted); }
+/* The version of a file a message names, after its path: the short commit, index or on disk. */
+.loz-version { font-size: calc(10rem / 14); color: var(--muted); }
+.loz.proposed { border-style: dashed; }
+.loz.warn { color: var(--danger); border-color: var(--danger); }
+.loz.done { color: var(--muted); text-decoration: line-through; }
+.loz.muted { color: var(--muted); }
+.loz.quiet { color: var(--muted); border-color: transparent; border-style: dotted; }
+.loz.scope { color: var(--ok); border-color: var(--ok); }
+.loz.code { color: var(--ink); font-family: var(--mono); }
+.loz.count, .loz.more { color: var(--muted); border-style: dashed; }
+.loz.count:hover, .loz.more:hover { color: var(--accent); border-color: var(--accent); }
+.loz.more.warn { color: var(--danger); border-color: var(--danger); }
+.loz.count[aria-expanded=true] { border-style: solid; }
+.loz.count.quiet { border-color: transparent; }
+/* A panel's lozenges, under their heading: one group a line. */
+.loz-section.empty { display: none; }
+.loz-section .loz-strip { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.loz-section .loz-group { margin-left: 0; }
+/* The preview of the lozenge the pointer rests on or the keyboard is on (on a touch screen, the
+   one tapped once): beside it, inside the viewport. */
+.loz-preview { position: fixed; z-index: 20; max-width: min(360px, calc(100vw - 16px)); padding: 8px 10px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, .18); font-size: calc(13rem / 14); overflow-wrap: anywhere; }
+.loz-preview[hidden] { display: none; }
+.loz-preview .pills { margin: 4px 0; }
+.loz-preview p { margin: 4px 0 0; }
+.loz-preview .loz-open { display: inline-block; margin-top: 6px; }
+.loz-preview-head { font-size: calc(13rem / 14); }
+.clamp { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; white-space: normal; }
+.clamp-2 { -webkit-line-clamp: 2; line-clamp: 2; }
+.clamp-3 { -webkit-line-clamp: 3; line-clamp: 3; }
+.clamp-6 { -webkit-line-clamp: 6; line-clamp: 6; }
+/* A finger needs a larger target than a pointer. */
+@media (hover: none) {
+  .loz { line-height: calc(20em / 11); padding: 0 9px; }
+  .panel-edge { width: 25px; margin-left: -13px; }
+}
+.copy-id { font: inherit; font-family: var(--mono); font-size: calc(11rem / 14); color: var(--muted); background: none; border: 1px dashed var(--line); border-radius: 6px; padding: 0 5px; cursor: copy; }
+.copy-id:hover { color: var(--accent); border-color: var(--accent); }
+.copy-id .copied { margin-left: 4px; color: var(--ok); font-family: var(--font); }
+.copy-id .copy-failed { margin-left: 4px; color: var(--danger); font-family: var(--font); }
+.note-box select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); max-width: 40%; }
+
+/* A lozenge standing alone (modes.rs, the lozenge mode): a reference in a message's text, the
+   assignee beside a task's scope. It sits in the line of text around it. A person's is the
+   handle in the ink colour, an agent's role muted beside it. */
+.loz.alone { vertical-align: baseline; margin: 0 1px; }
+.content .loz.alone, .message-first .loz.alone { white-space: nowrap; }
+.loz.person { color: var(--ink); }
+.loz.person .loz-mark { font-style: normal; }
+/* A list item (the list item mode): one line, whatever the kind. */
+.list-item { display: inline; overflow-wrap: anywhere; }
+.list-item .pill { vertical-align: 1px; }
+/* A highlight's first line ends its name, so it is kept whole: it moves to the next line rather
+   than breaking, and where it is wider than the line it is cut, with an ellipsis. */
+.anchor-item code.anchor-first { font-family: var(--mono); font-size: var(--code-size); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; white-space: pre; display: inline-block; max-width: 100%; box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.anchor-item .anchor-path { color: var(--ink); }
+.pill.basis { font-family: var(--mono); }
+.step-progress { font-size: calc(11rem / 14); color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 0 6px; white-space: nowrap; }
+/* A highlight's lines (anchor_row.rs): each with its number, never wider than the page; its row
+   caps them at twenty lines and scrolls, its page shows them all above and leaves them out of
+   its row. */
+pre.anchor-text { margin: 6px 0; padding: 6px 0; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: var(--code-size)/1.5 var(--mono); overflow: auto; white-space: pre; }
+pre.anchor-text .line { display: block; padding-right: 10px; }
+pre.anchor-text .ln { display: inline-block; min-width: 3.5em; padding: 0 10px 0 6px; text-align: right; color: var(--muted); user-select: none; -webkit-user-select: none; }
+.anchor-row pre.anchor-text { max-height: 31em; }
+.anchor-page .anchor-row pre.anchor-text, .anchor-page .anchor-row .anchor-text-none { display: none; }
+pre.anchor-text.preview-text { padding: 4px 6px; max-height: 7em; }
+.anchor-row { margin: 2px 0; }
+.anchor-row .anchor-caption { font-size: calc(12rem / 14); color: var(--muted); }
+.anchor-row .anchor-caption:hover { color: var(--accent); }
+.row-line > .anchor-row { flex: 1; min-width: 0; }
+.anchor-page > .detail { max-width: 1000px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; }
+.anchor-page .detail-head h3 { overflow-wrap: anywhere; }
+/* A task's steps (steps.rs): a check box and the step's list item on each line, the expander
+   before them showing the step in place beneath its line. */
+.steps.empty { display: none; }
+.steps h4 .step-progress { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 4px; }
+ul.step-list { list-style: none; margin: 0; padding: 0; }
+li.step { margin: 1px 0; border-radius: 4px; }
+li.step:focus { outline: none; }
+li.step:focus > .step-line { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 4px; }
+.step-line { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
+.step-line .caret { background: none; border: 0; font: inherit; padding: 0; }
+.step-line input[type=checkbox] { flex: none; margin: 0; position: relative; top: 2px; }
+.step-body { flex: 1; min-width: 0; cursor: pointer; }
+li.step.checked > .step-line .step-body { opacity: .6; }
+/* The state of a highlight's first thread, beside the box that moves it with the step. */
+.step-line .thread-state { flex: none; }
+.pill.thread-state.resolved { color: var(--ok); border-color: var(--ok); }
+.step-embedded { margin: 2px 0 8px 36px; padding-left: 10px; border-left: 2px solid var(--line); }
+/* Taking a step off its checklist (steps.rs), for the task's creator and its assignee: the control
+   at the end of the line, and beneath the line the box for the reason, its buttons, the choice to
+   retire a highlight with an open thread, and a refusal. */
+.step-line .step-remove-open { flex: none; }
+.step-remove { margin: 2px 0 8px 36px; }
+.step-remove .note-box { margin: 2px 0; flex-wrap: wrap; }
+.step-remove .note-box input { flex: 1 1 14em; min-width: 0; }
+.step-remove .note-box .btn { flex: none; white-space: nowrap; }
+.step-remove .retire { display: flex; align-items: baseline; gap: 6px; font-size: calc(12rem / 14); color: var(--muted); }
+.step-remove .retire input { flex: none; margin: 0; position: relative; top: 2px; }
+.step-remove .error { margin: 2px 0; }
+/* The highlights a message names, beneath its text (attachments.rs): each on one line, as a step
+   shows beneath its task, with the expander before it showing the highlight in place. What shows
+   there is a thread of its own, so it takes no indent from the rows around it; on another
+   highlight's page it keeps the lines that page leaves out of its own highlight's row. */
+ul.attachments { list-style: none; margin: 2px 0 4px; padding: 0; }
+ul.attachments:not(:has(> li)) { display: none; }
+li.attached { margin: 1px 0; }
+.attached-line { display: flex; align-items: baseline; gap: 6px; }
+.attached-line .caret { background: none; border: 0; font: inherit; padding: 0; }
+a.attached-body { flex: 1; min-width: 0; color: inherit; text-decoration: none; border-radius: 4px; }
+a.attached-body:hover .anchor-path { color: var(--accent); text-decoration: underline; }
+a.attached-body:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.attached-embedded { margin: 2px 0 8px 18px; padding-left: 10px; border-left: 2px solid var(--line); }
+.attached-embedded > ul.thread-rows[role=tree] { padding-left: 0; }
+.anchor-page .attached-embedded .anchor-row pre.anchor-text { display: block; }
+.anchor-page .attached-embedded .anchor-row .anchor-text-none { display: block; }
+/* Where a task is worked and who is assigned, side by side on its panel. */
+.assignment { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; margin: 6px 0 2px; }
+.assignment[hidden] { display: none; }
+.assignment .field-label { font-size: calc(11rem / 14); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.assignment .field-label ~ .field-label { margin-left: 8px; }
+/* A task's labels (labels.rs): small pills after its title wherever the task is drawn, filled
+   rather than outlined, so a label never reads as a status. On the panel, beneath where the task is
+   worked, each pill has a button that takes it off, and a box beside them adds one. */
+.pill.label { color: var(--ink); background: var(--bg); font-weight: 400; }
+.task-labels { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 6px 0 2px; }
+.task-labels[hidden] { display: none; }
+.task-labels .field-label { font-size: calc(11rem / 14); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.task-labels .pill.label { padding-right: 3px; }
+.unlabel { font: inherit; line-height: 1; margin-left: 2px; padding: 0 2px; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.unlabel:hover { color: var(--danger); }
+.unlabel:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.task-labels input[type=text], .assignment input[type=text] { font: inherit; font-size: calc(12rem / 14); width: 14em; min-width: 0; padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.label-filter select { max-width: 12em; }
+/* The scope the Tasks list is filtered to, above the list. */
+.scope-head { margin: -4px 0 10px; }
+.scope-full { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; }
+.scope-full p { flex: 0 0 100%; margin: 2px 0 0; }
+.scope-edit { font-size: calc(12rem / 14); }
+ul.plain-list { list-style: none; margin: 0; padding: 0; }
+/* The forms in a panel (a scope's, scope_panel.rs): a name above each field, each field as wide
+   as the panel, and the buttons with what they did beneath. */
+.panel-close { float: right; margin: 0 0 6px 10px; }
+.form { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.form[hidden] { display: none; }
+.form-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.form-field .field-name { font-size: calc(11rem / 14); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.form-field input[type=text], .form-field textarea, .form-field select { font: inherit; width: 100%; min-width: 0; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.form-field textarea { min-height: 64px; resize: vertical; }
+.form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.form-actions .saved { color: var(--ok); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn:disabled:hover { border-color: var(--line); }
+/* The form for a new task (new_task.rs): the priority, the status and review side by side, and
+   each picker's chosen lozenges above its list and its box for the start of an id. */
+.form-field .hint { font-size: calc(12rem / 14); color: var(--muted); }
+.form-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px 22px; }
+fieldset.form-field { border: 0; margin: 0; padding: 0; min-width: 0; }
+fieldset.form-field > legend { padding: 0; margin-bottom: 3px; }
+fieldset.choice label { display: inline-flex; align-items: center; gap: 4px; margin: 4px 12px 0 0; color: var(--ink); }
+.picked-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.picked-list:empty { display: none; }
+.picked { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; min-width: 0; }
+.pick-row { display: flex; gap: 6px; }
+.pick-row > select { flex: 3 1 0; }
+.pick-row > input[type=text] { flex: 2 1 0; }
+/* The Scopes page's Edit control, at the end of each line, which leaves its names less room. */
+table.list td.row-edit { width: 1%; white-space: nowrap; text-align: right; }
+table.list.scopes td.title { width: 30%; }
+/* The Decisions list's lines name the scope each ruling governs too, so its titles give up room. */
+table.list.decisions td.title { width: 34%; }
+
+/* Narrow: the VS Code panel (about 560 px wide) and a phone. Below 640 px the header takes three
+   lines, the brand, the project and the scope on the first, the condensed `as` and `voice` pickers
+   and the connection state on the second, and the nav on the third, which scrolls sideways rather
+   than clipping (two lines until the scope joined the first on 2026-09-29, when the pickers no
+   longer fitted beside it); the lists' rows (tasks, decisions, scopes) stack with each field
+   labelled; pages, cards and threads keep a 12 px gutter; long ids and paths wrap instead of
+   widening the page. (Below 900 px the task and decision panels already go beneath their lists,
+   the Graph's beneath its drawing, and each panel's button lets it fill the page.) */
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; gap: 6px 10px; padding: 6px 12px; }
+  .brand { order: 1; min-width: 0; }
+  .brand select.project, .brand .ws { max-width: 42vw; }
+  .brand .ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar-scope .scope-filter select { max-width: 34vw; padding: 2px 4px; }
+  .topbar-right { order: 2; gap: 8px; min-width: 0; }
+  .acting { gap: 4px; }
+  .acting select { max-width: 6.5em; padding: 2px 4px; }
+  .nav { order: 3; flex: 0 0 100%; flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; }
+  .navlink, .badge { flex: none; }
+  .main { overflow-x: hidden; }
+  .page, .detail-pane { padding: 12px; }
+  .boot-error { margin: 12px; }
+  .page-head { gap: 8px; }
+  .search { min-width: 0; flex: 1 1 100%; }
+  table.list, table.list tbody, table.list tr, table.list td { display: block; width: 100%; }
+  table.list thead { display: none; }
+  table.list tr { padding: 6px 12px; border-bottom: 1px solid var(--line); }
+  table.list td { padding: 1px 0; border: 0; }
+  table.list td.title, table.list.decisions td.title { width: auto; }
+  table.list td:empty { display: none; }
+  table.list td[data-label]::before { content: attr(data-label) " "; color: var(--muted); font-size: calc(11rem / 14); text-transform: uppercase; letter-spacing: .04em; }
+  .notif { padding: 8px 12px; }
+  ul.thread-rows ul.thread-rows { padding-left: 10px; }
+  li.more { margin-left: 10px; }
+  .row-line { flex-wrap: wrap; }
+  .loz-group { margin-left: 0; margin-right: 6px; }
+  .loz { max-width: 15em; }
+  li.why-line { flex-wrap: wrap; row-gap: 0; }
+  .note-box { flex-wrap: wrap; }
+  .note-box input { flex: 1 1 100%; }
+  .note-box select { max-width: 100%; }
+  .legend { flex-wrap: wrap; margin-left: 0; }
+  .step-embedded { margin-left: 12px; padding-left: 8px; }
+  .step-remove { margin-left: 12px; }
+  .attached-embedded { margin-left: 6px; padding-left: 8px; }
+  .anchor-page > .detail { padding: 10px 12px; }
+  .content .loz.alone, .message-first .loz.alone { white-space: normal; }
+  .pick-row { flex-wrap: wrap; }
+  .pick-row > select, .pick-row > input[type=text] { flex: 1 1 100%; }
+}
+/* A phone held upright: below 440 px the project narrows further, so that the brand, the project
+   and the scope still share the header's first line. Until the pickers took a line of their own
+   (2026-09-29), they shrank to a stub beside their label word here and the connection state to a
+   dot, so that the first line held them too. */
+@media (max-width: 440px) {
+  .brand select.project, .brand .ws { max-width: 34vw; }
+}
+.decision-ref, .scope-ref, .task-ref, .msg, .prose, .mono { overflow-wrap: anywhere; }
+
+/* The task panel in the VS Code webview (task cD1PloSQ): Back and the full-screen toggle share the
+   panel's first line, Back at its start and the toggle at its end, above the task. */
+.panel-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.panel-bar .full-screen-toggle { float: none; margin: 0; }
+
+/* The Graph page's task panel and the Decisions page's decision panel (task CyqBDRUz) take the
+   task panel's edge and Full screen button from the rules above (panel.rs). On the Graph page the
+   drawing, with its controls, stands where the other pages have their list, and a panel filling
+   the page hides it as it hides a list. */
+.split.resizable.full-screen > .graph-pane { display: none; }
+
+/* The bar above the header once the daemon has restarted on a newer build than the page came
+   from (task pNkDAdfq, session.rs's follow_restarts): what happened, and the button that loads
+   the new page, or in the VS Code webview reloads the window. */
+.newer-build { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 16px; background: var(--unread); border-bottom: 1px solid var(--line); font-size: calc(13rem / 14); }
+.newer-build-text { flex: 1 1 20em; min-width: 0; }
+@media (max-width: 640px) {
+  .newer-build { padding: 6px 12px; }
+}
+
+/* The Inbox and Questions pages show one principal's at a time (task jPQy9aQC): the selector beside
+   the heading names whose (whose.rs), cut short rather than widening the page; while it names
+   another principal than the one the page acts as, a note beneath the heading says the page only
+   reads theirs. The Questions page groups its cards by priority, each group under a heading with
+   how many cards it holds. */
+.field.whose { min-width: 0; max-width: 100%; }
+.field.whose select { min-width: 0; max-width: 12em; text-overflow: ellipsis; }
+.reading-note { color: var(--muted); font-size: calc(13rem / 14); margin: -4px 0 12px; padding: 2px 0 2px 10px; border-left: 3px solid var(--accent); }
+.priority-group { margin-bottom: 14px; }
+.priority-head { display: flex; align-items: baseline; gap: 6px; margin: 0 0 6px; font-size: calc(12rem / 14); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.priority-head .count { font-weight: 600; color: var(--ink); letter-spacing: 0; }
+@media (max-width: 640px) {
+  .field.whose select { max-width: 9em; }
+  .reading-note { margin-top: 0; }
+}

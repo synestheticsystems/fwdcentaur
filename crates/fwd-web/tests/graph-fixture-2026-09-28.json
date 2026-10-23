@@ -1,0 +1,349 @@
+{
+ "note": "Fwd Centaur, 2026-09-28: every task not closed, and the dependency and subtask edges among them (from -> to as the relation is stored: from depends_on to, from subtask_of to).",
+ "tasks": [
+  {
+   "id": "4uEzhMm4RLQbl3za7M-mLBU-0M_3LVxyXHg8nasM4qE",
+   "title": "T20: Robust anchoring: deterministic identity, staged/unstaged spans, following edits (proposal, then implementation)",
+   "status": "open",
+   "priority": 1
+  },
+  {
+   "id": "8z_sQwsRw9S2cm70wiGHM4xyhi7KieIIlVstu0yQ1Sk",
+   "title": "Show active highlights in every file and diff view, expand a highlight's threads on focus, navigate from a step to the diff or the file, and attach editor comments as steps of the open task",
+   "status": "open",
+   "priority": 1
+  },
+  {
+   "id": "Emjz0bRycGqLVU3kBGOBA_uhQNWCJhdh_XnomgUVdq4",
+   "title": "T17: Capture GitHub identity at fwd init; Principal per person and agent",
+   "status": "open",
+   "priority": 2
+  },
+  {
+   "id": "77BNajXudjf1AYpnSs9cKBU3R6pBBZVzn4HYnt7EUJo",
+   "title": "T19: Ankurah findings from the fwdcentaur proof of concept (report or fix upstream)",
+   "status": "open",
+   "priority": 2
+  },
+  {
+   "id": "XMjpJabzsbBnHWQAKd7e9sXDQlrk8nQ01-BWFibfeAM",
+   "title": "Make highlights follow code through staging, commits and later edits, resizing deterministically when parts are deleted (the version tracker and editor sessions, milestones M4 and M5)",
+   "status": "open",
+   "priority": 2
+  },
+  {
+   "id": "hKb-wkk_LEfZkHlL-TH4u5rAjXBYH9TwgVCRH1inbaI",
+   "title": "T10: Replace the flatfile graph with fwd",
+   "status": "open",
+   "priority": 3
+  },
+  {
+   "id": "vbiVzoAlulXIWsSx4RFPHIZrHUgy9_c_IDwLM_AdATs",
+   "title": "T11: Choose and apply licenses",
+   "status": "open",
+   "priority": 3
+  },
+  {
+   "id": "FrvC_0VMMbNADejh8zaMh2e7aBfXAAniZtXTOQ4OUR8",
+   "title": "T18: Human-friendly ids (deferred)",
+   "status": "open",
+   "priority": 3
+  },
+  {
+   "id": "LK12MGksc1ts2Fh-JoWr9tdJbro_gdydvD11sOE_Qt0",
+   "title": "Give each implementation subagent its own fwd identity, so its graph writes are attributed to it rather than to the coordinating session",
+   "status": "open",
+   "priority": 3
+  },
+  {
+   "id": "PVZ3Ovza7RWRZRLXK_dnDqyVwG-CUveRMztap6qXTEY",
+   "title": "Make the inbox's first-unread selection wait for the daemon's answer, as the Graph page now does",
+   "status": "open",
+   "priority": 3
+  },
+  {
+   "id": "8yV1YGjyj3HvQ7qUHib8WMU9sB4n5Tp95vfW1ESfwqE",
+   "title": "Messages carry attributed_to beside author",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "CL9VhQw495D_6HX4YihGwHF_TRjCH3ETMbj6maZnBek",
+   "title": "Dogfood feedback from the pilot projects",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "NMIgJfROLp8UeHfDCxgkUiRYd4ewCerGauRd6VPYGNM",
+   "title": "Review a task nobody else can review: default the reviewer to the supervisor",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "UVRNRdDK5H8bf0gDadz2IZ010gNO00P6LHDtzlh3JXw",
+   "title": "task amend --needs-review, and a scope-create error that names the real condition",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "xFswUYo3CVBmnBStcwWrKUt_V5O4XlLcSa4KIfFLQmk",
+   "title": "Text output prints every field: summary lines expect 22-character ids",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "jJp3bcF7ywhVVzaWA69HZgCFPdH8TeLtpul_ei9aGGY",
+   "title": "Transition reasons become comments on the task; --note on approve, reject and rejustify",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "kOjquwI2i3qNAtEjC62Erl3M8ytJ-C49SjEOdnmZ8bg",
+   "title": "Design docs versus the real CLI: reconcile the list from the primer verification",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "SVMu_9oMfG9iXvEgEoWkx3BKnqB_3TFGJ__wVBwc0kc",
+   "title": "CLI errors and output noise from the primer verification",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "AqEXTN0BDtCdzlMp1RG_cvPrYnaISk7b07G5yH0agX4",
+   "title": "Report a checkout only to the project it belongs to; add a way to forget one",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "_AtG3kyaxbeZodp4gsVmsinzZALq3js_US8xZRCtVyY",
+   "title": "Write the .fwd/project.toml marker only when asked",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "9J1-B6-5OFU2JUVEAI4JHkHto-tz3Hadw04t5r6JSPw",
+   "title": "Add a form on the page for creating a task with every field",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "zgL1v76l8uJTy7WQ-Kd33ipdQToG79RrmE8kfika_fw",
+   "title": "Fix CI's trunk version so fmt, clippy, the tests and the smoke run on every push again",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "-gFEGk34qJ5WCSu6_cMKnuZ7t9FS4PfHygZ7UR5hQKE",
+   "title": "Give every task the scope where its work happens, once the Graph can filter by scope",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "EEyxMxsdzVOXGnU8Mborbykw2cz9zy8lvFqnDSdDUy4",
+   "title": "Let a person create a scope and edit its name, intention, branches and status on the Scopes page",
+   "status": "open",
+   "priority": null
+  },
+  {
+   "id": "vwugaN8hbI2h3tsoNDFrxGZpiewnm-ffxE6PQB-u4Qk",
+   "title": "Model steps, an optional assignee and mention edges in fwd-core, with their CLI, routing and the migration of the live graph",
+   "status": "in_progress",
+   "priority": 1
+  },
+  {
+   "id": "O-fgyRZq7yrQ4sW2zo8lJq8oRFP5nAjdyAI363dqB2U",
+   "title": "Give anchors a content-addressed basis and three-fact resolution (milestones M1 and M2), with whole-file anchors and the change a span belongs to",
+   "status": "in_progress",
+   "priority": 1
+  },
+  {
+   "id": "mN1UvraV3ilquATFPIpyG2CyXKAUiyPPDh5SokB6qAs",
+   "title": "Render every entity in four modes on the page: the Steps checklist on a task, the highlight's own page, the person lozenge, the assignee, and inline references",
+   "status": "in_progress",
+   "priority": 1
+  },
+  {
+   "id": "m-_DR-aeJEycZHToaVV-Xmdtrm9ew9a10blsZ24jFVg",
+   "title": "Lay the Graph page out with fewer crossings, and offer an order by priority or status beside the automatic one",
+   "status": "in_progress",
+   "priority": 2
+  },
+  {
+   "id": "g70I3ZE7jLu2INuctwN_bqKQzajzjkzzHur2vPfH9Eo",
+   "title": "T1: Rust workspace skeleton (fwd-core, fwdd, fwd)",
+   "status": "in_review",
+   "priority": 1
+  },
+  {
+   "id": "v9j9ayNkLf82B4504aVRZhqPXZePuU8lF8512Bq75EQ",
+   "title": "T4: Daemon auto-spawn and lifecycle",
+   "status": "in_review",
+   "priority": 1
+  },
+  {
+   "id": "o5S4VZNL2wIy6CGLq8Cr4HemaKgl-qsDZodgxnUhYHI",
+   "title": "Design inline code highlights, their conversations and routing, and the Review task kind (Daniel's spec of 2026-09-28)",
+   "status": "in_review",
+   "priority": 1
+  },
+  {
+   "id": "ESRDUCUpY0FIbE1of4hl2oDWlqy7BwU_hRiHZ846mHM",
+   "title": "T7: Routing service and notification status",
+   "status": "in_review",
+   "priority": 2
+  },
+  {
+   "id": "7NHbSJHK0haWB2W46Hmtg6zfS02lXfnAVsTuKBbTDFA",
+   "title": "T14: VS Code extension (P1)",
+   "status": "in_review",
+   "priority": 2
+  },
+  {
+   "id": "z9HsinrcPwbGkn2G3K0Qp_d1JDCPbzBj3THTY22s7wE",
+   "title": "T12: Ankurah: durable-to-durable replication (if Q1 chooses it)",
+   "status": "proposed",
+   "priority": 2
+  },
+  {
+   "id": "BSMlyaPd_vGTHepLxatg4u-3p9yUhlTn2_M4DCQtv7g",
+   "title": "T13: Ankurah: event export/import for solo-to-team publish",
+   "status": "proposed",
+   "priority": 3
+  },
+  {
+   "id": "D2NVIZ6G5qyaZK-DssPyM21oP4ojcbl8W_vAdHDuQMU",
+   "title": "T15: Central hosting and multi-user (P2, deferred)",
+   "status": "proposed",
+   "priority": 3
+  },
+  {
+   "id": "rW08oS7JrCkKRo1on_6XrauqMD7Qz58p0gOUIFuIQsc",
+   "title": "T16: GitHub Issues sync (skipped for now; reconsider later)",
+   "status": "proposed",
+   "priority": 4
+  },
+  {
+   "id": "6I5e0sXx-Pi5VrKUtU5tVIwX7I4lEGY1BNdSGyJfxFE",
+   "title": "ankurah-signals: prune bridge entries whose broadcast is gone; expose a live-query count",
+   "status": "proposed",
+   "priority": null
+  },
+  {
+   "id": "JJBX_WK3HCaaSnstImOix7q4BnK077VINgWq50u3ihA",
+   "title": "Manifold's generic models beside fwdcentaur's, on the same entities",
+   "status": "proposed",
+   "priority": null
+  },
+  {
+   "id": "bUrsWl9IBLU80ntcQZw6XNau-8wtgdC_Cj77sITy8-s",
+   "title": "Let a decision be scoped to one scope, with project-wide as the default",
+   "status": "proposed",
+   "priority": null
+  },
+  {
+   "id": "OUaYj0OYzJmZPKpUjRTUGpcFjtZ5TaI4JpAPYaB2VWM",
+   "title": "Rename the supervisor role, which Daniel called a misnomer",
+   "status": "proposed",
+   "priority": null
+  },
+  {
+   "id": "YCUI31x8o9W-xp-EMBK6MKWHErk72rTk_eG_v7IJaXY",
+   "title": "Bump fwd's version or name a capability when a flag the primer relies on lands",
+   "status": "proposed",
+   "priority": null
+  },
+  {
+   "id": "fEqBtzcpP4QNXuwsXJSTeYPeZ-vS_OX3lSNQB_nPjZk",
+   "title": "Add result envelopes, --expect-revision, idempotency keys, receipts and the exit-code table to the CLI",
+   "status": "proposed",
+   "priority": null
+  }
+ ],
+ "edges": [
+  {
+   "from": "O-fgyRZq7yrQ4sW2zo8lJq8oRFP5nAjdyAI363dqB2U",
+   "to": "4uEzhMm4RLQbl3za7M-mLBU-0M_3LVxyXHg8nasM4qE",
+   "kind": "subtask_of",
+   "status": "accepted"
+  },
+  {
+   "from": "XMjpJabzsbBnHWQAKd7e9sXDQlrk8nQ01-BWFibfeAM",
+   "to": "4uEzhMm4RLQbl3za7M-mLBU-0M_3LVxyXHg8nasM4qE",
+   "kind": "subtask_of",
+   "status": "accepted"
+  },
+  {
+   "from": "8z_sQwsRw9S2cm70wiGHM4xyhi7KieIIlVstu0yQ1Sk",
+   "to": "vwugaN8hbI2h3tsoNDFrxGZpiewnm-ffxE6PQB-u4Qk",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "8z_sQwsRw9S2cm70wiGHM4xyhi7KieIIlVstu0yQ1Sk",
+   "to": "7NHbSJHK0haWB2W46Hmtg6zfS02lXfnAVsTuKBbTDFA",
+   "kind": "subtask_of",
+   "status": "accepted"
+  },
+  {
+   "from": "XMjpJabzsbBnHWQAKd7e9sXDQlrk8nQ01-BWFibfeAM",
+   "to": "O-fgyRZq7yrQ4sW2zo8lJq8oRFP5nAjdyAI363dqB2U",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "hKb-wkk_LEfZkHlL-TH4u5rAjXBYH9TwgVCRH1inbaI",
+   "to": "ESRDUCUpY0FIbE1of4hl2oDWlqy7BwU_hRiHZ846mHM",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "FrvC_0VMMbNADejh8zaMh2e7aBfXAAniZtXTOQ4OUR8",
+   "to": "hKb-wkk_LEfZkHlL-TH4u5rAjXBYH9TwgVCRH1inbaI",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "-gFEGk34qJ5WCSu6_cMKnuZ7t9FS4PfHygZ7UR5hQKE",
+   "to": "vwugaN8hbI2h3tsoNDFrxGZpiewnm-ffxE6PQB-u4Qk",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "mN1UvraV3ilquATFPIpyG2CyXKAUiyPPDh5SokB6qAs",
+   "to": "vwugaN8hbI2h3tsoNDFrxGZpiewnm-ffxE6PQB-u4Qk",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "v9j9ayNkLf82B4504aVRZhqPXZePuU8lF8512Bq75EQ",
+   "to": "g70I3ZE7jLu2INuctwN_bqKQzajzjkzzHur2vPfH9Eo",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "D2NVIZ6G5qyaZK-DssPyM21oP4ojcbl8W_vAdHDuQMU",
+   "to": "v9j9ayNkLf82B4504aVRZhqPXZePuU8lF8512Bq75EQ",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "7NHbSJHK0haWB2W46Hmtg6zfS02lXfnAVsTuKBbTDFA",
+   "to": "ESRDUCUpY0FIbE1of4hl2oDWlqy7BwU_hRiHZ846mHM",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "D2NVIZ6G5qyaZK-DssPyM21oP4ojcbl8W_vAdHDuQMU",
+   "to": "z9HsinrcPwbGkn2G3K0Qp_d1JDCPbzBj3THTY22s7wE",
+   "kind": "depends_on",
+   "status": "accepted"
+  },
+  {
+   "from": "rW08oS7JrCkKRo1on_6XrauqMD7Qz58p0gOUIFuIQsc",
+   "to": "D2NVIZ6G5qyaZK-DssPyM21oP4ojcbl8W_vAdHDuQMU",
+   "kind": "depends_on",
+   "status": "accepted"
+  }
+ ]
+}
