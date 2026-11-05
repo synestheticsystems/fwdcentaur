@@ -47,10 +47,10 @@ PROJECT=$(echo "$STATUS" | j "d['project']")   # this checkout's project
 U="http://127.0.0.1:$PORT"
 check "the port file holds the port, pid, instance, start and bind only" "$(j "','.join(sorted(d))" < "$FWD_RUNTIME_DIR/daemon.ws")" "bind,instance_id,pid,port,started"
 check "only its owner can read the port file" "$(python3 -c "import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))" "$FWD_RUNTIME_DIR/daemon.ws")" "0o600"
-SUTRA=$(python3 -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])" "$FWD_DATA_DIR")   # sutra's id for this data directory
-check "sutra's registry holds the daemon's card and its one row, daemon, none per project" "$(ls "$FWD_DEV_RUNNER_DIR" | tr '\n' ' ')" "$SUTRA $SUTRA.daemon.status "
-check "the card names the data directory, the daemon's pid, when it started and its port, nothing else" "$(sed -E 's/^STARTED=[0-9]+$/STARTED=<seconds>/' "$FWD_DEV_RUNNER_DIR/$SUTRA" | tr '\n' ' ')" "DIR=$FWD_DATA_DIR PID=$(j "d['pid']" < "$FWD_RUNTIME_DIR/daemon.ws") STARTED=<seconds> DAEMON_PORT=$PORT "
-check "the daemon's row is ready, with its one project" "$(cat "$FWD_DEV_RUNNER_DIR/$SUTRA.daemon.status")" "ready: 1 project"
+CARD_ID=$(python3 -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])" "$FWD_DATA_DIR")   # the id the daemon's dev-runner card is named after, for this data directory
+check "the dev-runner registry holds the daemon's card and its one row, daemon, none per project" "$(ls "$FWD_DEV_RUNNER_DIR" | tr '\n' ' ')" "$CARD_ID $CARD_ID.daemon.status "
+check "the card names the data directory, the daemon's pid, when it started and its port, nothing else" "$(sed -E 's/^STARTED=[0-9]+$/STARTED=<seconds>/' "$FWD_DEV_RUNNER_DIR/$CARD_ID" | tr '\n' ' ')" "DIR=$FWD_DATA_DIR PID=$(j "d['pid']" < "$FWD_RUNTIME_DIR/daemon.ws") STARTED=<seconds> DAEMON_PORT=$PORT "
+check "the daemon's row is ready, with its one project" "$(cat "$FWD_DEV_RUNNER_DIR/$CARD_ID.daemon.status")" "ready: 1 project"
 check "the daemon serves the built web UI" "$(curl -s "$U/" | grep -q 'fwd-web_bg.wasm' && echo served)" "served"
 check "the wasm is served with its type" "$(curl -fsS -o /dev/null -w '%{http_code} %{content_type}' "$U/fwd-web_bg.wasm")" "200 application/wasm"
 check "the script is served with its type" "$(curl -fsS -o /dev/null -w '%{http_code} %{content_type}' "$U/fwd-web.js")" "200 text/javascript"
@@ -799,6 +799,6 @@ if [ "${FWD_SMOKE_LAN:-}" = "1" ]; then
     check "the LAN address no longer answers" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$LANHOST/health" || true)" "000"
 fi
 "$F" daemon stop >/dev/null
-check "sutra's files go when the daemon stops" "$(ls -A "$FWD_DEV_RUNNER_DIR" | wc -l | tr -d ' ')" "0"
+check "the dev-runner registry is empty once the daemon stops" "$(ls -A "$FWD_DEV_RUNNER_DIR" | wc -l | tr -d ' ')" "0"
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

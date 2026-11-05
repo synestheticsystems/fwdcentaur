@@ -25,11 +25,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod claude_code;
+mod dev_runner;
 mod mcp;
 mod mcp_stdio;
 mod serve;
 mod services;
-mod sutra;
 mod watch;
 
 /// The build this binary is, as crates/fwd/build.rs names it (`0.0.1-646.g184fd78`), so that one

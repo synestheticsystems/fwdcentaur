@@ -50,9 +50,9 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::dev_runner;
 use crate::mcp;
 use crate::services;
-use crate::sutra::{self, Sutra};
 use crate::BUILD;
 
 #[derive(Clone)]
@@ -66,13 +66,18 @@ struct AppState {
     /// database twice.
     opening: Arc<tokio::sync::Mutex<()>>,
     allowed: Arc<RwLock<Allowed>>,
-    /// The daemon's card in sutra: its row counts the projects open, including those opened
+    /// The daemon's dev-runner card: its row counts the projects open, including those opened
     /// after start.
-    sutra: Arc<Sutra>,
+    card: Arc<dev_runner::Card>,
 }
 
 impl AppState {
-    fn new(paths: &Paths, info: Arc<PortFile>, projects: BTreeMap<Uuid, Slot>, sutra: Arc<Sutra>) -> AppState {
+    fn new(
+        paths: &Paths,
+        info: Arc<PortFile>,
+        projects: BTreeMap<Uuid, Slot>,
+        card: Arc<dev_runner::Card>,
+    ) -> AppState {
         AppState {
             paths: Arc::new(paths.clone()),
             shutdown: Arc::new(Notify::new()),
@@ -80,7 +85,7 @@ impl AppState {
             info,
             projects: Arc::new(RwLock::new(projects)),
             opening: Arc::new(tokio::sync::Mutex::new(())),
-            sutra,
+            card,
         }
     }
 }
@@ -234,11 +239,11 @@ pub async fn serve(paths: Paths) -> Result<()> {
     let config = DaemonConfig::load(&paths)?;
     let index = Index::load(&paths)?;
 
-    // The daemon's card in sutra, first cleared of what a crashed daemon for this data directory
+    // The daemon's dev-runner card, first cleared of what a crashed daemon for this data directory
     // left. Only under the lifetime lock: without it, those files could be a running daemon's.
-    let sutra = Arc::new(Sutra::new(sutra::registry(), &paths.data_dir));
-    sutra.clear();
-    sutra.starting();
+    let card = Arc::new(dev_runner::Card::new(dev_runner::registry(), &paths.data_dir));
+    card.clear();
+    card.starting();
 
     let mut projects = BTreeMap::new();
     for entry in &index.projects {
@@ -263,13 +268,13 @@ pub async fn serve(paths: Paths) -> Result<()> {
 
     let hosted = projects.len();
     let open = open_projects(&projects);
-    let state = AppState::new(&paths, info.clone(), projects, sutra.clone());
+    let state = AppState::new(&paths, info.clone(), projects, card.clone());
     let shutdown = state.shutdown.clone();
     let projects = state.projects.clone();
     let app = router(state);
 
     write_port_file(&paths.port_file(), &info)?;
-    sutra.announce(port, open);
+    card.announce(port, open);
     let address = match config.bind {
         Bind::Loopback => "127.0.0.1",
         Bind::Lan => "every interface",
@@ -295,7 +300,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
         })
         .await;
     let _ = std::fs::remove_file(paths.port_file());
-    sutra.clear();
+    card.clear();
     info!("daemon exiting");
     // Sockets that were upgraded before the stop keep their project's node open until the
     // runtime shuts down, after this returns. The locks therefore stay held until the process
@@ -528,8 +533,8 @@ async fn open_slot(paths: &Paths, project: Project) -> Slot {
     }
 }
 
-/// The number the daemon's sutra row reports: the projects open, leaving out those that could
-/// not open (the log and `/projects` name them).
+/// The number the daemon's dev-runner row reports: the projects open, leaving out those that
+/// could not open (the log and `/projects` name them).
 fn open_projects(projects: &BTreeMap<Uuid, Slot>) -> usize {
     projects.values().filter(|slot| matches!(slot, Slot::Open(_))).count()
 }
@@ -734,7 +739,7 @@ async fn projects_open(State(state): State<AppState>, Json(request): Json<OpenRe
     let report = slot.report();
     state.projects.write().expect("projects lock").insert(request.id, slot);
     if report.error.is_none() {
-        state.sutra.ready(open_projects(&state.projects.read().expect("projects lock")));
+        state.card.ready(open_projects(&state.projects.read().expect("projects lock")));
     }
     let status = if report.error.is_some() { StatusCode::INTERNAL_SERVER_ERROR } else { StatusCode::OK };
     (status, Json(report)).into_response()
@@ -974,8 +979,8 @@ mod tests {
     fn state(dir: &Path, bind: Bind) -> AppState {
         let paths = Paths { runtime_dir: dir.join("run"), data_dir: dir.join("data") };
         let info = PortFile { port: PORT, pid: std::process::id(), instance_id: "test".into(), started: 0, bind };
-        let sutra = Sutra::new(Some(dir.join("dev-runner")), &paths.data_dir);
-        AppState::new(&paths, Arc::new(info), BTreeMap::new(), Arc::new(sutra))
+        let card = dev_runner::Card::new(Some(dir.join("dev-runner")), &paths.data_dir);
+        AppState::new(&paths, Arc::new(info), BTreeMap::new(), Arc::new(card))
     }
 
     /// The daemon's router, with every request arriving from `peer`.

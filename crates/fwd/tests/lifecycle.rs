@@ -2,7 +2,7 @@
 //! stop and restart, on the same port; a stale port file is recovered without killing any pid,
 //! and one that names another daemon's port is not trusted; a project a per-project daemon from
 //! an earlier build still holds is left to it; one daemon hosts every project, including one
-//! created while it runs; sutra shows the daemon while it runs, and nothing of it once it stops;
+//! created while it runs; it keeps a dev-runner card while it runs, and leaves none once it stops;
 //! a `fwd watch` with no timeout hears across a restart, on the same port or another, and says
 //! nothing about it, and one given `--timeout` ends once it has passed; either exits within a
 //! second of its last line. Any other command caught waiting on its daemon when the daemon stops
@@ -446,12 +446,12 @@ async fn a_project_created_while_the_daemon_runs_is_hosted_without_a_restart() -
     Ok(())
 }
 
-/// Sutra, a dashboard of the dev runners on a machine, shows the daemon from the files it keeps
-/// in sutra's registry: the card, naming the data directory, the daemon's pid and its port, with
-/// one row, `daemon`, that counts the projects open (not one another daemon holds, until it opens
-/// on request) and no row per project; and nothing once the daemon has stopped.
+/// While the daemon runs, the dev-runner registry holds its card: the meta file, naming the data
+/// directory, the daemon's pid and its port, and one row, `daemon`, that counts the projects open
+/// (not one another daemon holds, until it opens on request), with no row per project. Once the
+/// daemon has stopped, the registry holds nothing of it.
 #[tokio::test]
-async fn sutra_shows_the_daemon_while_it_runs_and_nothing_once_it_stops() -> Result<()> {
+async fn the_dev_runner_registry_holds_the_daemons_card_while_it_runs_and_nothing_once_it_stops() -> Result<()> {
     let (dir, paths, first) = setup()?;
     new_project(&paths, &dir.path().join("second"), "My Project!")?;
     let held = new_project(&paths, &dir.path().join("held"), "held")?;
@@ -481,7 +481,7 @@ async fn sutra_shows_the_daemon_while_it_runs_and_nothing_once_it_stops() -> Res
         .collect();
     assert_eq!(meta.keys().collect::<Vec<_>>(), ["DAEMON_PORT", "DIR", "PID", "STARTED"], "{meta:?}");
     assert_eq!(meta["DIR"], paths.data_dir.display().to_string());
-    assert_eq!(meta["PID"], pf.pid.to_string(), "the pid sutra checks and signals is the daemon's");
+    assert_eq!(meta["PID"], pf.pid.to_string(), "the pid a reader checks and signals is the daemon's");
     assert!(meta["STARTED"].parse::<u64>().is_ok(), "STARTED is Unix seconds: {meta:?}");
     assert_eq!(meta["DAEMON_PORT"], pf.port.to_string(), "the row carries the daemon's port");
     let row = || std::fs::read_to_string(registry.join(format!("{id}.daemon.status")));
