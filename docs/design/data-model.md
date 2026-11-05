@@ -76,6 +76,7 @@ pub struct Task {
     pub assignee: Option<Ref<Principal>>, // who does the work; none until someone is assigned or starts it (a task from before the field reads as none)
     pub needs_review: bool,    // if true, Done requires accept by someone other than the submitter
     pub hold: Option<String>,  // manual hold with reason; an availability overlay, not a status
+    pub not_before: Option<i64>, // the instant a task filed early comes due, in ms since the epoch; none on a task with no such date ("Availability overlays", below)
     pub priority: Option<i32>, // 0 (urgent) .. 4; None = unranked
     pub labels: Json,          // ["bug", "cli"]: what kind of work it is, in words ("Labels", below)
     pub context: Json,         // read in Rust, never queried ("Json fields", above): who assigned, submitted, approved and
@@ -127,7 +128,9 @@ A reason given to a move (a reject's, a return's, a cancel's, a reopen's or a re
 
 An agent's "I finished" is `submit`; acceptance is a separate verb by a different principal. Adding a new dependency to a Done task does not reopen it; the panel shows "completion predates dependency" until someone reopens or dismisses.
 
-**Availability overlays** are derived, not statuses: "waiting on" (open `depends_on` targets), "delegated" (assigned to an agent), "held" (`hold` is set). Until 2026-09-28 "delegated" read the scope an `assigned_to` relation named (`../DECISIONS.md`, "Assignment is an optional field on the task, never an edge"). Until 2026-09-29 the design also had "stale", a task worked in a scope that had missed its heartbeats, which went with the heartbeat when scopes lost their owner (`../DECISIONS.md`, D108, "A scope has no owner: scopes are not assigned to principals"); it was never built. A principal has one overlay, "dormant", derived in the same way from when it last wrote (Principal, `last_active`).
+**Availability overlays** are derived, not statuses: "waiting on" (open `depends_on` targets), "delegated" (assigned to an agent), "held" (`hold` is set), "not yet due" (below). Until 2026-09-28 "delegated" read the scope an `assigned_to` relation named (`../DECISIONS.md`, "Assignment is an optional field on the task, never an edge"). Until 2026-09-29 the design also had "stale", a task worked in a scope that had missed its heartbeats, which went with the heartbeat when scopes lost their owner (`../DECISIONS.md`, D108, "A scope has no owner: scopes are not assigned to principals"); it was never built. A principal has one overlay, "dormant", derived in the same way from when it last wrote (Principal, `last_active`).
+
+A task filed early so that it is not forgotten would crowd the views until it is actionable, so it may carry a not-before date (`not_before`): an instant rather than a day, which every machine reads as one moment (`cli.md`, on `--not-before`). It lives on the Task model for now, and goes to a component of its own once Ankurah can query one entity by two components (`../DECISIONS.md`, D151, "A task's not-before date lives on the Task model for now, with a TODO to split it into its own component"). A task is "not yet due" only while it is proposed or open and the present is before the date (`rules::not_yet_due`, the one rule everything that judges a date goes by): a task someone has started behaves as normal whatever its date, and a date refuses no start, so an early start is allowed. A task not yet due is not ready (Rules, below), and the Graph page leaves it out unless asked (`web-ui.md`, the Graph). A task written before the field existed reads as having no date.
 
 **Steps** are what a task asks its assignee to look at or do, in order: each is a `step_of` relation from the thing (a highlight, a message, another task) to the task, and its status is the checkbox (`../DECISIONS.md`, "A step is an edge from any entity to a task, and the highlight is the step" and "The checked state is the step edge's status", 2026-09-28). The checklist is the task's accepted and checked steps, ordered by the relation's `position`, then by when each was added, then by id; its progress is how many are checked of how many there are. A step is added at the end; a task is finished when its assignee says so, not when its last step is checked. A step that is a highlight moves with the first thread on the highlight: checking it resolves that thread, and resolving the thread checks it (Rules, below; `../DECISIONS.md`, D99, "Checking a step resolves its highlight's first thread, and resolving that thread checks the step; each control says it does both").
 
@@ -358,8 +361,8 @@ Nothing else moves: a rejected, superseded or repealed decision stays so, and a 
 ## Rules (implemented once, in fwd-core)
 
 **Readiness** of a task is three-valued, following Manifold: `ready`, `not_ready`, `unknown`.
-- `ready` when: `status == Open`, `hold` is None, and every accepted `depends_on` target is `Done`.
-- `not_ready` when any of those fails for a known reason (the reason list is returned: `blocked_by: [T70, T71]`, `hold`, `proposed`, `in_progress`).
+- `ready` when: `status == Open`, `hold` is None, the present is not before `not_before` when the task has one (Task, "Availability overlays"; the rule takes the present as an argument, so that it stays pure), and every accepted `depends_on` target is `Done`.
+- `not_ready` when any of those fails for a known reason (the reason list is returned: `blocked_by: [T70, T71]`, `hold`, `not_yet_due`, `proposed`, `in_progress`).
 - `unknown` when a dependency target cannot be loaded or is not authorized; the CLI never reports "no blockers" for an incomplete domain.
 - A Cancelled or Rejected dependency target makes the dependent `not_ready` with reason `dependency_closed`, which the triage agent brings to its lead to resolve (retract the relation or cancel the dependent), as it brings everything that needs a decision (`../DECISIONS.md`, D129).
 
@@ -390,7 +393,7 @@ Nothing else moves: a rejected, superseded or repealed decision stays so, and a 
 
 ## What v1 does not model
 
-Time (due dates, estimates, recurrence), multi-target relations (RefSet), components on one entity, cross-project references, and per-field permissions. Each has a place to grow without changing the CLI.
+Of time, one date on a task is modelled (Task, `not_before`); due dates, estimates and recurrence are not. Nor are multi-target relations (RefSet), components on one entity, cross-project references, and per-field permissions. Each has a place to grow without changing the CLI.
 
 ## Implementation notes (T2, 2026-09-24)
 

@@ -349,8 +349,9 @@ svg.dag .node.ghost rect { stroke-dasharray: 5 3; opacity: .8; }
    drawing's zoom scales them all together. */
 svg.dag .node .title { font: 500 12.5px var(--font); fill: var(--ink); }
 svg.dag .node .sub { font: 11px var(--font); fill: var(--muted); }
-/* A stub: a task outside the scope filter joined to one inside it, muted so the scope's own tasks
-   stand out; it still shows the pointer over it and its selection. */
+/* A stub: a task outside the scope filter joined to one inside it, or a task not yet due that one
+   waits for, muted so the scope's own tasks stand out; it still shows the pointer over it and its
+   selection. */
 svg.dag .node.stub rect { fill: var(--bg); stroke: var(--line); }
 svg.dag .node.stub .title { font-weight: 400; fill: var(--muted); }
 svg.dag .node.stub .sub { font-style: italic; }

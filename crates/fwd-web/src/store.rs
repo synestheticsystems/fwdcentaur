@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use wasm_bindgen_futures::spawn_local;
 
+use crate::clock;
 use crate::session::ctx;
 
 pub struct Store {
@@ -615,8 +616,9 @@ fn readiness_from(
         id: task.id(),
         status: task.status().unwrap_or(TaskStatus::Proposed),
         hold: task.hold().unwrap_or(None),
+        not_before: task.not_before().unwrap_or(None),
     };
-    rules::readiness(&snapshot, &deps)
+    rules::readiness(&snapshot, &deps, clock::present())
 }
 
 pub fn message_count(task: EntityId, messages: &[MessageView]) -> usize {

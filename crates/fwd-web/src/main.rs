@@ -15,6 +15,7 @@ mod attachments;
 mod back;
 mod cards;
 mod claim;
+mod clock;
 mod comment_box;
 mod decision_row;
 mod decisions;

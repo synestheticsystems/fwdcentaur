@@ -85,6 +85,7 @@ fwd task create "Retry on websocket disconnect" \
     --under T60                      # subtask_of
     --from M15                       # discovered_from (a message or task)
     --label bug --priority now       # labels: repeatable, commas between several (--label bug,daemon); a priority is now, next or later
+    --not-before 2026-12-01          # not actionable before this: a day here, or an RFC 3339 instant
     [--propose] [--needs-review]
 fwd task show T72 [--include relations,messages]   # the fields, the assignee and the scopes it is worked in, its labels, then the checklist: "steps: 3 of 8 checked"; --include relations adds what it points at and what points at it, messages its comments, each thread under its first message (anchors and history are designed, not built)
 fwd task list [--ready|--blocked|--mine|--scope S3|--label X|--status open|--status proposed] [--limit N]   # --mine: assigned to you; --label bug: the tasks with that label
@@ -99,7 +100,7 @@ fwd task done T72                   # shortcut for submit when !needs_review
 fwd task cancel T72 --reason "..."               # agents without the right ask for it in a message instead
 fwd task reopen T72 --reason "..."
 fwd task rejustify T72 --reason "..."  # Open|InProgress -> Proposed; assignment stays
-fwd task amend T72 [--title ...] [--what @file.md] [--why-append "..."] [--done-when ...] [--label bug] [--unlabel feature]   # labels added and taken off with the rest, in one write
+fwd task amend T72 [--title ...] [--what @file.md] [--why-append "..."] [--done-when ...] [--label bug] [--unlabel feature] [--not-before 2026-12-01 | --clear-not-before]   # labels added and taken off with the rest, in one write
 fwd task hold T72 --reason "..." | fwd task release T72
 fwd task explain T72                # readiness with reasons, blockers, dependents, why-chain, anchors, open messages
 fwd task create "..." --from M15 --propose   # created from a message: the message's author is notified the task exists
@@ -117,6 +118,12 @@ A priority is a word, now, next or later, on `task create` and `task amend` as o
 
 ```text
 error: invalid value 'soon' for '--priority <PRIORITY>': a priority is now, next or later (a task stores them as 1, 2 and 3), or, in this build only, a task's number from 0 to 4
+```
+
+A not-before date keeps a task filed early out of the views it would crowd until it is actionable (`data-model.md`, "Availability overlays"; `../DECISIONS.md`, D151, "A task's not-before date lives on the Task model for now, with a TODO to split it into its own component"). `--not-before` on `task create` and `task amend` takes `YYYY-MM-DD`, the start of that day in the time zone of the machine running the command (the daemon's, for a call over MCP), or an RFC 3339 instant; the task stores the instant, so that a Mac, a Pi and a hosted page agree on it. `--clear-not-before` on `task amend` takes the date off. While a proposed or open task's date is still to come it is not ready, with `NotYetDue` among its readiness reasons, so `task next`, `task list --ready` and `prime` leave it out; `task start` is not refused by a date, and a started task behaves as normal whatever its date. `task show` prints the date under `not_before`, in milliseconds since the epoch, and for people as `not before 2026-12-01`, in the reader's time zone, with the time (`2026-11-30 21:00`) where it is not the start of a day there. Anything else is refused, naming what is taken:
+
+```text
+error: invalid value 'soon' for '--not-before <DATE>': a not-before date is YYYY-MM-DD, the start of that day in this machine's time zone, or an RFC 3339 instant such as 2026-12-01T09:00:00-08:00
 ```
 
 `task show --include relations` adds what the task points at and what points at it, and `--include messages` its comments and questions and their replies, so that its links and its thread can be read from the command line (task 4ujMsNeQ, "Let fwd task show print the task's comments and replies"); `task explain` serves both too, and `--include relations,messages` gives both. The JSON carries them as `relations`, with `out`, the relations from the task, and `in`, those to it, each oldest first as `fwd relations` prints it, with `other`, the thing at its other end, named as a message's references name it (id, kind and name); and as `messages`, oldest first, each as `task next` gives it, with its author's handle and, for a question asked of one principal, that principal's as `to_handle`. The text prints them after the checklist, the relations first, each a line with the task as `this` on its side and the relation's status when it is not accepted, then each thread under its first message, each message a line with its author, whom it asks, the start of its id (which `fwd reply` takes), whether it is active or resolved and how long ago it was written, and its text beneath:

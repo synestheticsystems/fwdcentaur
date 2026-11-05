@@ -7,7 +7,8 @@
 //! keep, such as the scope the Questions, Tasks, Decisions and Graph pages list by (so Back brings
 //! a page back with the scope it had) and whose inbox shows; the rest of what a person does on a
 //! page, a visit starts over: how far the Graph is zoomed and
-//! scrolled and whether it draws closed tasks, which inbox card is selected and whether the Inbox
+//! scrolled and whether it draws closed tasks and tasks not yet due, which inbox card is selected
+//! and whether the Inbox
 //! lists unread cards only, and the lists' other filters (the Tasks list's title, label, "mine",
 //! "ready only" and "show closed", the Decisions list's status and area). So each of these pages
 //! writes that state here as it changes, into a signal of its own, outside the route as a panel's
@@ -33,15 +34,17 @@ pub struct GraphState {
     pub zoom: f64,
     /// Whether the drawing shows closed tasks.
     pub show_closed: bool,
+    /// Whether the drawing shows tasks not yet due.
+    pub show_not_yet_due: bool,
     /// How far the drawing's canvas is scrolled across and down, in CSS pixels.
     pub scroll: (i32, i32),
 }
 
 impl Default for GraphState {
-    /// How a visit opens the Graph: the drawing at its own size, without closed tasks, scrolled to
-    /// its start.
+    /// How a visit opens the Graph: the drawing at its own size, without closed tasks or tasks not
+    /// yet due, scrolled to its start.
     fn default() -> Self {
-        GraphState { zoom: 1.0, show_closed: false, scroll: (0, 0) }
+        GraphState { zoom: 1.0, show_closed: false, show_not_yet_due: false, scroll: (0, 0) }
     }
 }
 

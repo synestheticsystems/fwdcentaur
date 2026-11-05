@@ -1955,6 +1955,8 @@ pub struct CreateTask {
     pub propose: bool,
     pub needs_review: bool,
     pub priority: Option<i64>,
+    /// When it comes due ([`Task::not_before`]).
+    pub not_before: Option<i64>,
     pub labels: Vec<String>,
     /// `depends_on` targets.
     pub after: Vec<EntityId>,
@@ -2034,6 +2036,7 @@ pub async fn create_task(ctx: &Context, by: EntityId, spec: CreateTask) -> Resul
             status: if spec.propose { TaskStatus::Proposed } else { TaskStatus::Open },
             needs_review: spec.needs_review,
             hold: None,
+            not_before: spec.not_before,
             assignee: None,
             priority: spec.priority,
             labels: Json::new(json!(labels)),
@@ -2088,7 +2091,9 @@ pub async fn dependencies(ctx: &Context, task: EntityId) -> Result<Vec<(EntityId
 
 pub async fn readiness(ctx: &Context, task: &TaskView) -> Result<Readiness> {
     let deps = dependencies(ctx, task.id()).await?;
-    Ok(rules::readiness(&TaskSnapshot { id: task.id(), status: task.status()?, hold: task.hold()? }, &deps))
+    let snapshot =
+        TaskSnapshot { id: task.id(), status: task.status()?, hold: task.hold()?, not_before: task.not_before()? };
+    Ok(rules::readiness(&snapshot, &deps, now()))
 }
 
 /// The scopes a task is worked in: the targets of its accepted `worked_in` relations, any number of
@@ -2727,6 +2732,7 @@ pub struct Amend {
     pub done_when_append: Option<String>,
     pub priority: Option<Option<i64>>,
     pub hold: Option<Option<String>>,
+    pub not_before: Option<Option<i64>>,
     /// Labels to add, as typed ([`label_task`]).
     pub label: Vec<String>,
     /// Labels to take off, as typed ([`unlabel_task`]).
@@ -2764,6 +2770,9 @@ pub async fn amend(ctx: &Context, task: EntityId, amend: Amend) -> Result<()> {
     }
     if let Some(v) = amend.hold {
         m.hold()?.set(&v)?;
+    }
+    if let Some(v) = amend.not_before {
+        m.not_before()?.set(&v)?;
     }
     if let Some(v) = labels {
         m.labels()?.set(&Json::new(json!(v)))?;
@@ -4358,6 +4367,7 @@ pub fn json_of_task(t: &TaskView, readiness: Option<&Readiness>) -> Result<Value
         "needs_review": t.needs_review()?,
         "assignee": assignee_of(t)?.map(|a| a.to_base64()),
         "hold": t.hold()?,
+        "not_before": t.not_before()?,
         "priority": t.priority()?,
         "labels": Value::from(t.labels()?),
         "context": Value::from(t.context()?),

@@ -34,6 +34,9 @@ serde                  = { version = "1.0", features = ["derive"] }
 serde_json             = "1.0"
 strum                  = { version = "0.27", features = ["derive"] }
 anyhow                 = "1.0"
+# Reads the RFC 3339 instant `fwd task create --not-before` takes. Ankurah and rmcp already build on
+# this version; nothing here needs its clock or its time zones.
+chrono                 = { version = "0.4", default-features = false }
 thiserror              = "2.0"
 tokio                  = { version = "1.40", features = ["full"] }
 tracing                = "0.1"

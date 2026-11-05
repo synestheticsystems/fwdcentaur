@@ -231,6 +231,13 @@ pub struct Task {
     /// Manual hold with reason; an availability overlay, not a status.
     #[active_type(LWW)]
     pub hold: Option<String>,
+    /// Keeps a task filed early out of the views it would crowd until it is actionable
+    /// (`rules::not_yet_due`): the instant it comes due, in milliseconds since the epoch, so that
+    /// every machine reads one moment. None on a task with no such date, and on one written before
+    /// the field existed.
+    // TODO: split this into its own component once Ankurah can query one entity by two components (Ankurah project task y6qJ_l3s; Daniel, 2026-11-05).
+    #[active_type(LWW)]
+    pub not_before: Option<i64>,
     /// 0 (urgent) .. 4; None = unranked. The CLI takes it as a word, now, next or later
     /// ([`Priority::task_number`]).
     #[active_type(LWW)]

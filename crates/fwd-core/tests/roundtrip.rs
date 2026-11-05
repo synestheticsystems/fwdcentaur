@@ -78,6 +78,7 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
         status,
         needs_review: true,
         hold: None,
+        not_before: None,
         assignee: None,
         priority: Some(1),
         labels: Json::new(serde_json::json!(["daemon"])),

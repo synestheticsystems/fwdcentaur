@@ -10,7 +10,7 @@ use crate::route::{self, Route};
 use crate::scope_filter::{self, HeaderScope, ScopeChoice};
 use crate::session::{self, ctx};
 use crate::{anchors, decisions, graph, inbox, lozenges, questions, scopes, tasks};
-use crate::{fmt, speech, store, waiting};
+use crate::{clock, fmt, speech, store, waiting};
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::EntityId;
 use fwd_core::model::NotificationView;
@@ -78,6 +78,7 @@ pub fn App() -> impl IntoView {
     // Whoever embeds the page hears each change of its connection (`session::announce`).
     Effect::new(move |_| session::announce(&session::client().connection_state().get().to_string()));
     session::follow_restarts();
+    clock::keep_time();
     view! {
         <div class="shell">
             <NewerBuild/>

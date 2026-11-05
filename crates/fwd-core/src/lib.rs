@@ -11,6 +11,7 @@ pub mod anchor_name;
 pub mod anchoring;
 #[cfg(feature = "native")]
 pub mod backup;
+mod calendar;
 #[cfg(feature = "native")]
 pub mod daemon;
 pub mod decision_log;
@@ -20,6 +21,7 @@ pub mod guidance;
 pub mod labels;
 pub mod model;
 pub mod naming;
+pub mod not_before;
 pub mod ops;
 pub mod position;
 #[cfg(feature = "native")]

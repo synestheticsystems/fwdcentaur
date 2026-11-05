@@ -15,6 +15,7 @@ pub struct TaskSnapshot {
     pub id: EntityId,
     pub status: TaskStatus,
     pub hold: Option<String>,
+    pub not_before: Option<i64>,
 }
 
 /// What the rules need to know about a scope a task is worked in, for a refusal to name it and
@@ -94,6 +95,8 @@ pub enum NotReadyReason {
     Status(TaskStatus),
     /// A manual hold, with its reason.
     Held(String),
+    /// Not yet due ([`not_yet_due`]), with its not-before date.
+    NotYetDue(i64),
     /// An accepted `depends_on` target that is not `Done`.
     BlockedBy(EntityId),
     /// An accepted `depends_on` target that is `Cancelled` or `Rejected`; the triage agent must
@@ -122,11 +125,20 @@ impl Readiness {
     }
 }
 
+/// Whether a task filed early is still not actionable at `now`, so that the views it would crowd
+/// leave it out: it is proposed or open, and `now` is before its not-before date. A task someone
+/// started behaves as normal whatever its date, and nothing refuses an early start, so a date holds
+/// back only work nobody has picked up. Whatever judges a date judges it by this, so that they agree.
+pub fn not_yet_due(status: TaskStatus, not_before: Option<i64>, now: i64) -> bool {
+    matches!(status, TaskStatus::Proposed | TaskStatus::Open) && not_before.is_some_and(|date| now < date)
+}
+
 /// `deps` holds one entry per accepted `depends_on` edge leaving the task: the target id and its
-/// status, or `None` when the target is unavailable. Known failures win over unknowns
+/// status, or `None` when the target is unavailable. `now` is the present, in milliseconds since
+/// the epoch, which the task's not-before date is judged against. Known failures win over unknowns
 /// (Manifold's `all`: unsatisfied if any child is unsatisfied, satisfied if all are, otherwise
 /// unknown).
-pub fn readiness(task: &TaskSnapshot, deps: &[(EntityId, Option<TaskStatus>)]) -> Readiness {
+pub fn readiness(task: &TaskSnapshot, deps: &[(EntityId, Option<TaskStatus>)], now: i64) -> Readiness {
     let mut not_ready = Vec::new();
     let mut unknown = Vec::new();
     if task.status != TaskStatus::Open {
@@ -134,6 +146,9 @@ pub fn readiness(task: &TaskSnapshot, deps: &[(EntityId, Option<TaskStatus>)]) -
     }
     if let Some(reason) = &task.hold {
         not_ready.push(NotReadyReason::Held(reason.clone()));
+    }
+    if let Some(date) = task.not_before.filter(|_| not_yet_due(task.status, task.not_before, now)) {
+        not_ready.push(NotReadyReason::NotYetDue(date));
     }
     for (target, status) in deps {
         match status {
@@ -851,26 +866,74 @@ mod tests {
         Edge { id: id(), kind, from, to, status }
     }
     fn open(id: EntityId) -> TaskSnapshot {
-        TaskSnapshot { id, status: TaskStatus::Open, hold: None }
+        TaskSnapshot { id, status: TaskStatus::Open, hold: None, not_before: None }
     }
+    /// The present the tests judge by, and a not-before date.
+    const NOW: i64 = 1_000;
+    const DATE: i64 = 5_000;
 
     #[test]
     fn ready_when_open_unheld_and_all_dependencies_done() {
         let t = open(id());
-        assert_eq!(readiness(&t, &[]), Readiness::Ready);
-        assert_eq!(readiness(&t, &[(id(), Some(TaskStatus::Done))]), Readiness::Ready);
+        assert_eq!(readiness(&t, &[], NOW), Readiness::Ready);
+        assert_eq!(readiness(&t, &[(id(), Some(TaskStatus::Done))], NOW), Readiness::Ready);
+    }
+
+    #[test]
+    fn a_task_nobody_has_started_is_not_yet_due_only_before_its_date() {
+        for status in [TaskStatus::Proposed, TaskStatus::Open] {
+            assert!(not_yet_due(status, Some(DATE), DATE - 1), "{status}, just before the date");
+            assert!(!not_yet_due(status, Some(DATE), DATE), "{status}, exactly at the date");
+            assert!(!not_yet_due(status, Some(DATE), DATE + 1), "{status}, after the date");
+            assert!(!not_yet_due(status, None, DATE), "{status}, with no date");
+        }
+    }
+
+    #[test]
+    fn a_task_someone_started_or_closed_is_never_not_yet_due() {
+        for status in [
+            TaskStatus::InProgress,
+            TaskStatus::InReview,
+            TaskStatus::Done,
+            TaskStatus::Cancelled,
+            TaskStatus::Rejected,
+        ] {
+            assert!(!not_yet_due(status, Some(DATE), DATE - 1), "{status}, before the date");
+        }
+    }
+
+    #[test]
+    fn readiness_carries_the_date_until_it_arrives() {
+        let dated = TaskSnapshot { not_before: Some(DATE), ..open(id()) };
+        let waiting = Readiness::NotReady(vec![NotReadyReason::NotYetDue(DATE)]);
+        assert_eq!(readiness(&dated, &[], DATE - 1), waiting);
+        assert_eq!(readiness(&dated, &[], DATE), Readiness::Ready);
+        assert_eq!(readiness(&dated, &[], DATE + 1), Readiness::Ready);
+    }
+
+    #[test]
+    fn a_started_task_gives_its_status_as_the_only_reason_whatever_its_date() {
+        let started = TaskSnapshot { status: TaskStatus::InProgress, not_before: Some(DATE), ..open(id()) };
+        let status_only = Readiness::NotReady(vec![NotReadyReason::Status(TaskStatus::InProgress)]);
+        assert_eq!(readiness(&started, &[], DATE - 1), status_only);
     }
 
     #[test]
     fn not_ready_reasons_are_listed() {
         let dep = id();
-        let t = TaskSnapshot { id: id(), status: TaskStatus::Proposed, hold: Some("waiting on design".into()) };
-        let r = readiness(&t, &[(dep, Some(TaskStatus::InProgress))]);
+        let t = TaskSnapshot {
+            id: id(),
+            status: TaskStatus::Proposed,
+            hold: Some("waiting on design".into()),
+            not_before: Some(DATE),
+        };
+        let r = readiness(&t, &[(dep, Some(TaskStatus::InProgress))], NOW);
         assert_eq!(
             r,
             Readiness::NotReady(vec![
                 NotReadyReason::Status(TaskStatus::Proposed),
                 NotReadyReason::Held("waiting on design".into()),
+                NotReadyReason::NotYetDue(DATE),
                 NotReadyReason::BlockedBy(dep),
             ])
         );
@@ -879,7 +942,7 @@ mod tests {
     #[test]
     fn closed_dependency_is_a_distinct_reason() {
         let dep = id();
-        let r = readiness(&open(id()), &[(dep, Some(TaskStatus::Cancelled))]);
+        let r = readiness(&open(id()), &[(dep, Some(TaskStatus::Cancelled))], NOW);
         assert_eq!(r, Readiness::NotReady(vec![NotReadyReason::DependencyClosed(dep, TaskStatus::Cancelled)]));
     }
 
@@ -887,12 +950,12 @@ mod tests {
     fn incomplete_domain_is_unknown_never_ready() {
         let dep = id();
         assert_eq!(
-            readiness(&open(id()), &[(dep, None)]),
+            readiness(&open(id()), &[(dep, None)], NOW),
             Readiness::Unknown(vec![UnknownReason::DependencyUnavailable(dep)])
         );
         // A known blocker wins over an unknown one.
         let blocker = id();
-        let r = readiness(&open(id()), &[(dep, None), (blocker, Some(TaskStatus::Open))]);
+        let r = readiness(&open(id()), &[(dep, None), (blocker, Some(TaskStatus::Open))], NOW);
         assert_eq!(r, Readiness::NotReady(vec![NotReadyReason::BlockedBy(blocker)]));
     }
 
@@ -1523,8 +1586,8 @@ mod tests {
                     .filter(|e| e.counts(RelationKind::DependsOn) && e.from == *t)
                     .map(|e| (e.to, Some(status_of[&e.to])))
                     .collect();
-                let snapshot = TaskSnapshot { id: *t, status: status_of[t], hold: None };
-                let r = readiness(&snapshot, &deps);
+                let snapshot = TaskSnapshot { id: *t, status: status_of[t], hold: None, not_before: None };
+                let r = readiness(&snapshot, &deps, NOW);
                 let all_done = deps.iter().all(|(_, s)| *s == Some(TaskStatus::Done));
                 assert_eq!(
                     r.is_ready(),

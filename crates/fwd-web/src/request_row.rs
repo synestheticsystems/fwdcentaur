@@ -43,6 +43,7 @@ use crate::waiting::{Kind, Row, Sorted};
 use crate::{claim, empty, fmt, keys, notification_card, references, store, whose};
 use ankurah::EntityId;
 use fwd_core::model::*;
+use fwd_core::not_before;
 use fwd_core::ops::{self, MessageContext};
 use fwd_core::rules::{self, DecisionMove, NotReadyReason, Readiness, RuleError, Verb};
 use leptos::prelude::*;
@@ -453,9 +454,9 @@ fn meta(kind: Kind, subject: EntityId, sender: Option<EntityId>, at: Memo<i64>, 
     view! { {said} {between} <span class="request-age">{ago}</span> }.into_any()
 }
 
-/// Whether an assigned task is ready, or what holds it up: the tasks it waits on, as lozenges, and
-/// its hold; none for a task its own status alone keeps from being ready (a row kept after its
-/// start), whose title's pill says that status.
+/// Whether an assigned task is ready, or what holds it up: the tasks it waits on, as lozenges, its
+/// hold and a not-before date to come; none for a task its own status alone keeps from being ready
+/// (a row kept after its start), whose title's pill says that status.
 fn readiness(t: &TaskView) -> Option<AnyView> {
     match store::readiness(t) {
         Readiness::Ready => Some("ready".into_any()),
@@ -468,7 +469,11 @@ fn readiness(t: &TaskView) -> Option<AnyView> {
                 })
                 .collect();
             let held = reasons.iter().any(|r| matches!(r, NotReadyReason::Held(_)));
-            if blockers.is_empty() && !held {
+            let date = reasons.iter().find_map(|r| match r {
+                NotReadyReason::NotYetDue(date) => Some(format!("{} ", not_before::words(*date))),
+                _ => None,
+            });
+            if blockers.is_empty() && !held && date.is_none() {
                 return None;
             }
             let waits = (!blockers.is_empty()).then(|| {
@@ -476,7 +481,7 @@ fn readiness(t: &TaskView) -> Option<AnyView> {
                     blockers.into_iter().map(|id| lozenges::single(Target::Task(id))).collect();
                 view! { "waits on " {lozenges} }
             });
-            Some(view! { {held.then_some("on hold ")} {waits} }.into_any())
+            Some(view! { {held.then_some("on hold ")} {date} {waits} }.into_any())
         }
         Readiness::Unknown(_) => Some("what it waits on is unavailable".into_any()),
     }

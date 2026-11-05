@@ -1,4 +1,5 @@
-//! The form on the Tasks page that writes a task with every field `fwd task create` takes (Daniel,
+//! The form on the Tasks page that writes a task with every field `fwd task create` takes but its
+//! not-before date, which only the command sets (Daniel,
 //! 2026-09-26: "can we have a task request function? or maybe a direct create task function?
 //! Ideally I'd be able to give the jist and have the triager actually write the task details, or
 //! specify every field myself."). Giving the gist is the Ask box's: a question asked of no one in
@@ -146,6 +147,7 @@ pub fn spec(filled: &Filled, known: &Known, scope: Option<ScopeChoice>) -> Resul
         propose: filled.propose,
         needs_review: filled.needs_review,
         priority: filled.priority,
+        not_before: None,
         labels: labels::typed(&filled.labels),
         after: picked(&filled.waits_on, WAITS_ON, known)?,
         under: one(&filled.part_of, PART_OF)?,
@@ -635,6 +637,7 @@ mod tests {
                 propose: true,
                 needs_review: true,
                 priority: Some(1),
+                not_before: None,
                 labels: vec!["web".into(), "retry".into()],
                 after: vec![a, c],
                 under: Some(c),

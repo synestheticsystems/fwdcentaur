@@ -15,6 +15,10 @@
 //! what a task waits for shows without the other scope's graph drawn in. A parent outside the scope
 //! of a task inside it heads that task's band instead.
 //!
+//! A task not yet due (`rules::not_yet_due`) leaves the drawing unless "show not yet due" is on, so
+//! that work filed early does not crowd the work at hand, and comes back as its date arrives
+//! (`clock.rs`); one that a task the filter keeps waits for stays as a stub (`plan`).
+//!
 //! Where each task and each edge goes is `layout.rs`'s to say, stubs included: a long edge passes
 //! between the tasks of the columns it crosses, and the order control in the page's heading says
 //! how each column is ordered, "auto" (the default) crossing edges as little as it can, "priority"
@@ -39,9 +43,9 @@
 //! page's task panel and the decision panel the same Full screen control"). In the VS Code webview
 //! a click opens the task on the Tasks page instead, its list filtered to the Graph's scope, with
 //! Back to the Graph (`back.rs`), which brings the drawing back zoomed, scrolled and showing closed
-//! tasks or not as the person left it: the page keeps those beside the route while it lives
-//! (`page_state.rs`; task toDjwytu, "Carry the Graph's scope filter and a page's state through
-//! Back in the webview").
+//! tasks and tasks not yet due or not as the person left it: the page keeps those beside the route
+//! while it lives (`page_state.rs`; task toDjwytu, "Carry the Graph's scope filter and a page's
+//! state through Back in the webview").
 //!
 //! The SVG is built as markup from the live snapshots and re-rendered whole on any change; clicks
 //! are delegated from the container to the node's `data-id`.
@@ -52,9 +56,10 @@ use crate::panel::{FullScreenToggle, PanelEdge, PanelSize};
 use crate::route::{self, Route};
 use crate::scope_filter::ScopeChoice;
 use crate::tasks::TaskDetail;
-use crate::{fmt, page_state, session, store};
+use crate::{clock, fmt, page_state, session, store};
 use ankurah::EntityId;
 use fwd_core::model::*;
+use fwd_core::not_before;
 use leptos::prelude::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use wasm_bindgen::JsCast;
@@ -91,18 +96,20 @@ const _: () = assert!(12.0 + ALSO_LETTERS as f64 * 5.5 < W - 12.0 - 10.0);
 /// page's choice (`scope_filter::follow`): none until the page has picked the one it opens on.
 #[component]
 pub fn GraphPage(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoice>>) -> impl IntoView {
-    // The zoom, the show-closed choice and the canvas's scroll as the person left them, when Back
-    // brought the page here; else as a visit starts (`page_state.rs`). The page keeps them there
-    // as they change.
+    // The zoom, the two choices of what to show and the canvas's scroll as the person left them,
+    // when Back brought the page here; else as a visit starts (`page_state.rs`). The page keeps them
+    // there as they change.
     let kept = page_state::open_graph();
     let show_closed = RwSignal::new(kept.show_closed);
+    let show_not_yet_due = RwSignal::new(kept.show_not_yet_due);
     let order = RwSignal::new(remembered_order());
     let zoom = RwSignal::new(kept.zoom);
     Effect::new(move |_| {
-        let (zoom, show_closed) = (zoom.get(), show_closed.get());
+        let (zoom, show_closed, show_not_yet_due) = (zoom.get(), show_closed.get(), show_not_yet_due.get());
         page_state::keep_graph(|state| {
             state.zoom = zoom;
             state.show_closed = show_closed;
+            state.show_not_yet_due = show_not_yet_due;
         });
     });
     let canvas = NodeRef::<leptos::html::Div>::new();
@@ -141,7 +148,7 @@ pub fn GraphPage(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoic
         let choice = scope.get()?;
         let tasks = store::tasks();
         let relations = store::relations();
-        planned(&tasks, &relations, choice, show_closed.get())
+        planned(&tasks, &relations, choice, show_closed.get(), show_not_yet_due.get())
     });
     // The layout, made again only when what it is made from or the order changes: it costs the
     // most, and a selection moves no box, so selecting a task only draws the layout again with the
@@ -194,8 +201,15 @@ pub fn GraphPage(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoic
             .collect::<Vec<_>>()
     };
     // What the canvas says instead of a drawing: until the page has picked its scope and the
-    // daemon has answered, that the drawing is on its way rather than that the scope is empty.
+    // daemon has answered, that the drawing is on its way rather than that the scope is empty; and
+    // with nothing to draw but tasks not yet due, that, rather than that it has no open tasks.
     let nothing = Signal::derive(move || match scope.get() {
+        Some(choice)
+            if !show_not_yet_due.get()
+                && facts(&store::tasks()).iter().any(|t| t.not_yet_due && choice.keeps(&t.scopes)) =>
+        {
+            Nothing::AllNotYetDue
+        }
         Some(choice) => Nothing::ToDraw { choice, show_closed: show_closed.get() },
         None => Nothing::Yet,
     });
@@ -223,6 +237,11 @@ pub fn GraphPage(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoic
                         <input type="checkbox" prop:checked=move || show_closed.get()
                             on:change=move |ev| show_closed.set(event_target_checked(&ev))/>
                         " show closed"
+                    </label>
+                    <label class="toggle">
+                        <input type="checkbox" prop:checked=move || show_not_yet_due.get()
+                            on:change=move |ev| show_not_yet_due.set(event_target_checked(&ev))/>
+                        " show not yet due"
                     </label>
                     <span class="zoom">
                         <button class="btn subtle" on:click=move |_| zoom.update(|z| *z = (*z - 0.1).max(0.3))>"−"</button>
@@ -274,6 +293,8 @@ fn on_the_tasks_page(task: EntityId, choice: Option<ScopeChoice>) -> Route {
 struct TaskFacts {
     id: EntityId,
     closed: bool,
+    /// Whether its not-before date is still to come (`rules::not_yet_due`).
+    not_yet_due: bool,
     /// The scopes it is worked in, any number (docs/DECISIONS.md, D136, "A task may be worked in
     /// several scopes"); none when it is worked in none. A scope chosen draws the task when it is
     /// one of them.
@@ -316,7 +337,7 @@ struct Plan {
     /// The tasks the filter keeps.
     kept: Vec<EntityId>,
     /// The tasks outside the filter that a dependency joins to one it keeps, or that are subtasks
-    /// of one it keeps, each once.
+    /// of one it keeps, and the tasks not yet due that one it keeps waits for, each once.
     stubs: Vec<EntityId>,
     /// The dependencies drawn as lines: between two kept tasks, and between a kept task and a
     /// stub, less the implied ones.
@@ -370,16 +391,26 @@ struct Band {
 /// each task outside it that a dependency joins to one of them, so a task that waits on work
 /// elsewhere (or that work elsewhere waits on) shows it, without that work's own graph drawn in: a
 /// stub brings no edge of its own. A subtask outside the filter of a task it keeps is a stub too,
-/// drawn in its parent's band. Closed tasks, stubs among them, are drawn only with `show_closed`.
-/// Of the dependencies between them, one that a chain of the others already says is left out
-/// (`implied`), so that each line drawn says something about the order the work can go in; a
-/// closed task left out of the drawing hands its chain back to the direct dependency. Subtask
-/// relations draw no lines: they make the bands (`banded`).
-fn plan(tasks: &[TaskFacts], edges: &[Edge], choice: ScopeChoice, show_closed: bool) -> Plan {
-    let shown: Vec<&TaskFacts> = tasks.iter().filter(|t| show_closed || !t.closed).collect();
+/// drawn in its parent's band. Closed tasks, stubs among them, are drawn only with `show_closed`,
+/// and tasks not yet due only with `show_not_yet_due`, but for one a kept task waits for, which is
+/// a stub wherever it is worked. Of the dependencies between them, one that a chain of the others
+/// already says is left out (`implied`), so that each line drawn says something about the order the
+/// work can go in; a closed task left out of the drawing hands its chain back to the direct
+/// dependency. Subtask relations draw no lines: they make the bands (`banded`).
+fn plan(tasks: &[TaskFacts], edges: &[Edge], choice: ScopeChoice, show_closed: bool, show_not_yet_due: bool) -> Plan {
+    let (shown, hidden): (Vec<&TaskFacts>, Vec<&TaskFacts>) =
+        tasks.iter().filter(|t| show_closed || !t.closed).partition(|t| show_not_yet_due || !t.not_yet_due);
     let kept: Vec<EntityId> = shown.iter().filter(|t| choice.keeps(&t.scopes)).map(|t| t.id).collect();
     let inside: HashSet<EntityId> = kept.iter().copied().collect();
-    let outside: HashSet<EntityId> = shown.iter().filter(|t| !choice.keeps(&t.scopes)).map(|t| t.id).collect();
+    let mut outside: HashSet<EntityId> = shown.iter().filter(|t| !choice.keeps(&t.scopes)).map(|t| t.id).collect();
+    // A task not yet due that a kept task waits for stays as a stub, where a closed one would go:
+    // left out, the kept task would look free to start when it is not.
+    let awaited: HashSet<EntityId> = edges
+        .iter()
+        .filter(|e| e.kind == RelationKind::DependsOn && inside.contains(&e.then))
+        .map(|e| e.first)
+        .collect();
+    outside.extend(hidden.iter().map(|t| t.id).filter(|t| awaited.contains(t)));
     let mut stubs: Vec<EntityId> = Vec::new();
     let mut drawn: Vec<Edge> = Vec::new();
     for edge in edges {
@@ -610,20 +641,31 @@ fn focus(plan: &Plan, selected: EntityId) -> Option<Focus> {
     Some(Focus { tasks, lit, implied })
 }
 
-/// What the drawing holds for `choice`, and what its layout is made from, or none when the filter
-/// keeps no task.
-fn planned(tasks: &[TaskView], relations: &[RelationView], choice: ScopeChoice, show_closed: bool) -> Option<Planned> {
-    let facts: Vec<TaskFacts> = tasks
+/// What the drawing needs of each of `tasks`.
+fn facts(tasks: &[TaskView]) -> Vec<TaskFacts> {
+    tasks
         .iter()
         .map(|t| TaskFacts {
             id: t.id(),
             closed: t.status().map(fmt::is_closed).unwrap_or(false),
+            not_yet_due: clock::comes_due(t).is_some(),
             // Through the index of relations by their ends, rather than every relation per task.
             scopes: store::scopes_of_task(t.id()),
         })
-        .collect();
+        .collect()
+}
+
+/// What the drawing holds for `choice`, and what its layout is made from, or none when the filter
+/// keeps no task.
+fn planned(
+    tasks: &[TaskView],
+    relations: &[RelationView],
+    choice: ScopeChoice,
+    show_closed: bool,
+    show_not_yet_due: bool,
+) -> Option<Planned> {
     let edges: Vec<Edge> = relations.iter().filter_map(Edge::of).collect();
-    let plan = plan(&facts, &edges, choice, show_closed);
+    let plan = plan(&facts(tasks), &edges, choice, show_closed, show_not_yet_due);
     if plan.kept.is_empty() {
         return None;
     }
@@ -707,7 +749,8 @@ fn render(
         // Who is doing it: its assignee (docs/DECISIONS.md, D45), where the node showed the owner
         // of its scope until scopes lost their owner (D108).
         let assignee = fwd_core::ops::assignee_of(t).ok().flatten().map(store::handle_of);
-        let mut sub = fmt::status_label(status);
+        // While it is not yet due its date says more than its status, which its box's look says too.
+        let mut sub = clock::comes_due(t).map_or_else(|| fmt::status_label(status), not_before::words);
         if let Some(pr) = t.priority().ok().flatten() {
             sub.push_str(&format!(" · P{pr}"));
         }
@@ -730,7 +773,7 @@ fn render(
             id.to_base64(),
             fmt::escape(&titles[id]),
             fmt::escape(&fmt::truncate(&titles[id], 27)),
-            fmt::escape(&sub)
+            fmt::escape(&fmt::truncate(&sub, 32))
         ));
         if count > 0 {
             s.push_str(&format!(
@@ -741,11 +784,14 @@ fn render(
         s.push_str(&also(id));
         s.push_str("</g>");
     }
-    // A stub: muted, with the task's title and its scopes' names; its hover adds its status.
+    // A stub: muted, with the task's title and its scopes' names, or while it is not yet due its
+    // date, which says why a task waits for it where its scopes might not; its hover adds its status
+    // and its scopes.
     for id in &plan.stubs {
         let (Some(t), Some(&(x, y))) = (by_id.get(id), at.get(id)) else { continue };
         let status = fmt::status_label(t.status().unwrap_or(TaskStatus::Proposed));
         let name = scope_name(id);
+        let line = clock::comes_due(t).map_or_else(|| name.clone(), not_before::words);
         let mut class = String::from("node stub");
         if selected == Some(*id) {
             class.push_str(" selected");
@@ -758,7 +804,7 @@ fn render(
             id.to_base64(),
             fmt::escape(&format!("{}: {status}, {name}", titles[id])),
             fmt::escape(&fmt::truncate(&titles[id], 27)),
-            fmt::escape(&fmt::truncate(&name, 30)),
+            fmt::escape(&fmt::truncate(&line, 30)),
             also(id)
         ));
     }
@@ -1030,7 +1076,7 @@ mod tests {
     }
 
     fn task(n: u8, scope: Option<u8>, closed: bool) -> TaskFacts {
-        TaskFacts { id: id(n), closed, scopes: scope.map(id).into_iter().collect() }
+        TaskFacts { id: id(n), closed, not_yet_due: false, scopes: scope.map(id).into_iter().collect() }
     }
 
     /// `then` depends on `first`.
@@ -1192,19 +1238,98 @@ mod tests {
         edges.iter().map(|e| (e.first.to_bytes()[0] as usize, e.then.to_bytes()[0] as usize)).collect()
     }
 
+    /// A task whose not-before date is still to come.
+    fn not_yet_due(n: u8, scope: Option<u8>) -> TaskFacts {
+        TaskFacts { not_yet_due: true, ..task(n, scope, false) }
+    }
+
+    #[test]
+    fn a_task_not_yet_due_leaves_the_drawing_until_it_is_asked_for() {
+        let tasks = [task(1, Some(50), false), not_yet_due(2, Some(50))];
+        let scope = ScopeChoice::Scope(id(50));
+        let left_out = plan(&tasks, &[], scope, false, false);
+        assert_eq!((left_out.kept, left_out.stubs), (vec![id(1)], vec![]));
+        let asked_for = plan(&tasks, &[], scope, false, true);
+        assert_eq!((asked_for.kept, asked_for.stubs), (vec![id(1), id(2)], vec![]));
+    }
+
+    /// The one way a task not yet due differs from a closed one: 2 waits for 1, not yet due, and
+    /// would look free to start with 1 gone; 4 waits for 3, closed, and is.
+    #[test]
+    fn a_task_not_yet_due_that_a_kept_task_waits_for_stays_as_a_stub_where_a_closed_one_goes() {
+        let tasks =
+            [not_yet_due(1, Some(50)), task(2, Some(50), false), task(3, Some(50), true), task(4, Some(50), false)];
+        let edges = [waits(2, 1), waits(4, 3)];
+        for choice in [ScopeChoice::Scope(id(50)), ScopeChoice::All] {
+            let drawn = plan(&tasks, &edges, choice, false, false);
+            assert_eq!(drawn.kept, vec![id(2), id(4)], "{choice:?}");
+            assert_eq!(drawn.stubs, vec![id(1)], "{choice:?}");
+            assert_eq!(drawn.edges, vec![waits(2, 1)], "{choice:?}");
+        }
+        // Asked for, it is drawn like any other task of the scope.
+        let asked_for = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, true);
+        assert_eq!((asked_for.kept, asked_for.stubs), (vec![id(1), id(2), id(4)], vec![]));
+    }
+
+    /// 3, kept, waits for 2, not yet due, which waits for 1, kept, and for 4, not yet due. The stub
+    /// keeps its line to 1, as the Plan's edges between a kept task and a stub all are, so that the
+    /// chain from 1 to 3 still shows; it brings no line of its own to 4, which leaves the drawing,
+    /// since no kept task waits for 4 itself.
+    #[test]
+    fn a_stub_not_yet_due_keeps_its_lines_to_kept_tasks_and_brings_no_others() {
+        let tasks =
+            [task(1, Some(50), false), not_yet_due(2, Some(50)), task(3, Some(50), false), not_yet_due(4, Some(50))];
+        let edges = [waits(3, 2), waits(2, 1), waits(2, 4), waits(3, 1)];
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
+        assert_eq!(drawn.kept, vec![id(1), id(3)]);
+        assert_eq!(drawn.stubs, vec![id(2)]);
+        assert_eq!(drawn.edges, vec![waits(3, 2), waits(2, 1)]);
+        assert_eq!(drawn.implied, vec![waits(3, 1)], "the chain through the stub says what the direct one does");
+    }
+
+    /// As a closed parent does, a parent not yet due goes on heading the band of a subtask the filter
+    /// keeps, and draws no box of its own.
+    #[test]
+    fn a_parent_not_yet_due_still_heads_the_band_of_a_kept_subtask() {
+        let tasks = [not_yet_due(1, Some(50)), task(2, Some(50), false)];
+        let drawn = plan(&tasks, &[part_of(2, 1)], ScopeChoice::Scope(id(50)), false, false);
+        assert_eq!((drawn.kept, drawn.stubs), (vec![id(2)], vec![]));
+        assert_eq!(drawn.bands, vec![Band { head: id(1), within: None }]);
+        assert_eq!(drawn.band_of.get(&id(2)), Some(&0));
+    }
+
+    /// Only a kept task waiting for it keeps a task not yet due: outside the scope too, one that
+    /// waits for a kept task, or that only another task not yet due waits for (2), or that is only
+    /// a kept task's subtask, leaves the drawing, where a task that is due would be a stub.
+    #[test]
+    fn a_task_not_yet_due_that_nothing_kept_waits_for_leaves_the_drawing_whatever_else_joins_them() {
+        let tasks = [
+            task(1, Some(50), false),
+            not_yet_due(2, Some(50)),
+            not_yet_due(3, Some(60)),
+            not_yet_due(4, Some(60)),
+            not_yet_due(5, Some(60)),
+        ];
+        let edges = [waits(2, 1), waits(3, 1), waits(3, 2), part_of(4, 1), waits(1, 5)];
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
+        assert_eq!(drawn.kept, vec![id(1)]);
+        assert_eq!(drawn.stubs, vec![id(5)], "1 waits for 5, whichever scope it is worked in");
+        assert_eq!(drawn.edges, vec![waits(1, 5)]);
+    }
+
     #[test]
     fn a_dependency_that_a_chain_of_accepted_ones_already_says_is_left_out() {
         // 2 waits for 1, 3 for 2 and 4 for 3; 3 also waits for 1, and 4 for 1 and for 2, which the
         // chain already says.
         let tasks: Vec<TaskFacts> = (1..=4).map(|n| task(n, Some(50), false)).collect();
         let edges = [waits(2, 1), waits(3, 1), waits(3, 2), waits(4, 1), waits(4, 2), waits(4, 3)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(drawn.edges, vec![waits(2, 1), waits(3, 2), waits(4, 3)]);
         assert_eq!(drawn.implied, vec![waits(3, 1), waits(4, 1), waits(4, 2)]);
         // Two relations that say the same dependency are both drawn, the one over the other: a
         // chain is two dependencies or more.
         let twice = [waits(2, 1), waits(2, 1)];
-        assert_eq!(plan(&tasks, &twice, ScopeChoice::Scope(id(50)), false).edges, twice.to_vec());
+        assert_eq!(plan(&tasks, &twice, ScopeChoice::Scope(id(50)), false, false).edges, twice.to_vec());
     }
 
     #[test]
@@ -1213,11 +1338,11 @@ mod tests {
         let scope = ScopeChoice::Scope(id(50));
         // A chain with a proposed link says nothing yet, so 3 is drawn waiting for 1.
         let edges = [might_wait(2, 1), waits(3, 2), waits(3, 1)];
-        assert_eq!(plan(&tasks, &edges, scope, false).edges, edges.to_vec());
+        assert_eq!(plan(&tasks, &edges, scope, false, false).edges, edges.to_vec());
         // A proposed dependency that an accepted chain already says is drawn, since it waits on
         // someone's word.
         let edges = [waits(2, 1), waits(3, 2), might_wait(3, 1)];
-        let drawn = plan(&tasks, &edges, scope, false);
+        let drawn = plan(&tasks, &edges, scope, false, false);
         assert_eq!((drawn.edges, drawn.implied), (edges.to_vec(), vec![]));
     }
 
@@ -1228,7 +1353,7 @@ mod tests {
         // 1 is a subtask of 2, which 3 waits for: 3 is still drawn waiting for 1, and 1 is drawn
         // in the band 2 heads.
         let edges = [part_of(1, 2), waits(3, 2), waits(3, 1)];
-        let drawn = plan(&tasks, &edges, scope, false);
+        let drawn = plan(&tasks, &edges, scope, false, false);
         assert_eq!(drawn.edges, vec![waits(3, 2), waits(3, 1)]);
         assert_eq!(drawn.bands, vec![Band { head: id(2), within: None }]);
         assert_eq!(drawn.band_of.get(&id(1)), Some(&0));
@@ -1252,7 +1377,7 @@ mod tests {
         // 1 holds 2 and 3, and 3 holds 4 and 5; 6 is part of nothing; 4 waits for 6.
         let tasks: Vec<TaskFacts> = (1..=6).map(|n| task(n, Some(50), false)).collect();
         let edges = [part_of(2, 1), part_of(3, 1), part_of(4, 3), part_of(5, 3), waits(4, 6)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(drawn.edges, vec![waits(4, 6)]);
         assert_eq!(drawn.bands, vec![Band { head: id(1), within: None }, Band { head: id(3), within: Some(0) }]);
         let band_of = |n: u8| drawn.band_of.get(&id(n)).copied();
@@ -1270,7 +1395,7 @@ mod tests {
         // 3 is part of 1 and of 2, and might be part of 4.
         let tasks: Vec<TaskFacts> = (1..=4).map(|n| task(n, Some(50), false)).collect();
         let edges = [part_of(3, 2), part_of(3, 1), might_part_of(3, 4)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         // Both kept, the first by id, 1, holds it; 2 heads no band, holding nothing else.
         assert_eq!(drawn.bands, vec![Band { head: id(1), within: None }]);
         assert_eq!(drawn.band_of.get(&id(3)), Some(&0));
@@ -1281,7 +1406,7 @@ mod tests {
         assert_eq!(also_part_of(&[part_of(3, 2)], false, &title), "part of task 2");
         // A parent the filter keeps comes before one it does not, whatever their ids.
         let tasks = [task(1, Some(60), false), task(2, Some(50), false), task(3, Some(50), false)];
-        let drawn = plan(&tasks, &edges[..2], ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges[..2], ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(drawn.bands, vec![Band { head: id(2), within: None }]);
         assert_eq!(drawn.also.get(&id(3)), Some(&vec![part_of(3, 1)]));
     }
@@ -1297,7 +1422,7 @@ mod tests {
             task(5, Some(50), false),
         ];
         let edges = [part_of(2, 1), part_of(3, 1), part_of(4, 1), part_of(5, 4), waits(5, 2)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(drawn.bands, vec![Band { head: id(1), within: None }, Band { head: id(4), within: Some(0) }]);
         let weigh = |id: &EntityId| {
             let n = id.to_bytes()[0];
@@ -1330,7 +1455,7 @@ mod tests {
             markup.contains(r#"<g class="band-label outside dim""#) && markup.contains(r#"<g class="band-label dim""#)
         );
         // With no bands, no column for their labels.
-        let unbanded = plan(&tasks[1..], &[waits(5, 2)], ScopeChoice::Scope(id(50)), false);
+        let unbanded = plan(&tasks[1..], &[waits(5, 2)], ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(band_markup(&unbanded, &[], &drawing, None, None), (String::new(), 0.0));
     }
 
@@ -1361,7 +1486,7 @@ mod tests {
         // 1 is part of 2 and 2 part of 1, as relations arriving through sync can say: the loop's
         // first task, 1, keeps its parent, and 2, whose parent 1 is, gets none.
         let tasks: Vec<TaskFacts> = (1..=2).map(|n| task(n, Some(50), false)).collect();
-        let drawn = plan(&tasks, &[part_of(1, 2), part_of(2, 1)], scope, false);
+        let drawn = plan(&tasks, &[part_of(1, 2), part_of(2, 1)], scope, false, false);
         assert_eq!(drawn.bands, vec![Band { head: id(2), within: None }]);
         assert_eq!(drawn.band_of.get(&id(1)), Some(&0));
         assert_eq!(drawn.boxed(), [id(1)]);
@@ -1370,7 +1495,7 @@ mod tests {
         // the bands nest 3, then 2, then 1.
         let tasks: Vec<TaskFacts> = (1..=4).map(|n| task(n, Some(50), false)).collect();
         let edges = [part_of(1, 2), part_of(2, 3), part_of(3, 1), part_of(4, 1)];
-        let drawn = plan(&tasks, &edges, scope, false);
+        let drawn = plan(&tasks, &edges, scope, false, false);
         let heads: Vec<(EntityId, Option<EntityId>)> =
             drawn.bands.iter().map(|band| (band.head, band.within.map(|w| drawn.bands[w].head))).collect();
         assert_eq!(heads, [(id(1), Some(id(2))), (id(2), Some(id(3))), (id(3), None)]);
@@ -1385,7 +1510,7 @@ mod tests {
             [task(1, Some(50), true), task(2, Some(50), false), task(3, Some(60), true), task(4, Some(50), false)];
         let edges = [part_of(2, 1), part_of(4, 3)];
         let scope = ScopeChoice::Scope(id(50));
-        let drawn = plan(&tasks, &edges, scope, false);
+        let drawn = plan(&tasks, &edges, scope, false, false);
         assert_eq!(drawn.kept, vec![id(2), id(4)], "show closed is off");
         assert_eq!(drawn.bands, vec![Band { head: id(1), within: None }, Band { head: id(3), within: None }]);
         let bands: Vec<Option<usize>> = [2, 4].iter().map(|&n| drawn.band_of.get(&id(n)).copied()).collect();
@@ -1425,7 +1550,7 @@ mod tests {
             task(5, Some(60), false),
         ];
         let edges = [part_of(2, 1), part_of(3, 1), part_of(5, 4), waits(3, 2)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!((drawn.kept, drawn.stubs.clone()), (vec![id(2), id(3), id(4)], vec![id(5)]));
         assert_eq!(drawn.bands, vec![Band { head: id(1), within: None }, Band { head: id(4), within: None }]);
         let bands: Vec<Option<usize>> = [2, 3, 5].iter().map(|&n| drawn.band_of.get(&id(n)).copied()).collect();
@@ -1433,7 +1558,7 @@ mod tests {
         // A stub makes no band: 5's own subtask, 6, outside, is not drawn.
         let edges = [part_of(5, 4), part_of(6, 5)];
         let tasks = [task(4, Some(50), false), task(5, Some(60), false), task(6, Some(60), false)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!((drawn.stubs, drawn.bands), (vec![id(5)], vec![Band { head: id(4), within: None }]));
     }
 
@@ -1444,18 +1569,18 @@ mod tests {
         // with "show closed", the chain says nothing until it is drawn.
         let tasks = [task(1, Some(50), false), task(2, Some(50), true), task(3, Some(50), false)];
         let edges = [waits(2, 1), waits(3, 2), waits(3, 1)];
-        assert_eq!(plan(&tasks, &edges, scope, false).edges, vec![waits(3, 1)]);
-        let every = plan(&tasks, &edges, scope, true);
+        assert_eq!(plan(&tasks, &edges, scope, false, false).edges, vec![waits(3, 1)]);
+        let every = plan(&tasks, &edges, scope, true, false);
         assert_eq!((every.edges, every.implied), (vec![waits(2, 1), waits(3, 2)], vec![waits(3, 1)]));
         // Through a stub, whose two lines are drawn.
         let tasks = [task(1, Some(50), false), task(2, Some(60), false), task(3, Some(50), false)];
-        let drawn = plan(&tasks, &edges, scope, false);
+        let drawn = plan(&tasks, &edges, scope, false, false);
         assert_eq!((drawn.edges, drawn.implied), (vec![waits(2, 1), waits(3, 2)], vec![waits(3, 1)]));
         // Through two stubs, between which no line is drawn, since a stub brings none of its own.
         let tasks =
             [task(1, Some(50), false), task(2, Some(60), false), task(3, Some(60), false), task(4, Some(50), false)];
         let edges = [waits(2, 1), waits(3, 2), waits(4, 3), waits(4, 1)];
-        assert_eq!(plan(&tasks, &edges, scope, false).edges, vec![waits(2, 1), waits(4, 3), waits(4, 1)]);
+        assert_eq!(plan(&tasks, &edges, scope, false, false).edges, vec![waits(2, 1), waits(4, 3), waits(4, 1)]);
     }
 
     #[test]
@@ -1464,7 +1589,7 @@ mod tests {
         // for both.
         let tasks: Vec<TaskFacts> = (1..=3).map(|n| task(n, Some(50), false)).collect();
         let edges = [waits(2, 1), waits(1, 2), waits(3, 1), waits(3, 2)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(drawn.implied, vec![waits(3, 1)]);
         assert_eq!(reached(&drawn.edges), reached(&edges));
     }
@@ -1487,7 +1612,7 @@ mod tests {
             part_of(9, 3),
             part_of(11, 12),
         ];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(drawn.implied, vec![waits(3, 1)]);
         // What selecting a task lights: its chain's tasks, in order, its chain's lines, and its
         // implied dependencies.
@@ -1521,7 +1646,7 @@ mod tests {
         // 2 waits for 1, which waits for 0, and for 0 by that chain; 3 waits for 0 alone.
         let tasks: Vec<TaskFacts> = (0..4).map(|n| task(n, Some(50), false)).collect();
         let edges = [waits(3, 0), waits(1, 0), waits(2, 1), waits(2, 0)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         let weigh = |id: &EntityId| {
             let n = id.to_bytes()[0];
             layout::Task { title: format!("{n}"), id: format!("{n}"), priority: None, status: 0, band: None }
@@ -1560,7 +1685,7 @@ mod tests {
         let dependencies = edges.iter().filter(|e| e.kind == RelationKind::DependsOn).count();
         assert_eq!((weighed.len(), dependencies, edges.len() - dependencies), (71, 174, 60));
         let tasks: Vec<TaskFacts> = (0..71).map(|n| task(n, Some(200), false)).collect();
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(200)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(200)), false, false);
         // 69 dependencies are implied, and the 60 subtask relations make 10 bands, one for each
         // parent, which has no dependency and so no box: 105 lines among 61 boxes.
         assert_eq!((drawn.edges.len(), drawn.implied.len(), drawn.bands.len()), (105, 69, 10));
@@ -1603,7 +1728,7 @@ mod tests {
             task(5, None, false),
         ];
         let edges = [waits(2, 1), waits(2, 3), waits(3, 4), waits(4, 5), waits(5, 2)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(drawn.kept, vec![id(1), id(2)]);
         // 3 (another scope's) and 5 (in none) are stubs; 4 joins no kept task, and the edges
         // among 3, 4 and 5 stay out.
@@ -1626,7 +1751,7 @@ mod tests {
         let tasks = [task(1, Some(50), false), task(2, None, false), task(3, None, false)];
         let subtask = Edge { first: id(3), then: id(1), kind: RelationKind::SubtaskOf, proposed: true };
         let edges = [waits(2, 1), subtask, waits(3, 2)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::NoScope, false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::NoScope, false, false);
         assert_eq!(drawn.kept, vec![id(2), id(3)]);
         assert_eq!(drawn.stubs, vec![id(1)], "one stub, however many edges reach it");
         // The proposed subtask relation makes no band; it is named beside its subtask.
@@ -1638,19 +1763,19 @@ mod tests {
     /// is a stub of neither.
     #[test]
     fn a_task_in_two_scopes_is_drawn_with_either() {
-        let both = TaskFacts { id: id(9), closed: false, scopes: vec![id(50), id(60)] };
+        let both = TaskFacts { id: id(9), closed: false, not_yet_due: false, scopes: vec![id(50), id(60)] };
         let tasks = [task(1, Some(50), false), task(3, Some(60), false), both];
         let edges = [waits(9, 1), waits(3, 9)];
-        assert_eq!(plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false).kept, vec![id(1), id(9)]);
-        assert_eq!(plan(&tasks, &edges, ScopeChoice::Scope(id(60)), false).kept, vec![id(3), id(9)]);
-        assert_eq!(plan(&tasks, &edges, ScopeChoice::NoScope, false).kept, Vec::<EntityId>::new());
+        assert_eq!(plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false).kept, vec![id(1), id(9)]);
+        assert_eq!(plan(&tasks, &edges, ScopeChoice::Scope(id(60)), false, false).kept, vec![id(3), id(9)]);
+        assert_eq!(plan(&tasks, &edges, ScopeChoice::NoScope, false, false).kept, Vec::<EntityId>::new());
     }
 
     #[test]
     fn all_scopes_draws_every_task_and_no_stub() {
         let tasks = [task(1, Some(50), false), task(2, Some(60), false), task(3, None, false)];
         let edges = [waits(2, 1), waits(3, 2)];
-        let drawn = plan(&tasks, &edges, ScopeChoice::All, false);
+        let drawn = plan(&tasks, &edges, ScopeChoice::All, false, false);
         assert_eq!(drawn, unbanded(&[1, 2, 3], &[], &edges));
     }
 
@@ -1685,9 +1810,9 @@ mod tests {
     fn a_closed_task_is_drawn_stub_or_not_only_with_show_closed() {
         let tasks = [task(1, Some(50), false), task(2, Some(60), true), task(3, Some(50), true)];
         let edges = [waits(1, 2), waits(1, 3)];
-        let open = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false);
+        let open = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), false, false);
         assert_eq!(open, unbanded(&[1], &[], &[]));
-        let every = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), true);
+        let every = plan(&tasks, &edges, ScopeChoice::Scope(id(50)), true, false);
         assert_eq!(every, unbanded(&[1, 3], &[2], &edges));
     }
 }

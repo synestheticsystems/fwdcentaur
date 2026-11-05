@@ -46,6 +46,9 @@ pub enum Nothing {
     /// The Graph page: no task the scope filter's `choice` keeps, or without `show_closed`, no open
     /// one.
     ToDraw { choice: ScopeChoice, show_closed: bool },
+    /// The Graph page: every open task the scope filter keeps is not yet due, so that "no open
+    /// tasks" would not be true while the page's toggle would draw them.
+    AllNotYetDue,
     /// The Scopes page: no scope.
     Scopes,
     /// A task's panel, for an id no task has.
@@ -91,6 +94,7 @@ impl Nothing {
                 (ScopeChoice::All, true) => "No tasks.",
             }
             .into(),
+            Nothing::AllNotYetDue => "Every open task here is not yet due.".into(),
             Nothing::Scopes => "No scopes.".into(),
             Nothing::Task => "No such task.".into(),
             Nothing::Decision => "No such decision.".into(),
@@ -176,6 +180,7 @@ mod tests {
             (drawing(ScopeChoice::NoScope, true), "No tasks without a scope."),
             (drawing(ScopeChoice::All, false), "No open tasks."),
             (drawing(ScopeChoice::All, true), "No tasks."),
+            (Nothing::AllNotYetDue, "Every open task here is not yet due."),
             (Nothing::Scopes, "No scopes."),
             (Nothing::Task, "No such task."),
             (Nothing::Decision, "No such decision."),

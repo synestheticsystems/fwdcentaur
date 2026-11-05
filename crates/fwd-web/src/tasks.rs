@@ -32,6 +32,7 @@ use crate::{
 };
 use ankurah::EntityId;
 use fwd_core::model::*;
+use fwd_core::not_before;
 use fwd_core::ops;
 use fwd_core::rules::{self, NotReadyReason, Readiness, UnknownReason, Verb};
 use leptos::prelude::*;
@@ -227,7 +228,7 @@ fn TaskList(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoice>>) 
     view! {
         <header class="page-head">
             <h2>"Tasks"</h2>
-            <button class="btn primary" title="Write a task with every field fwd task create takes"
+            <button class="btn primary" title="Write a task with every field fwd task create takes but its not-before date"
                 on:click=move |_| route::go(Route::NewTask { scope: scope.get_untracked() })>"New task"</button>
             <input class="search" type="search" placeholder="filter by title" prop:value=move || search.get()
                 on:input=move |ev| search.set(event_target_value(&ev))/>
@@ -379,6 +380,7 @@ pub fn TaskDetail(id: EntityId) -> impl IntoView {
                     {t.priority().ok().flatten().map(|p| view! { <span class="pill">{format!("P{p}")}</span> })}
                     {t.needs_review().unwrap_or(false).then(|| view! { <span class="pill">"review required"</span> })}
                     {hold.map(|h| view! { <span class="pill hold" title=h>"on hold"</span> })}
+                    {t.not_before().ok().flatten().map(|date| view! { <span class="pill">{not_before::words(date)}</span> })}
                 </div>
                 <div class="muted">"created by " {created_by} " " {fmt::ago(t.created().unwrap_or(0))}</div>
             </header>
@@ -552,6 +554,7 @@ fn readiness_view(r: &Readiness, tasks: &[TaskView]) -> AnyView {
                 .map(|reason| match reason {
                     NotReadyReason::Status(s) => view! { <li>"status is " {fmt::status_label(*s)}</li> }.into_any(),
                     NotReadyReason::Held(why) => view! { <li>"on hold: " {why.clone()}</li> }.into_any(),
+                    NotReadyReason::NotYetDue(date) => view! { <li>{not_before::words(*date)}</li> }.into_any(),
                     NotReadyReason::BlockedBy(id) => view! { <li>"blocked by " {link(*id, title(*id))}</li> }.into_any(),
                     NotReadyReason::DependencyClosed(id, s) => {
                         view! { <li>"dependency " {link(*id, title(*id))} " is " {fmt::status_label(*s)} "; retract the relation or cancel this task"</li> }.into_any()

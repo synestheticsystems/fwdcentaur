@@ -969,9 +969,9 @@ impl Holds for StoreHolds<'_> {
     }
 }
 
-/// Whether nothing a task depends on, and no hold, keeps it from being started: its readiness,
-/// leaving out its own status, so that a move on the task (a start, a mark done) does not make it
-/// "waiting" and move its row. What cannot be known holds it up.
+/// Whether nothing a task depends on, no hold and no date to come keeps it from being started: its
+/// readiness, leaving out its own status, so that a move on the task (a start, a mark done) does
+/// not make it "waiting" and move its row. What cannot be known holds it up.
 pub fn nothing_holds_up(readiness: &Readiness) -> bool {
     match readiness {
         Readiness::Ready => true,
@@ -1484,6 +1484,7 @@ mod tests {
             R::Held("wait".into())
         ])));
         assert!(!nothing_holds_up(&Readiness::NotReady(vec![R::DependencyClosed(id(3), TaskStatus::Cancelled)])));
+        assert!(!nothing_holds_up(&Readiness::NotReady(vec![R::NotYetDue(0)])));
         assert!(!nothing_holds_up(&Readiness::Unknown(Vec::new())));
     }
 

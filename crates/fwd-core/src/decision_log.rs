@@ -9,14 +9,15 @@
 //! file is this rendering, so its first line says so. Days are shown in the reader's own
 //! calendar: this machine's time zone, or the browser's in the page.
 
+use crate::calendar::{local_offset_ms, parse_day, DAY_MS};
 use crate::model::*;
 use crate::ops;
 use crate::rules::DecisionMove;
 use ankurah::{Context, EntityId};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::collections::HashMap;
 
-const DAY_MS: i64 = 86_400_000;
+pub use crate::calendar::date_at;
 
 /// The calendar day of a time in milliseconds since the epoch, as `YYYY-MM-DD`, in this
 /// machine's time zone (the browser's, in the page): a ruling made on a Pacific evening is dated
@@ -25,84 +26,10 @@ pub fn date(ms: i64) -> String {
     date_at(ms, local_offset_ms(ms))
 }
 
-/// The calendar day of `ms` in a time zone `offset_ms` east of UTC.
-pub fn date_at(ms: i64, offset_ms: i64) -> String {
-    let (y, m, d) = civil_from_days((ms + offset_ms).div_euclid(DAY_MS));
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// How far east of UTC this machine's clock is at `ms`, daylight saving included.
-#[cfg(all(feature = "native", unix))]
-fn local_offset_ms(ms: i64) -> i64 {
-    let secs = ms.div_euclid(1000) as libc::time_t;
-    // SAFETY: `localtime_r` writes only into the `tm` it is given, which is zeroed plain data.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let found = unsafe { !libc::localtime_r(&secs, &mut tm).is_null() };
-    if found {
-        // `c_long` is 64 bits wide on the targets fwd builds for; the cast keeps the rest honest.
-        #[allow(clippy::unnecessary_cast)]
-        let seconds_east = tm.tm_gmtoff as i64;
-        seconds_east * 1000
-    } else {
-        0
-    }
-}
-
-/// How far east of UTC the browser's clock is at `ms`.
-#[cfg(target_arch = "wasm32")]
-fn local_offset_ms(ms: i64) -> i64 {
-    -(js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64)).get_timezone_offset() as i64) * 60_000
-}
-
-/// Elsewhere (the page's native tests), UTC.
-#[cfg(not(any(all(feature = "native", unix), target_arch = "wasm32")))]
-fn local_offset_ms(_ms: i64) -> i64 {
-    0
-}
-
 /// A `YYYY-MM-DD` day, as noon UTC that day: noon falls on the same calendar day in every time
 /// zone from UTC-11 to UTC+11, so the day stays the day it was given wherever it is shown.
 pub fn parse_date(s: &str) -> Result<i64> {
-    let parts: Vec<&str> = s.trim().split('-').collect();
-    let parsed = match parts.as_slice() {
-        [y, m, d] if y.len() == 4 && m.len() == 2 && d.len() == 2 => {
-            (y.parse::<i64>().ok(), m.parse::<u32>().ok(), d.parse::<u32>().ok())
-        }
-        _ => (None, None, None),
-    };
-    let (Some(y), Some(m), Some(d)) = parsed else {
-        bail!("`{s}` is not a day: write it as YYYY-MM-DD");
-    };
-    let days = days_from_civil(y, m, d);
-    if !(1..=12).contains(&m) || civil_from_days(days) != (y, m, d) {
-        bail!("`{s}` is not a day of the calendar");
-    }
-    Ok(days * DAY_MS + DAY_MS / 2)
-}
-
-/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's `days_from_civil`).
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = y - era * 400;
-    let mp = i64::from((m + 9) % 12);
-    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// The date of a day number since 1970-01-01 (Howard Hinnant's `civil_from_days`).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
+    Ok(parse_day(s)? * DAY_MS + DAY_MS / 2)
 }
 
 /// The scope a ruling governs, as the log names it and groups its rulings under it.

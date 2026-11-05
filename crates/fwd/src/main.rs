@@ -13,6 +13,7 @@ use fwd_core::decision_log;
 use fwd_core::dormancy;
 use fwd_core::model::*;
 use fwd_core::naming;
+use fwd_core::not_before;
 use fwd_core::ops::{self, Amend, CreateDecision, CreateScope, CreateTask, EditScope, Kind, MessageContext};
 use fwd_core::project::{self, Checkout, InitOptions, Paths, Project, Resolved};
 use fwd_core::rules::{self, DecisionMove, Verb};
@@ -985,6 +986,10 @@ struct CreateArgs {
     /// its number, 0 to 4).
     #[arg(long, value_parser = priority_arg)]
     priority: Option<PriorityArg>,
+    /// Not actionable before this, which keeps it out of what is ready until then: YYYY-MM-DD, the
+    /// start of that day in this machine's time zone, or an RFC 3339 instant.
+    #[arg(long, value_name = "DATE", value_parser = not_before_arg)]
+    not_before: Option<i64>,
     #[arg(long)]
     propose: bool,
     #[arg(long)]
@@ -1011,6 +1016,13 @@ struct AmendArgs {
     /// its number, 0 to 4).
     #[arg(long, value_parser = priority_arg)]
     priority: Option<PriorityArg>,
+    /// Not actionable before this, which keeps it out of what is ready until then: YYYY-MM-DD, the
+    /// start of that day in this machine's time zone, or an RFC 3339 instant.
+    #[arg(long, value_name = "DATE", value_parser = not_before_arg)]
+    not_before: Option<i64>,
+    /// Take its not-before date off.
+    #[arg(long, conflicts_with = "not_before")]
+    clear_not_before: bool,
     /// Add a label, such as bug or feature (repeatable; commas separate several).
     #[arg(long, value_delimiter = ',')]
     label: Vec<String>,
@@ -1165,6 +1177,19 @@ impl PriorityArg {
                 word
             }
         }
+    }
+}
+
+/// What refuses a `--not-before` that is no day and no instant: the values it takes.
+const NOT_BEFORE_VALUES: &str = "a not-before date is YYYY-MM-DD, the start of that day in this machine's time zone, or an RFC 3339 instant such as 2026-12-01T09:00:00-08:00";
+
+/// `--not-before`: a day or an instant, as the instant a task stores, so that every machine reads
+/// one moment whichever time zone the command ran in; anything else is refused, naming what is
+/// taken ([`NOT_BEFORE_VALUES`]).
+fn not_before_arg(arg: &str) -> Result<i64, String> {
+    match chrono::DateTime::parse_from_rfc3339(arg) {
+        Ok(instant) => Ok(instant.timestamp_millis()),
+        Err(_) => not_before::from_day(arg).map_err(|_| NOT_BEFORE_VALUES.into()),
     }
 }
 
@@ -3910,6 +3935,9 @@ fn task_text(t: &Value) -> String {
     if let Some(hold) = t["hold"].as_str() {
         about.push(format!("held: {hold}"));
     }
+    if let Some(date) = t["not_before"].as_i64() {
+        about.push(not_before::words(date));
+    }
     lines.push(about.join(" · "));
     for (label, key) in [("what", "what"), ("why", "why"), ("done when", "done_when")] {
         let text = field(key);
@@ -4668,6 +4696,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     propose: a.propose,
                     needs_review: a.needs_review,
                     priority: a.priority.map(PriorityArg::of_task),
+                    not_before: a.not_before,
                     labels: a.label,
                     after,
                     under: app.opt_id(a.under.as_deref(), &[Kind::Task]).await?,
@@ -4791,6 +4820,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         done_when_append: a.done_when_append,
                         priority: a.priority.map(|p| Some(p.of_task())),
                         hold: None,
+                        not_before: if a.clear_not_before { Some(None) } else { a.not_before.map(Some) },
                         label: a.label,
                         unlabel: a.unlabel,
                     },
@@ -5899,6 +5929,46 @@ mod tests {
         assert_eq!(priority_given(&["fwd", "task", "create", "Retry"]), Ok(None), "a task may have none");
         let amend = priority_given(&["fwd", "task", "amend", A, "--priority", "later"]);
         assert_eq!(amend, Ok(Some(PriorityArg::Word(Priority::Later))));
+    }
+
+    /// `--not-before` takes a day and an RFC 3339 instant; anything else is refused with the one
+    /// sentence saying what it wants, on `task create` and `task amend`.
+    #[test]
+    fn not_before_takes_a_day_or_an_instant_and_refuses_anything_else_saying_what_it_wants() {
+        assert_eq!(not_before_arg("2026-12-01"), Ok(not_before::from_day("2026-12-01").unwrap()));
+        let at_utc_midnight = decision_log::parse_date("2026-12-01").unwrap() - 12 * 3_600_000;
+        assert_eq!(not_before_arg("2026-12-01T00:00:00Z"), Ok(at_utc_midnight));
+        assert_eq!(not_before_arg("2026-11-30T16:00:00-08:00"), Ok(at_utc_midnight), "the offset counts");
+        assert_eq!(not_before_arg("2026-12-01T00:00:00.250Z"), Ok(at_utc_midnight + 250), "and the fraction");
+        for wrong in ["soon", "2026-02-30", "2026-13-01", "12/01/2026", "2026-12-01T09:00", "1796083200000", ""] {
+            assert_eq!(not_before_arg(wrong), Err(NOT_BEFORE_VALUES.to_string()), "{wrong}");
+        }
+        let refused = |argv: &[&str]| Cli::try_parse_from(argv).map(|_| ()).unwrap_err().to_string();
+        for argv in [
+            ["fwd", "task", "create", "T", "--not-before", "soon"],
+            ["fwd", "task", "amend", A, "--not-before", "soon"],
+        ] {
+            let refusal = refused(&argv);
+            assert!(
+                refusal.contains(&format!("invalid value 'soon' for '--not-before <DATE>': {NOT_BEFORE_VALUES}")),
+                "{refusal}"
+            );
+        }
+    }
+
+    /// `fwd task amend` sets a not-before date or clears it, and refuses a command line that does
+    /// both, whose meaning would be anyone's guess.
+    #[test]
+    fn task_amend_clears_a_not_before_date_and_refuses_setting_and_clearing_at_once() {
+        let amend = |argv: &[&str]| match Cli::try_parse_from(argv).map(|cli| cli.command) {
+            Ok(Command::Task { command: TaskCommand::Amend(a) }) => Ok((a.not_before, a.clear_not_before)),
+            Ok(other) => panic!("not an amend: {other:?}"),
+            Err(e) => Err(e.kind()),
+        };
+        assert_eq!(amend(&["fwd", "task", "amend", A, "--title", "t"]), Ok((None, false)), "neither");
+        assert_eq!(amend(&["fwd", "task", "amend", A, "--clear-not-before"]), Ok((None, true)));
+        let both = ["fwd", "task", "amend", A, "--not-before", "2026-12-01", "--clear-not-before"];
+        assert_eq!(amend(&both), Err(clap::error::ErrorKind::ArgumentConflict));
     }
 
     /// `fwd ask --priority` takes what `task create` takes: the words, which the question keeps,

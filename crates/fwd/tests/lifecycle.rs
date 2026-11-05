@@ -114,6 +114,7 @@ async fn data_persists_across_daemon_restarts() -> Result<()> {
                 status: TaskStatus::Open,
                 needs_review: false,
                 hold: None,
+                not_before: None,
                 assignee: None,
                 priority: None,
                 labels: Json::new(serde_json::json!([])),
