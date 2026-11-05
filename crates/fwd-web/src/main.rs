@@ -4,6 +4,14 @@
 //! connector to one project's socket on the daemon, live queries for every read and the shared
 //! `fwd_core::ops` for every write. Leptos renders; Ankurah signals reach Leptos through
 //! `ReactiveGraphObserver`. See docs/design/web-ui.md.
+//!
+//! Built with the `wallboard` feature, the crate is instead the wallboard, the kiosk display of one
+//! project's graph (`wallboard.rs`; docs/design/wallboard.md).
+
+// The wallboard draws with the Graph page's code and reads through the store, but mounts none of
+// the app, so what only the app uses goes unused in that build. The wallboard's own modules warn of
+// dead code again.
+#![cfg_attr(feature = "wallboard", allow(dead_code))]
 
 mod accordion;
 mod anchor_row;
@@ -55,9 +63,13 @@ mod task_scopes;
 mod tasks;
 mod thread;
 mod waiting;
+#[cfg(feature = "wallboard")]
+mod wallboard;
 mod whose;
 
+#[cfg(not(feature = "wallboard"))]
 use leptos::prelude::*;
+#[cfg(not(feature = "wallboard"))]
 use wasm_bindgen_futures::spawn_local;
 
 fn main() {
@@ -72,6 +84,9 @@ fn main() {
     tracing_wasm::set_as_global_default_with_config(
         tracing_wasm::WASMLayerConfigBuilder::new().set_max_level(tracing::Level::INFO).build(),
     );
+    #[cfg(feature = "wallboard")]
+    leptos::mount::mount_to_body(wallboard::Wallboard);
+    #[cfg(not(feature = "wallboard"))]
     spawn_local(async {
         match session::boot().await {
             Ok(()) => leptos::mount::mount_to_body(app::App),

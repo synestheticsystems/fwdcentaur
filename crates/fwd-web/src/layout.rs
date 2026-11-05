@@ -1478,6 +1478,12 @@ fn nondecreasing(wants: &[f64], weights: &[f64]) -> Vec<f64> {
     pools.into_iter().flat_map(|(mean, _, size)| std::iter::repeat_n(mean, size)).collect()
 }
 
+// The wallboard's packing lays out with this module's groups, ordering, waypoints and routes, so it
+// is a child of this module, built only with the wallboard feature.
+#[cfg(feature = "wallboard")]
+#[path = "wallboard_layout.rs"]
+mod wallboard_layout;
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1510,11 +1516,11 @@ pub(crate) mod tests {
         assert_eq!(plain, layout(&tasks, &bands, &edges, &[], Order::Auto));
     }
 
-    fn task(title: &str, priority: Option<i64>, status: TaskStatus) -> Task {
+    pub(crate) fn task(title: &str, priority: Option<i64>, status: TaskStatus) -> Task {
         Task { title: title.into(), id: format!("id-{title}"), priority, status: status_rank(status), band: None }
     }
 
-    fn open(title: &str) -> Task {
+    pub(crate) fn open(title: &str) -> Task {
         task(title, None, TaskStatus::Open)
     }
 
