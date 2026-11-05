@@ -43,19 +43,31 @@ pub struct Store {
     ends: Ends,
     /// What keeps the two above current, for as long as the page.
     _watching: Vec<SubscriptionGuard>,
+    /// What the task query selects, bound by the first open for as long as the page.
+    task_predicate: String,
 }
 
 static STORE: OnceLock<SendWrapper<Store>> = OnceLock::new();
 
 pub fn open() -> Result<(), String> {
-    if STORE.get().is_some() {
-        return Ok(());
+    open_with_predicate("created > 0")
+}
+
+/// Opens the standing queries with the tasks `task_predicate` selects. The store lives as long as
+/// the page, so its first open binds the task query: another predicate is refused, never ignored.
+pub fn open_with_predicate(task_predicate: &str) -> Result<(), String> {
+    if let Some(store) = STORE.get() {
+        return if store.task_predicate == task_predicate {
+            Ok(())
+        } else {
+            Err(format!("the task query already selects `{}`, not `{task_predicate}`", store.task_predicate))
+        };
     }
     let ctx = ctx();
     let refused =
         |what: &'static str| move |e: ankurah::error::RetrievalError| format!("the {what} query was refused: {e}");
     // `created > 0` rather than `>= 0`: a live query on `>= 0` never fires (Ankurah 0.9.3).
-    let tasks = ctx.query::<TaskView>("created > 0").map_err(refused("tasks"))?;
+    let tasks = ctx.query::<TaskView>(task_predicate).map_err(refused("tasks"))?;
     let relations = ctx.query::<RelationView>("created > 0").map_err(refused("relations"))?;
     let scopes = ctx.query::<ScopeView>("created > 0").map_err(refused("scopes"))?;
     let principals = ctx.query::<PrincipalView>("kind = 'human' OR kind = 'agent'").map_err(refused("principals"))?;
@@ -86,6 +98,7 @@ pub fn open() -> Result<(), String> {
         arrivals,
         ends,
         _watching: watching,
+        task_predicate: task_predicate.to_owned(),
     };
     STORE.set(SendWrapper::new(store)).ok();
     spawn_local(record_the_daemons_answer());
