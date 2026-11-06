@@ -219,6 +219,37 @@ pub async fn boot() -> Result<(), String> {
     Ok(())
 }
 
+/// The wallboard's node: one ephemeral browser node for the page's whole life, on the project the
+/// wallboard's configuration names. Its connector starts even while no daemon answers, since the
+/// connector retries. Unlike `boot`, it asks no `/health`, lists no projects, acts as no principal,
+/// sets no deadline for joining and never reloads for a new daemon build. Its IndexedDB database is
+/// a cache for this page load, not a durable node's store.
+#[cfg(feature = "wallboard")]
+pub async fn wallboard_node(project: Project) -> Result<(), String> {
+    let storage = IndexedDBStorageEngine::open(&fresh_database(&project.id).await)
+        .await
+        .map_err(|e| format!("The browser could not open its graph cache: {e}"))?;
+    let node = Node::new(Arc::new(storage), PermissiveAgent::new());
+    let client = WebsocketClient::new(node.clone(), &ws_url(None, &project.id))
+        .map_err(|e| format!("The graph connection could not start: {e}"))?;
+    NODE.set(node).map_err(|_| "The wallboard node already started")?;
+    CLIENT.set(SendWrapper::new(client)).map_err(|_| "The wallboard connection already started")?;
+    PROJECT.set(project).map_err(|_| "The wallboard project already opened")?;
+    CurrentObserver::set(ReactiveGraphObserver::new());
+    Ok(())
+}
+
+/// Waits, with no deadline, for the wallboard's node to join the project's system, then opens its
+/// context. A daemon that answers later admits this same node and connector, and once they are set
+/// up an ordinary disconnect replaces neither.
+#[cfg(feature = "wallboard")]
+pub async fn wallboard_context() -> Result<(), String> {
+    let node = NODE.get().ok_or("The wallboard node has not started")?;
+    node.system.wait_system_ready().await.map_err(|e| e.to_string())?;
+    let context = node.context_async(DEFAULT_CONTEXT).await.map_err(|e| e.to_string())?;
+    CONTEXT.set(context).map_err(|_| "The wallboard context already opened".to_string())
+}
+
 /// The project the URL names (with its error, when the daemon could not open it), else the one
 /// this tab last opened when the daemon has it open, else the first one that opened. A page
 /// pinned to a project the daemon does not host says so rather than showing another.

@@ -800,6 +800,12 @@ fn free_height(taken: &[(f64, f64)], aim: f64) -> f64 {
 /// so two lines that meet one task do not cross where they leave it. Every end is read where the
 /// layout put it before any moves.
 fn spread_ends(lines: &mut [Line], centre: &[f64]) {
+    spread_ends_with(lines, centre, END_SPAN, END_GAP);
+}
+
+/// `spread_ends` with the ends meeting one side of a task `max_gap` apart or closer, spanning `span`
+/// at most: the wallboard's taller cards spread them further.
+fn spread_ends_with(lines: &mut [Line], centre: &[f64], span: f64, max_gap: f64) {
     // Per task and side (true for its right side), each end meeting it: the height its line goes
     // to next and the height of its other end, what settles a tie between two lines, and which end
     // of which line it is (true for the start).
@@ -819,7 +825,7 @@ fn spread_ends(lines: &mut [Line], centre: &[f64]) {
     for ((task, _), mut ends) in sides {
         ends.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
         let middle = (ends.len() - 1) as f64 / 2.0;
-        let gap = if middle > 0.0 { END_GAP.min(END_SPAN / (2.0 * middle)) } else { 0.0 };
+        let gap = if middle > 0.0 { max_gap.min(span / (2.0 * middle)) } else { 0.0 };
         for (k, &(_, _, _, i, start)) in ends.iter().enumerate() {
             let route = &mut lines[i].route;
             let at = if start { 0 } else { route.len() - 1 };
@@ -942,6 +948,10 @@ fn groups_of(n: usize, pairs: &[(usize, usize)]) -> (Vec<Vec<usize>>, Vec<usize>
 /// A group of tasks laid out on its own, with the waypoints of its long edges. Its nodes are its
 /// tasks, then its waypoints.
 struct Group {
+    /// The height of a task's box: `H`, or the height of the wallboard's cards.
+    task_height: f64,
+    /// The least gap between two neighbours in a column: `GY`, or the wallboard's tighter one.
+    gap: f64,
     /// Per node: the number of the task it is, or none for a waypoint.
     task: Vec<Option<usize>>,
     /// Per node: its column.
@@ -973,6 +983,8 @@ impl Group {
         waypoint_tier: impl Fn((usize, usize)) -> usize,
     ) -> Group {
         let mut group = Group {
+            task_height: H,
+            gap: GY,
             task: Vec::new(),
             column: Vec::new(),
             before: Vec::new(),
@@ -1041,7 +1053,7 @@ impl Group {
     /// Half a node's height: a task's box, or nothing for a waypoint, which is only a line.
     fn half(&self, v: usize) -> f64 {
         if self.task[v].is_some() {
-            H / 2.0
+            self.task_height / 2.0
         } else {
             0.0
         }
@@ -1049,7 +1061,7 @@ impl Group {
 
     /// How far apart the centres of two neighbours in a column must be.
     fn spacing(&self, v: usize, w: usize) -> f64 {
-        self.half(v) + self.half(w) + GY
+        self.half(v) + self.half(w) + self.gap
     }
 
     /// The group's columns, each sorted by tier, then by `tie`: its tasks, and with `waypoints` its
@@ -1466,6 +1478,12 @@ fn nondecreasing(wants: &[f64], weights: &[f64]) -> Vec<f64> {
     pools.into_iter().flat_map(|(mean, _, size)| std::iter::repeat_n(mean, size)).collect()
 }
 
+// The wallboard's packing lays out with this module's groups, ordering, waypoints and routes, so it
+// is a child of this module, built only with the wallboard feature.
+#[cfg(feature = "wallboard")]
+#[path = "wallboard_layout.rs"]
+mod wallboard_layout;
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1498,11 +1516,11 @@ pub(crate) mod tests {
         assert_eq!(plain, layout(&tasks, &bands, &edges, &[], Order::Auto));
     }
 
-    fn task(title: &str, priority: Option<i64>, status: TaskStatus) -> Task {
+    pub(crate) fn task(title: &str, priority: Option<i64>, status: TaskStatus) -> Task {
         Task { title: title.into(), id: format!("id-{title}"), priority, status: status_rank(status), band: None }
     }
 
-    fn open(title: &str) -> Task {
+    pub(crate) fn open(title: &str) -> Task {
         task(title, None, TaskStatus::Open)
     }
 

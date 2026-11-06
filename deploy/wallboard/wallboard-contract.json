@@ -1,0 +1,146 @@
+{
+  "type": "object",
+  "default": {},
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "default": 1,
+      "enum": [
+        1
+      ]
+    },
+    "theme": {
+      "type": "string",
+      "default": "dark-aubergine",
+      "enum": [
+        "dark-aubergine",
+        "charcoal",
+        "oxblood-copper",
+        "indigo-saffron",
+        "graphite-coral",
+        "linen-indigo",
+        "porcelain-coral",
+        "sand-plum"
+      ]
+    },
+    "theme_schedule": {
+      "type": "object",
+      "default": null,
+      "nullable": true,
+      "required_when": {
+        "enabled": [
+          "latitude",
+          "longitude"
+        ]
+      },
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "day_theme": {
+          "type": "string",
+          "default": "linen-indigo",
+          "enum": [
+            "linen-indigo",
+            "porcelain-coral",
+            "sand-plum"
+          ]
+        },
+        "night_theme": {
+          "type": "string",
+          "default": "indigo-saffron",
+          "enum": [
+            "dark-aubergine",
+            "charcoal",
+            "oxblood-copper",
+            "indigo-saffron",
+            "graphite-coral"
+          ]
+        },
+        "latitude": {
+          "type": "number",
+          "default": null,
+          "nullable": true,
+          "min": -90,
+          "max": 90
+        },
+        "longitude": {
+          "type": "number",
+          "default": null,
+          "nullable": true,
+          "min": -180,
+          "max": 180
+        }
+      }
+    },
+    "statuses": {
+      "type": "array",
+      "default": [
+        "in_progress"
+      ],
+      "enum": [
+        "proposed",
+        "open",
+        "in_progress",
+        "in_review"
+      ],
+      "unique": true,
+      "min_length": 1
+    },
+    "max_rows": {
+      "type": "integer",
+      "default": 8,
+      "min": 3,
+      "max": 16
+    },
+    "node_width": {
+      "type": "integer",
+      "default": 360,
+      "min": 240,
+      "max": 640
+    },
+    "text_scale_percent": {
+      "type": "integer",
+      "default": 100,
+      "min": 80,
+      "max": 160
+    },
+    "fit_to_screen": {
+      "type": "boolean",
+      "default": false
+    },
+    "replay": {
+      "type": "object",
+      "default": {},
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "default": 180,
+          "min": 60,
+          "max": 3600
+        }
+      }
+    },
+    "sound": {
+      "type": "object",
+      "default": {},
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "volume": {
+          "type": "integer",
+          "default": 30,
+          "min": 0,
+          "max": 100
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "fwd-wallboard-checks",
+  "private": true,
+  "version": "0.0.0",
+  "license": "AGPL-3.0-only",
+  "engines": { "node": ">=22" },
+  "devDependencies": { "playwright": "1.62.1" }
+}

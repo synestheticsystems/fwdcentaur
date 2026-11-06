@@ -40,6 +40,7 @@ Agent sessions: `integrations/claude-code/` is the Claude Code plugin, which giv
 - [docs/research/](docs/research/): landscape research and the synthesis in `findings.md`.
 - [integrations/claude-code/](integrations/claude-code/) and [integrations/codex/](integrations/codex/): the Claude Code and Codex plugins, with the skills for each role.
 - [extensions/vscode/](extensions/vscode/): the VS Code extension: comment threads and highlights on the code, the web UI's page in a panel, and an inbox view.
+- [deploy/wallboard/](deploy/wallboard/): the wallboard, one project's graph on a monitor of its own: building, configuring and running it by hand. Design: `docs/design/wallboard.md`.
 
 ## License
 
@@ -51,3 +52,5 @@ Copyright (c) 2026 Synesthetic Systems LLC.
 - **The agent integrations** in [integrations/](integrations/), the Claude Code and Codex plugins and their skills, are licensed under either the MIT license ([integrations/LICENSE-MIT](integrations/LICENSE-MIT)) or the Apache License 2.0 ([integrations/LICENSE-APACHE](integrations/LICENSE-APACHE)), at your option. They are copied into agent setups of every kind, so they carry no copyleft.
 
 The hosted service is proprietary and lives in a separate private repository: backup and availability, connections to other apps, and the public MCP server.
+
+The wallboard is open here: its client, its settings contract, its launcher and the manual way to build and run it (`deploy/wallboard/README.md`). What the hosted service adds for it is convenience: hosted wallboard URLs, the enrollment of a display, official builds and device packages (`docs/DECISIONS.md`, D144, open-source the wallboard client).

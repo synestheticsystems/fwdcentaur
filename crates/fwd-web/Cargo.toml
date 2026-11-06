@@ -11,6 +11,12 @@ publish = false
 # there stays native. Pins match the root workspace's Ankurah version exactly.
 [workspace]
 
+[features]
+# The wallboard (docs/design/wallboard.md): the kiosk display of one project's graph, built from
+# wallboard.html by scripts/build-wallboard.sh in place of the app. The page the daemon embeds is
+# built without it.
+wallboard = []
+
 [dependencies]
 fwd-core = { path = "../fwd-core", default-features = false, features = ["wasm"] }
 ankurah = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0", features = ["derive", "wasm"] }

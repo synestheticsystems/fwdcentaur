@@ -282,6 +282,14 @@ pub fn GraphPage(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoic
     }
 }
 
+// The wallboard's renderer draws with this page's own edges, implied dependencies, parent lines and
+// paths, so it is a child of this module, built only with the wallboard feature.
+#[cfg(feature = "wallboard")]
+#[path = "wallboard_render.rs"]
+mod wallboard_render;
+#[cfg(feature = "wallboard")]
+pub(crate) use wallboard_render::WallboardGraph;
+
 /// Where a click on `task`'s node leads in the VS Code webview, the Graph showing `choice`: the
 /// task's panel on the Tasks page, its list keeping the scope the Graph shows, so that the list
 /// behind the task is the work the drawing showed.
@@ -1071,16 +1079,17 @@ fn remember_order(order: Order) {
 mod tests {
     use super::*;
 
-    fn id(n: u8) -> EntityId {
+    // The wallboard renderer's tests build their tasks and edges with these four as well.
+    pub(super) fn id(n: u8) -> EntityId {
         EntityId::from_bytes([n; 32])
     }
 
-    fn task(n: u8, scope: Option<u8>, closed: bool) -> TaskFacts {
+    pub(super) fn task(n: u8, scope: Option<u8>, closed: bool) -> TaskFacts {
         TaskFacts { id: id(n), closed, not_yet_due: false, scopes: scope.map(id).into_iter().collect() }
     }
 
     /// `then` depends on `first`.
-    fn waits(then: u8, first: u8) -> Edge {
+    pub(super) fn waits(then: u8, first: u8) -> Edge {
         Edge { first: id(first), then: id(then), kind: RelationKind::DependsOn, proposed: false }
     }
 
@@ -1103,7 +1112,7 @@ mod tests {
     }
 
     /// `child` is a subtask of `parent`.
-    fn part_of(child: u8, parent: u8) -> Edge {
+    pub(super) fn part_of(child: u8, parent: u8) -> Edge {
         Edge { first: id(child), then: id(parent), kind: RelationKind::SubtaskOf, proposed: false }
     }
 

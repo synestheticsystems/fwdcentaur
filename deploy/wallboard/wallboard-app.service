@@ -1,0 +1,15 @@
+[Unit]
+Description=fwd wallboard: its assets and its project's WebSocket proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/wallboard/current
+ExecStart=/usr/bin/python3 /srv/wallboard/current/wallboard.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target

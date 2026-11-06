@@ -1,0 +1,34 @@
+{
+  "project_id": "00000000-0000-0000-0000-000000000000",
+  "project_name": "Example project",
+  "theme": "dark-aubergine",
+  "statuses": [
+    "in_progress"
+  ],
+  "max_rows": 8,
+  "node_width": 360,
+  "sound": {
+    "enabled": false,
+    "volume": 30
+  },
+  "replay": {
+    "enabled": true,
+    "interval_seconds": 180
+  },
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 3000
+  },
+  "upstream": {
+    "host": "127.0.0.1",
+    "port": 12345
+  },
+  "daemon_origin": "http://127.0.0.1:12345",
+  "theme_schedule": {
+    "enabled": false,
+    "day_theme": "linen-indigo",
+    "night_theme": "indigo-saffron"
+  },
+  "text_scale_percent": 100,
+  "fit_to_screen": false
+}
