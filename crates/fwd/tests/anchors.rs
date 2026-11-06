@@ -37,7 +37,7 @@ impl Scratch {
             .current_dir(cwd)
             .env("FWD_RUNTIME_DIR", self.path("run"))
             .env("FWD_DATA_DIR", self.path("data"))
-            // The daemon inherits it: its dev-runner card goes to a scratch registry.
+            // The daemon inherits it: its dev-runner entry goes to a scratch registry.
             .env("FWD_DEV_RUNNER_DIR", self.path("dev-runner"));
         for name in ["FWD_PROJECT", "FWD_AS", "FWD_SCOPE", "FWD_DAEMON_BIN", "FWD_HANDLE"] {
             command.env_remove(name);

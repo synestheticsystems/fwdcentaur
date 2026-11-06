@@ -79,8 +79,8 @@ fn outside_any_checkout() -> std::io::Result<()> {
 /// Readies this process for the daemons its tests start, once, before the first one starts.
 ///
 /// The daemons inherit this process's environment, so `FWD_DEV_RUNNER_DIR` first names a scratch
-/// dev-runner registry (`registry`): without it they would keep their cards in the real registry
-/// of whoever runs the tests.
+/// dev-runner registry (`registry`): without it they would keep their entries in the real
+/// registry of whoever runs the tests.
 ///
 /// Then the fwd binary runs once, and this waits for it for as long as it takes, so that macOS's
 /// check of a new executable is over before any launcher's deadline starts. A launcher gives the

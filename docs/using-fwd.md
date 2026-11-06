@@ -340,7 +340,7 @@ fwd daemon stop                    # stops that daemon, not yours
 | Backups | Beside the data directory and named after it: `~/Library/Application Support/fwd-backups/` on macOS, one dated folder per `fwd admin backup` ("Backups", above). `--to` names another. |
 | Runtime directory | `$TMPDIR/fwd-<uid>/` (`/tmp/fwd-<uid>/` when `TMPDIR` is unset). `FWD_RUNTIME_DIR` overrides it. It holds `daemon.ws` (the running daemon's port, pid, instance, start time and bind) and the lock files. |
 | The repository | `.fwd/project.toml`, the marker naming the project. |
-| Dev-runner registry | `~/.dev-runner/`, where the daemon keeps a card saying it runs, for a program that shows what runs on the machine. `FWD_DEV_RUNNER_DIR` overrides it. |
+| Dev-runner registry | `~/.dev-runner/`, where the daemon keeps its entry, a meta file and one status file, for a program that shows what runs on the machine. `FWD_DEV_RUNNER_DIR` overrides it. |
 
 The daemon runs until `fwd daemon stop`; it has no idle exit yet. `fwd daemon status` reports on it and never starts one:
 

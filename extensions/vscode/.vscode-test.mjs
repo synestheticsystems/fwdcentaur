@@ -22,7 +22,7 @@ const REPO = path.join(T, 'repo');
 // Set on this process, so VS Code, its extension host and every `fwd` they run inherit them.
 process.env.FWD_RUNTIME_DIR = path.join(T, 'run');
 process.env.FWD_DATA_DIR = path.join(T, 'data');
-// The daemon keeps a card in the dev-runner registry; a scratch daemon's must not appear in the real one.
+// A scratch dev-runner registry keeps test daemons' entries out of the real one, ~/.dev-runner/.
 process.env.FWD_DEV_RUNNER_DIR = path.join(T, 'dev-runner');
 // The file the extension host writes as the suite starts (src/test/started.ts). When VS Code exits
 // before it exists, no test has run.
