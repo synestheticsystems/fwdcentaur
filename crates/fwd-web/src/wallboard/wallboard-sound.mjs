@@ -19,9 +19,10 @@ export function playCue(context, buffer, volume, at = context.currentTime + .02)
 }
 
 export class LiveSound {
-  // Settings arrive validated by the shared contract, so a volume is always from 0 to 100.
-  constructor(settings, now = Date.now, allowed = () => true, diagnostics) {
-    this.settings = settings; this.now = now; this.allowed = allowed; this.diagnostics = diagnostics;
+  // Settings arrive validated by the shared contract, so a volume is always from 0 to 100. The
+  // cooldown runs on `clock`, a monotonic one, so that a wall clock stepped back cannot silence cues.
+  constructor(settings, clock = () => performance.now(), allowed = () => true, diagnostics) {
+    this.settings = settings; this.clock = clock; this.allowed = allowed; this.diagnostics = diagnostics;
     this.lastAt = -Infinity; this.played = 0; this.pending = false; this.disposed = false;
     void this.prepare();
   }
@@ -47,7 +48,7 @@ export class LiveSound {
     finally { this.preparing = null; }
   }
   async play(diff) {
-    const at = this.now(), volume = this.settings.volume / 100;
+    const at = this.clock(), volume = this.settings.volume / 100;
     if (!this.settings.enabled || !volume || !diff.any || !this.allowed() || this.disposed || this.pending || at - this.lastAt < 4000) return false;
     if (!this.buffers) { void this.prepare(); return false; }
     this.lastAt = at; this.pending = true;
@@ -61,7 +62,7 @@ export class LiveSound {
         this.context.resume(), new Promise(resolve => { timeout = setTimeout(resolve, 300); }),
       ]);
       // Never queue a delayed notification behind an autoplay prompt, reconnect or replay.
-      if (this.context.state !== 'running' || this.disposed || !this.settings.enabled || !this.settings.volume || !this.allowed() || this.now() - at > 500) return false;
+      if (this.context.state !== 'running' || this.disposed || !this.settings.enabled || !this.settings.volume || !this.allowed() || this.clock() - at > 500) return false;
       playCue(this.context, this.buffers[kind], volume);
       this.played++; this.lastKind = kind;
       return true;

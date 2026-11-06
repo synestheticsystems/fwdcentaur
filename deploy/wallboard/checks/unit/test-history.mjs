@@ -37,6 +37,46 @@ test('history is bounded by count/bytes and separated by display context, with n
   assert.equal(storage.length, 0, 'only one display configuration persists at an origin');
 });
 
+test('a wall clock stepped back moves the entries it leaves stamped ahead back together, in the order seen', () => {
+  let now = 100000000;
+  const storage = new Storage();
+  const history = new LocalHistory('fixture', storage, () => now, undefined, 'build-a');
+  history.append(frame('a'), frame('b'), now - 10 * 60000);
+  history.append(frame('b'), frame('c'), now);
+  history.save();
+  now -= 3600000;
+  const stepped = new LocalHistory('fixture', storage, () => now, undefined, 'build-a');
+  const end = now - 30001;
+  assert.deepEqual(stepped.entries.map(({ at, after }) => [at, after]), [[end - 10 * 60000, 'b'], [end, 'c']],
+    'none ahead of now, none lost, ten minutes apart still');
+  now += 1000;
+  stepped.append(frame('c'), frame('d'), now);
+  assert.deepEqual(stepped.entries.map(({ after }) => after), ['b', 'c', 'd'], 'a change after the step comes after them');
+  assert.deepEqual(stepped.groups().map(g => [g.before, g.after]), [['a', 'b'], ['b', 'c'], ['c', 'd']],
+    'and replays as a step of its own');
+});
+
+test('two changes two minutes apart replay as two steps, in order, after a step back moves both back together', () => {
+  let now = 100000000;
+  const history = new LocalHistory('fixture', new Storage(), () => now, undefined, 'build-a');
+  history.append(frame('a'), frame('b'), now - 120000);
+  history.append(frame('b'), frame('c'), now);
+  assert.equal(history.groups().length, 2);
+  now -= 3600000;
+  assert.ok(history.groups().every(group => group.at <= now), 'none ahead of now');
+  assert.deepEqual(history.groups().map(g => [g.before, g.after]), [['a', 'b'], ['b', 'c']]);
+});
+
+test('a change seen just after a step back is never merged with one seen before it', () => {
+  let now = 100000000;
+  const history = new LocalHistory('fixture', new Storage(), () => now, undefined, 'build-a');
+  history.append(frame('a'), frame('b'), now);
+  now -= 60000;
+  history.append(frame('b'), frame('c'), now);
+  assert.deepEqual(history.entries.map(({ at }) => at), [now - 30001, now]);
+  assert.deepEqual(history.groups().map(g => [g.before, g.after]), [['a', 'b'], ['b', 'c']]);
+});
+
 test('history groups only contemporaneous changes without compressing busy periods into overviews', () => {
   const now = 100000000, history = new LocalHistory('fixture', new Storage(), () => now);
   for (let i = 0; i < 20; i++) history.append(frame(`before${i}`), frame(`after${i}`), now - 110 * 60000 + i * 5 * 60000);

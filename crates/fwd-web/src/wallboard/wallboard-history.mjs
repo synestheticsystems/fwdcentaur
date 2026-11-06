@@ -3,6 +3,8 @@ import { buildInfo } from './wallboard-build.mjs';
 import { reasonOf } from './wallboard-diagnostics.mjs';
 const NS = 'http://www.w3.org/2000/svg';
 const HISTORY_PREFIX = 'fwd-wallboard-history-v1:';
+// Changes seen within this many milliseconds of the first of them make one replay step (`groups`).
+const GROUP_WINDOW = 30000;
 const bytes = value => Math.max(value.length * 2, new TextEncoder().encode(value).length);
 
 export class LocalHistory {
@@ -30,10 +32,22 @@ export class LocalHistory {
     } catch (error) { this.persisted = false; this.diagnostics?.issue('history', 'unreadable-cache', reasonOf(error)); }
     this.prune();
   }
+  // Keeps the newest 120 entries within 2 MiB, in the order this display witnessed them, which a wall
+  // clock stepped back would scramble if they were sorted by their stamps. Such a step leaves the
+  // entries seen before it stamped ahead of now. Rather than being dropped, or flattened to one stamp,
+  // which would merge the steps replay makes of them, they move back together by one offset, keeping
+  // their order and spacing: the newest of them ends a grouping window before the first entry seen
+  // after the step, or before now, since the time between the two is unknown and replay must not merge
+  // them.
   prune() {
     const now = this.now();
-    this.entries = this.entries.filter(entry => entry.at <= now + 60000)
-      .sort((a, b) => a.at - b.at).slice(-120);
+    const last = this.entries.findLastIndex(entry => entry.at > now);
+    if (last >= 0) {
+      const end = (this.entries[last + 1]?.at ?? now) - GROUP_WINDOW - 1;
+      const shift = Math.max(...this.entries.slice(0, last + 1).map(entry => entry.at)) - end;
+      this.entries = this.entries.map((entry, i) => i <= last ? { ...entry, at: entry.at - shift } : entry);
+    }
+    this.entries = this.entries.slice(-120);
     while (this.entries.length && bytes(this.encode()) > 2 * 1024 * 1024) this.entries.shift();
   }
   encode() { return JSON.stringify({ version: 1, entries: this.entries }); }
@@ -61,7 +75,7 @@ export class LocalHistory {
     const groups = [];
     for (const entry of this.entries) {
       const last = groups.at(-1);
-      if (last && entry.build === last.build && entry.at - last.first <= 30000) { last.after = entry.after; last.at = entry.at; last.count++; }
+      if (last && entry.build === last.build && entry.at - last.first <= GROUP_WINDOW) { last.after = entry.after; last.at = entry.at; last.count++; }
       else groups.push({ ...entry, first: entry.at, count: 1 });
     }
     return groups;

@@ -161,13 +161,23 @@ with four seconds between cues; a cue that cannot play in time is dropped, never
 late. Replay, loading, a hidden page and reconnect catch-up stay silent, audio rests between cues,
 and a failure of audio never stops the graph.
 
+Every duration here, a cue's, the wave's, the movement's, a replay step's and the four seconds
+between sounds, runs on the page's monotonic clock, so that a correction of the wall clock, which a
+Raspberry Pi with no clock of its own receives from the network after it starts, neither stretches a
+cue nor cuts it short. The wall clock stamps the history and dates replay ages and the theme's
+schedule.
+
 ### Replay
 
 Every `replay.interval_seconds`, the wallboard replays the newest changes it witnessed: snapshots it
 saved itself, stamped when it saw them, in this browser's local storage. It is not an Ankurah history:
 task timestamps cannot rebuild an old WHAT, priority or status. The history keeps at most 120 batches
 and 2 MiB, with no age limit, so a quiet display can replay days back and a busy one only minutes.
-Changes seen within 30 seconds of each other, by one build, make one group. Replay plays at most five
+It keeps its entries in the order the display saw them. A wall clock stepped back leaves those seen
+before the step stamped ahead of now: they move back together, never dropped, keeping their order
+and spacing and so the groups they make, the newest of them more than 30 seconds before the first
+entry seen after the step, or before now, so that no group spans the step. Changes seen within 30
+seconds of each other, by one build, make one group. Replay plays at most five
 groups, oldest first, for four seconds each, and stops within 23 seconds, back at the current graph;
 groups with no net change are skipped, and a fresh live change ends it at once. In replay a departing
 card fades over three seconds, with no hold first, and arrival highlights finish in three seconds,
@@ -364,9 +374,10 @@ check; the launcher's and the settings contract's Python tests; the build identi
 (`scripts/test_wallboard_identity.py`); the build; the runtime's unit tests in Node (diagnostics,
 history and change detection, settings, themes and the scratch test's isolation); and the browser
 checks, each against the production runtime, most of them on a virtual clock: motion and replay,
-when replay may start, membership changes, settings revisions, screen fitting, diagnostics, sound,
-and the production WASM layout driving the runtime. Continuous integration runs the same checks, the
-Rust and Python ones in its `rust` job and the rest in its `wallboard` job.
+when replay may start, the wall clock stepping during cues, membership changes, settings revisions,
+screen fitting, diagnostics, sound, and the production WASM layout driving the runtime. Continuous
+integration runs the same checks, the Rust and Python ones in its `rust` job and the rest in its
+`wallboard` job.
 
 Two integration tests stay opt-in, since each needs what the suite never touches.
 

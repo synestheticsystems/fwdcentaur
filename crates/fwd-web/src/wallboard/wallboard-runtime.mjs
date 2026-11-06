@@ -28,8 +28,13 @@ export class WallboardRuntime {
     const validated = validateSettings(settings);
     settings = { ...validated, project_id: settings.project_id };
     this.host = host; this.settings = settings; this.layout = layout;
+    // Two clocks. The wall clock stamps what history keeps and what diagnostics' state records, and
+    // dates replay ages and the theme's schedule. Every duration, the cues', the settle's, the wave's,
+    // replay's steps and the sound's cooldown, runs on the monotonic clock, which a correction of the
+    // wall clock cannot step.
     this.now = environment.now || Date.now;
-    this.diagnostics = environment.diagnostics || new Diagnostics(this.now, environment.clock);
+    this.clock = environment.clock || (() => performance.now());
+    this.diagnostics = environment.diagnostics || new Diagnostics(this.now, this.clock);
     this.diagnostics.recordSettings(validated);
     let storage; try { storage = environment.storage ?? localStorage; } catch {}
     this.history = new LocalHistory(historyContext(settings), storage, this.now, this.diagnostics);
@@ -41,7 +46,7 @@ export class WallboardRuntime {
     this.root.prepend(this.waveElement); this.root.append(this.banner); host.append(this.empty);
     this.nodes = new Map(); this.edges = new Map(); this.effects = new Map(); this.departures = new Map();
     this.timers = new Map(); this.armed = false; this.connected = false; this.disposed = false; this.frame = 0;
-    this.sound = new LiveSound(settings.sound, this.now, () =>
+    this.sound = new LiveSound(settings.sound, this.clock, () =>
       this.connected && this.loaded && !this.syncing && !this.replay && !this.disposed && !document.hidden, this.diagnostics);
     this.motion = matchMedia('(prefers-reduced-motion: reduce)'); this.reduced = this.motion.matches;
     this.motionListener = event => {
@@ -260,7 +265,7 @@ export class WallboardRuntime {
     this.reduced = this.motion.matches;
     if (!this.pending || !this.connected) return;
     if (this.reduced || document.hidden || !changes(this.live, this.pending).any) { this.applyPending(); return; }
-    this.wave = { at: this.now() }; this.host.dataset.wave = 'true'; this.requestFrame();
+    this.wave = { at: this.clock() }; this.host.dataset.wave = 'true'; this.requestFrame();
     this.later('wave', () => { this.wave = null; this.host.dataset.wave = 'false'; this.waveElement.style.opacity = '0'; this.applyPending(); }, WAVE);
   }
   applyPending(quiet = false) {
@@ -282,7 +287,7 @@ export class WallboardRuntime {
     if (!this.diagnostics.issues.graph?.active) this.diagnostics.transition('catchUpApplied');
   }
   transition(before, after, diff, quiet = false) {
-    const at = this.now();
+    const at = this.clock();
     for (const id of diff.arrived) { this.departures.delete(id); this.effects.set(id, { arrival: at }); }
     for (const id of diff.edited) {
       const effect = this.effects.get(id) || {};
@@ -341,7 +346,7 @@ export class WallboardRuntime {
   renderScene(scene, animate) {
     if (!scene) return;
     if (this.settings.fit_to_screen || this.departures.size) scene = this.arrange(scene);
-    const at = this.now();
+    const at = this.clock();
     if (!this.svg) {
       this.svg = scene.template.cloneNode(false); this.svg.classList.add('wallboard-dag');
       const defs = scene.template.querySelector('defs'); if (defs) this.svg.append(defs.cloneNode(true));
@@ -390,7 +395,7 @@ export class WallboardRuntime {
   requestFrame() { if (!this.frame && !this.disposed) this.frame = requestAnimationFrame(() => this.tick()); }
   tick() {
     this.frame = 0;
-    const now = this.now();
+    const now = this.clock();
     let active = false, expired = false;
     for (const [id, departing] of this.departures) if (now >= departing.at + departing.hold + departing.fade) {
       this.departures.delete(id); this.effects.delete(id); expired = true;
@@ -485,13 +490,13 @@ export class WallboardRuntime {
     // The issue stands for as long as the saved history still holds an unreadable snapshot.
     if (!unreadable) this.diagnostics.clear('history', 'invalid-snapshot');
     if (!groups.length) return false;
-    this.clear('replay'); this.replay = { groups, index: 0, start: this.now() }; this.host.dataset.mode = 'replay'; this.diagnostics.state.mode = 'replay';
+    this.clear('replay'); this.replay = { groups, index: 0, start: this.clock() }; this.host.dataset.mode = 'replay'; this.diagnostics.state.mode = 'replay';
     this.playGroup(); return true;
   }
   playGroup() {
     if (!this.replay) return;
     const group = this.replay.groups[this.replay.index];
-    if (!group || this.now() - this.replay.start >= REPLAY_LIMIT) { this.finishReplay(); return; }
+    if (!group || this.clock() - this.replay.start >= REPLAY_LIMIT) { this.finishReplay(); return; }
     this.effects.clear(); this.departures.clear(); this.present = group.before; this.render(group.before, false);
     const detail = [[group.diff.arrived.length, 'added'], [group.diff.edited.length, 'updated'], [group.diff.departed.length, 'removed']]
         .filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(' · ') || 'Observed change';
@@ -499,7 +504,7 @@ export class WallboardRuntime {
     // The timestamp, changed content and cues all begin together.
     this.transition(group.before, group.after, group.diff);
     this.later('replayStep', () => { if (this.replay) { this.replay.index++; this.playGroup(); } }, REPLAY_STEP);
-    this.later('replayEnd', () => this.finishReplay(), Math.max(0, REPLAY_LIMIT - (this.now() - this.replay.start)));
+    this.later('replayEnd', () => this.finishReplay(), Math.max(0, REPLAY_LIMIT - (this.clock() - this.replay.start)));
   }
   finishReplay() {
     this.clear('replayStep'); this.clear('replayEnd'); this.replay = null; this.present = null;

@@ -36,7 +36,7 @@ pub fn WallboardGraph(
     };
     let prerequisites = StoredValue::new(send_wrapper::SendWrapper::new(crate::wallboard::Dependencies::default()));
     let drawing = Memo::new(move |_| {
-        let begin = js_sys::Date::now();
+        let begin = performance_now();
         let presentation = presentation.get();
         let (tasks, relations) = wallboard_tasks(&selection);
         let all_relations = store::relations();
@@ -61,9 +61,10 @@ pub fn WallboardGraph(
         let svg =
             wallboard_render(&tasks, &relations, &store::scopes(), &store::messages(), &presentation, &availability);
         // Measurements are outside the memo's value: equal SVG must stay equal even when
-        // computation time changes, or diagnostics themselves would trigger DOM work.
+        // computation time changes, or diagnostics themselves would trigger DOM work. Timed on the
+        // monotonic clock, which a correction of the wall clock never moves.
         if let Some(element) = host.get_untracked() {
-            wallboard_record_render(element.as_ref(), js_sys::Date::now() - begin);
+            wallboard_record_render(element.as_ref(), performance_now() - begin);
         }
         svg
     });
@@ -104,6 +105,13 @@ extern "C" {
     fn wallboard_record_render(host: &web_sys::Element, elapsed_ms: f64);
     #[wasm_bindgen(js_name = dispose)]
     fn wallboard_dispose(host: &web_sys::Element);
+}
+
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    /// The page's monotonic clock, in milliseconds.
+    #[wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn performance_now() -> f64;
 }
 
 /// The same layout also places a temporary union containing cards leaving the filter. Keeping
