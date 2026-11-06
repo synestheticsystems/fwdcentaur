@@ -32,7 +32,10 @@ how to build, configure, connect and run it, and what to do when something is wr
   typed settings; the renderer, `graph/wallboard_render.rs`, and the packing,
   `layout/wallboard_layout.rs`, are child modules of `graph.rs` and `layout.rs`, so that they draw
   with the Graph page's own code. The renderer gives the runtime each frame as SVG markup, with the
-  settings revision it was drawn under.
+  settings revision it was drawn under. It draws in three stages, each run again only when what it
+  reads changes: the cards, read from the store; their packing, which reads only their order, the
+  arrows between them, their sizes and the row cap; and the frame's SVG, the only stage that reads
+  the counts of messages, so that a new message never packs the cards again.
 - **JavaScript** presents, from `crates/fwd-web/src/wallboard/` beside the stylesheet:
   `wallboard-runtime.mjs` owns the live and replay state, the timers, the observers and the DOM.
   `wallboard-history.mjs` owns the witnessed history and the reading of snapshots,
@@ -75,7 +78,7 @@ A field or method cannot be named in a `use`, so a rename of one fails where the
 Their tests are child modules too, and use the Graph page's test helpers `id`, `task`, `waits` and
 `part_of` and its `plan`, and the layout's test helpers `open`, `task` and `crossings_drawn`.
 Everything else the wallboard uses is crate-public: `store`'s standing queries and lookups, with
-`open_with_predicate`; `session`'s project, client and context, with `wallboard_node` and
+`open_with` and `Collection`; `session`'s project, client and context, with `wallboard_node` and
 `wallboard_context`; `fmt`'s labels; and `clock`'s `keep_time` and `comes_due`.
 
 ## Configuration
@@ -127,7 +130,13 @@ A card faded to half its opacity is blocked by an unfinished accepted prerequisi
 which, Blocked or On hold, with its status and priority unchanged. A cancelled or rejected
 prerequisite reads Check dependency, and one that cannot be read Dependency unknown. Availability
 comes from exact-ID queries of the prerequisites of the cards shown, which close when no card needs
-them, so the display never loads the backlog of finished tasks; a proposed dependency blocks nothing.
+them, so the only finished tasks the display loads are those prerequisites; a proposed dependency
+blocks nothing.
+
+Beside its tasks the display reads the project's relations, scopes, principals and messages whole,
+for its arrows, scope chips, assignees and counts, and caches them for the page's life. It opens no
+highlights or decisions, which it never shows, and its readiness waits for no query it did not open
+(`store::Collection`).
 
 A status row above the graph says CONNECTING until the first graph, then LIVE, SYNCING while it
 catches up, OFFLINE with the last view while the connection is down, STALE when a frame could not be
@@ -289,9 +298,11 @@ clock.
 | `latest.baselineEnded` | The latest end of a quiet wait: at a cold start, after a reconnect, or after a frame the runtime held back while connected. On an armed display, new content is not on screen yet at this mark. |
 | `latest.catchUpApplied` | The latest time an armed display applied what a quiet wait held back, after its batch wait and wave; at once if nothing differed, or when a frame of new card shapes replaced it first. Cards may still be moving, and a failed draw does not count. A cold start does not set it: `milestones.armed` presents the first graph. |
 
-`timings.rustRender` counts Rust's recomputations of the drawing and totals their time;
-`timings.render` is the DOM update, `snapshot` the reading of SVG, `layout` the fitting and the layout
-of departures, and `persistence` the saving of history.
+Rust draws a frame in three stages, each timed apart: `timings.rustCards` counts its readings of the
+cards from the store, `timings.rustPacking` its packings of them, and `timings.rustMarkup` its
+writings of the frame's SVG, each with their total time. `timings.render` is the DOM update,
+`snapshot` the reading of SVG, `layout` the fitting and the layout of departures, and `persistence`
+the saving of history.
 
 ### Measuring a cold start and a reconnect
 
@@ -334,7 +345,7 @@ These times do not establish Ankurah's convergence. `store::standing_loaded` lat
 daemon has first answered every standing query, and stays true for the page's life, so a reconnect
 has no signal that the answers are complete. A reconnect's stages are the connection coming back and
 a deliberate quiet wait, and cannot separate Ankurah's catch-up from that wait; they name no
-bottleneck. Compare the `timings.rustRender` and `timings.render` totals with the stage they fall
+bottleneck. Compare the totals of Rust's three timings and `timings.render` with the stage they fall
 in: on a cold start, the stage that dominates is the one to work on, not the layer busy last. For a
 representative update or an idle interval, sample before and after and subtract.
 
@@ -400,7 +411,9 @@ never starts, stops, configures or writes to the daemon.
 `deploy/wallboard/checks/test-scratch-daemon.cjs` drives the built bundle against a daemon it starts
 itself, in real time and with real writes. It covers the Rust wiring the synthetic checks cannot
 reach: the renderer asking the clock about a task's date, the clock starting only once the store has
-opened, and a card's revision stating its task's relations. It takes about twelve minutes:
+opened, a card's revision stating its task's relations, the store opening no collection the display
+does not show, which its browser cache records, and a new message drawn with no new packing, which
+the drawing's timings record. It takes about twelve minutes:
 
 ```sh
 bash scripts/build-wallboard.sh

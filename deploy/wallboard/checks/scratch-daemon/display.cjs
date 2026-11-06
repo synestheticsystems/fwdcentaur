@@ -36,13 +36,27 @@ const READ = async runtime => {
   return { wave: Boolean(r?.wave), banner: r?.banner.textContent,
     cards: r ? Object.fromEntries([...r.nodes].map(([id, card]) => [id, { motion: card.dom.dataset.motion || '', glow: +card.glow.style.opacity,
       wash: +card.wash.style.opacity, labels: [...card.dom.querySelectorAll('.wallboard-availability text')].map(text => text.textContent),
-      waiting: card.dom.classList.contains('availability-waiting') }])) : {},
+      waiting: card.dom.classList.contains('availability-waiting'), messages: Number(card.dom.querySelector('.count text')?.textContent ?? 0) }])) : {},
     arrows: r ? [...r.edges.keys()] : [], history: r?.history.entries.length ?? 0, lastAt: last?.at,
     lastChange: change && { arrived: change.arrived, departed: change.departed, edited: change.edited },
     played: r?.sound.played ?? 0, lastKind: r?.sound.lastKind, diagnostics: diagnosticsFor(host), timeOrigin: performance.timeOrigin,
     page: { intervals: __scratch.intervals, waves: __scratch.waves, arrivals: __scratch.arrivals, departures: __scratch.departures },
     connection: document.querySelector('.wallboard-connection')?.dataset.connected };
 };
+
+// The collections a page's browser cache keeps a store for: one for each that its standing queries
+// read, by the name Ankurah gives it. Read from the cache's own register of them, the IndexedDB store
+// model_registrations of Ankurah at fwd's pin, which is no interface: a later Ankurah may move it.
+const CACHED = async () => {
+  const request = indexedDB.open(sessionStorage.getItem('fwd.web.db'));
+  const db = await new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+  try {
+    const keys = db.transaction('model_registrations').objectStore('model_registrations').getAllKeys();
+    const names = await new Promise((resolve, reject) => { keys.onsuccess = () => resolve(keys.result); keys.onerror = () => reject(keys.error); });
+    return names.filter(key => typeof key === 'string' && key.startsWith('name\0')).map(key => key.slice(5)).sort();
+  } finally { db.close(); }
+};
+const cachedCollections = page => page.evaluate(CACHED);
 
 async function openDisplay({ report, server, browser }, name) {
   const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
@@ -112,4 +126,4 @@ const namedBy = ids => {
 };
 const sameChange = (found, arrived, departed, edited) => JSON.stringify(found) === JSON.stringify({ arrived, departed, edited });
 
-module.exports = { BUILD, CHECK_EVERY, FAR_FUTURE, openDisplay, openArmedDisplay, closeDisplay, expectHealthy, expectQuietStart, clockKeepers, namedBy, sameChange };
+module.exports = { BUILD, CHECK_EVERY, FAR_FUTURE, openDisplay, openArmedDisplay, closeDisplay, expectHealthy, expectQuietStart, clockKeepers, namedBy, sameChange, cachedCollections };

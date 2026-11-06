@@ -72,6 +72,13 @@ function openDaemon(root, binaries, report) {
         show: task => json(client(['task', 'show', task])),
         start: task => daemonBuild(['task', 'start', task]),
         rename: (task, title) => daemonBuild(['task', 'amend', task, '--title', title]),
+        comment: (task, text) => daemonBuild(['comment', task, text]),
+        decide: title => daemonBuild(['decision', 'create', title, '--area', 'architecture', '--decision', `${title}, as ruled`]),
+        // A highlight on the first line of `file`, which this writes into the repository first.
+        highlight: (file, line) => {
+          fs.writeFileSync(path.join(repository, file), `${line}\n`);
+          return daemonBuild(['anchor', 'create', '--path', file, '--lines', '1-1']);
+        },
         date: (task, when) => client(['task', 'amend', task, '--not-before', when]),
         clearDate: task => client(['task', 'amend', task, '--clear-not-before']),
         link: (waiting, awaited) => daemonBuild(['link', waiting, 'depends_on', awaited]),

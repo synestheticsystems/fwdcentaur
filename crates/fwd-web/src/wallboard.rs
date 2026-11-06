@@ -15,6 +15,11 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 mod settings;
 pub use settings::{Presentation, Settings, TaskSelection};
 
+/// What the wallboard reads beside its tasks and their relations: the scopes, the assignees' handles
+/// and the counts of messages its cards show. It shows no anchors or decisions, so it opens none.
+const READS: [store::Collection; 3] =
+    [store::Collection::Scopes, store::Collection::Principals, store::Collection::Messages];
+
 /// Watches only prerequisites of visible tasks, never the completed-task backlog.
 /// Keeping a query until its last dependent leaves also follows a completed task being reopened.
 #[derive(Default)]
@@ -193,7 +198,7 @@ pub fn Wallboard() -> impl IntoView {
         mark_boot("node");
         started.set(true);
         let predicate = settings.selection.predicate();
-        if let Err(why) = session::wallboard_context().await.and_then(|_| store::open_with_predicate(&predicate)) {
+        if let Err(why) = session::wallboard_context().await.and_then(|_| store::open_with(&predicate, &READS)) {
             error.set(Some(why));
             return;
         }

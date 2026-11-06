@@ -19,7 +19,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
       window.host = document.querySelector('.wallboard-graph');
       window.revision = changes => JSON.stringify({ ...fixture.settings, ...changes });
       // Rust times its first recomputation before the runtime exists; mount adopts that record.
-      entry.recordRustRender(host, 12.5);
+      entry.recordRustTiming(host, 'rustMarkup', 12.5);
       entry.mount(host, revision({}), fixture.layout);
     });
     const tasks = [{ id: 'a', title: 'First task', priority: 1 }, { id: 'b', title: 'Second task', priority: 2 }];
@@ -33,7 +33,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     await send(tasks.slice(0, 1), { loaded: false, connected: false }); await page.clock.runFor(100);
     await send(tasks.slice(0, 1), { loaded: false });
     let { report } = await read();
-    assert.equal(report.timings.rustRender.count, 1);
+    assert.equal(report.timings.rustMarkup.count, 1);
     assert.deepEqual(report.milestones, {});
     assert.deepEqual(Object.keys(report.latest), ['connected']);
     await page.clock.runFor(100);

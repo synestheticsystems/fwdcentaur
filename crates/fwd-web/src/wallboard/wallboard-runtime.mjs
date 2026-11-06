@@ -526,10 +526,11 @@ export class WallboardRuntime {
 }
 
 const runtimes = new WeakMap(), pendingDiagnostics = new WeakMap();
-export function recordRustRender(host, elapsedMs) {
+// Rust's time for a stage of its drawing: rustCards, rustPacking or rustMarkup.
+export function recordRustTiming(host, stage, elapsedMs) {
   let diagnostics = runtimes.get(host)?.diagnostics || pendingDiagnostics.get(host);
   if (!diagnostics) { diagnostics = new Diagnostics(); pendingDiagnostics.set(host, diagnostics); }
-  diagnostics.sample('rustRender', elapsedMs);
+  diagnostics.sample(stage, elapsedMs);
 }
 export function mount(host, settings, layout) {
   runtimes.get(host)?.dispose();

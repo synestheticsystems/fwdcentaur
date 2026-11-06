@@ -1,8 +1,9 @@
 // A cold start with no tunnel: the page waits for the daemon for longer than the clock's first check
-// could take to come round, then joins when the tunnel appears. Then a date reaches the open page
-// through the daemon, on a project whose catalog first heard of the field from this display, while
-// a page of the daemon's own build goes on following the graph.
-const { CHECK_EVERY, FAR_FUTURE, openDisplay, closeDisplay, expectHealthy, expectQuietStart, clockKeepers, namedBy, sameChange } = require('../display.cjs');
+// could take to come round, then joins when the tunnel appears, caching none of the collections it
+// never shows. A message then reaches a card without packing the cards again. Then a date reaches the
+// open page through the daemon, on a project whose catalog first heard of the field from this
+// display, while a page of the daemon's own build goes on following the graph.
+const { CHECK_EVERY, FAR_FUTURE, openDisplay, closeDisplay, expectHealthy, expectQuietStart, clockKeepers, namedBy, sameChange, cachedCollections } = require('../display.cjs');
 
 module.exports = async function firstContact(world) {
   const { report, daemon, server, browser } = world;
@@ -10,6 +11,9 @@ module.exports = async function firstContact(world) {
   const project = daemon.project('first-contact');
   const ids = { shown: project.task('Shown with no date'), toldFirst: project.task('Told its first date while the display watches') };
   const change = namedBy(ids);
+  // What the display never shows, which the daemon's page caches and the display must not.
+  project.decide('A ruling the display never shows');
+  project.highlight('notes.md', 'A line the display never shows');
   observe('the catalog before the display connects', { not_before: project.registered('not_before') });
 
   const port = daemon.port();
@@ -43,6 +47,20 @@ module.exports = async function firstContact(world) {
   expect('both tasks with no date are shown', ids.shown in state.cards && ids.toldFirst in state.cards, Object.keys(state.cards).length);
   expectQuietStart(report, 'after an offline boot', state);
   expect('the display connecting registered not_before in the catalog of the daemon it reads', project.registered('not_before'));
+  const byApp = await cachedCollections(daemonPage), byDisplay = await cachedCollections(display.page);
+  const uncached = byApp.filter(name => !byDisplay.includes(name));
+  expect('the display caches every collection the daemon\'s page does but highlights and decisions, which it never opens',
+    byDisplay.every(name => byApp.includes(name)) && uncached.length === 2 && uncached.some(name => /anchor/i.test(name)) && uncached.some(name => /decision/i.test(name)),
+    { app: byApp, display: byDisplay });
+
+  const beforeMessage = await display.read();
+  project.comment(ids.shown, 'A message on the task shown');
+  const counted = await waitUntil('the message to be counted', async () => { const now = await display.read(); return now.cards[ids.shown]?.messages === 1 ? now : null; }, 15_000);
+  const timed = (state, stage) => state?.diagnostics.timings[stage]?.count ?? 0;
+  expect('a message on a task draws its count without packing the cards again',
+    Boolean(counted) && timed(counted, 'rustMarkup') > timed(beforeMessage, 'rustMarkup')
+      && timed(beforeMessage, 'rustPacking') > 0 && timed(counted, 'rustPacking') === timed(beforeMessage, 'rustPacking'),
+    { markup: [timed(beforeMessage, 'rustMarkup'), timed(counted, 'rustMarkup')], packing: [timed(beforeMessage, 'rustPacking'), timed(counted, 'rustPacking')] });
 
   const stillReads = project.daemonBuild(['task', 'show', ids.toldFirst], { allowFailure: true });
   expect('the daemon\'s own client still reads the graph once the display has registered the field', stillReads.status === 0, stillReads.status);

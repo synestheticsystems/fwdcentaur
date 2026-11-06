@@ -27,14 +27,16 @@ use wasm_bindgen_futures::spawn_local;
 use crate::clock;
 use crate::session::ctx;
 
-pub struct Store {
-    pub tasks: LiveQuery<TaskView>,
-    pub relations: LiveQuery<RelationView>,
-    pub scopes: LiveQuery<ScopeView>,
-    pub principals: LiveQuery<PrincipalView>,
-    pub messages: LiveQuery<MessageView>,
-    pub anchors: LiveQuery<CodeAnchorView>,
-    pub decisions: LiveQuery<DecisionView>,
+struct Store {
+    tasks: LiveQuery<TaskView>,
+    relations: LiveQuery<RelationView>,
+    /// The collections the page reads beside its tasks and their relations, each opened only when
+    /// the page names it.
+    scopes: Option<LiveQuery<ScopeView>>,
+    principals: Option<LiveQuery<PrincipalView>>,
+    messages: Option<LiveQuery<MessageView>>,
+    anchors: Option<LiveQuery<CodeAnchorView>>,
+    decisions: Option<LiveQuery<DecisionView>>,
     /// Whether the daemon has answered every standing query above (`standing_loaded`).
     answered: ArcRwSignal<bool>,
     /// The readers of each entity looked up by its id in the queries above.
@@ -43,49 +45,81 @@ pub struct Store {
     ends: Ends,
     /// What keeps the two above current, for as long as the page.
     _watching: Vec<SubscriptionGuard>,
-    /// What the task query selects, bound by the first open for as long as the page.
+    /// What the task query selects and the collections opened beside it, bound by the first open
+    /// for as long as the page.
     task_predicate: String,
+    reads: Vec<Collection>,
+}
+
+/// A collection the store keeps a standing query on beside the tasks and their relations, which
+/// every page reads. A page names the collections it reads, and the store opens those alone, so
+/// that a page loads, caches and waits for nothing it never shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Collection {
+    Scopes,
+    Principals,
+    Messages,
+    Anchors,
+    Decisions,
+}
+
+impl Collection {
+    /// Every collection: the app's pages read them all between them.
+    pub const ALL: [Collection; 5] =
+        [Collection::Scopes, Collection::Principals, Collection::Messages, Collection::Anchors, Collection::Decisions];
 }
 
 static STORE: OnceLock<SendWrapper<Store>> = OnceLock::new();
 
+/// Opens the app's standing queries: every task, and every collection.
 pub fn open() -> Result<(), String> {
-    open_with_predicate("created > 0")
+    open_with("created > 0", &Collection::ALL)
 }
 
-/// Opens the standing queries with the tasks `task_predicate` selects. The store lives as long as
-/// the page, so its first open binds the task query: another predicate is refused, never ignored.
-pub fn open_with_predicate(task_predicate: &str) -> Result<(), String> {
+/// Opens the standing queries: the tasks `task_predicate` selects, their relations, and the
+/// collections `reads` names. The store lives as long as the page, so its first open binds both:
+/// another predicate or other collections are refused, never ignored.
+pub fn open_with(task_predicate: &str, reads: &[Collection]) -> Result<(), String> {
     if let Some(store) = STORE.get() {
-        return if store.task_predicate == task_predicate {
-            Ok(())
-        } else {
+        return if store.task_predicate != task_predicate {
             Err(format!("the task query already selects `{}`, not `{task_predicate}`", store.task_predicate))
+        } else if store.reads != reads {
+            Err(format!("the store already reads {:?}, not {reads:?}", store.reads))
+        } else {
+            Ok(())
         };
     }
     let ctx = ctx();
     let refused =
         |what: &'static str| move |e: ankurah::error::RetrievalError| format!("the {what} query was refused: {e}");
+    // The query of each collection `reads` names, and none for the others.
+    let named = |collection| reads.contains(&collection);
     // `created > 0` rather than `>= 0`: a live query on `>= 0` never fires (Ankurah 0.9.3).
     let tasks = ctx.query::<TaskView>(task_predicate).map_err(refused("tasks"))?;
     let relations = ctx.query::<RelationView>("created > 0").map_err(refused("relations"))?;
-    let scopes = ctx.query::<ScopeView>("created > 0").map_err(refused("scopes"))?;
-    let principals = ctx.query::<PrincipalView>("kind = 'human' OR kind = 'agent'").map_err(refused("principals"))?;
-    let messages = ctx.query::<MessageView>("created > 0").map_err(refused("messages"))?;
-    let anchors = ctx.query::<CodeAnchorView>("created > 0").map_err(refused("anchors"))?;
-    let decisions = ctx.query::<DecisionView>("created > 0").map_err(refused("decisions"))?;
+    let scopes = named(Collection::Scopes)
+        .then(|| ctx.query::<ScopeView>("created > 0").map_err(refused("scopes")))
+        .transpose()?;
+    let principals = named(Collection::Principals)
+        .then(|| ctx.query::<PrincipalView>("kind = 'human' OR kind = 'agent'").map_err(refused("principals")))
+        .transpose()?;
+    let messages = named(Collection::Messages)
+        .then(|| ctx.query::<MessageView>("created > 0").map_err(refused("messages")))
+        .transpose()?;
+    let anchors = named(Collection::Anchors)
+        .then(|| ctx.query::<CodeAnchorView>("created > 0").map_err(refused("anchors")))
+        .transpose()?;
+    let decisions = named(Collection::Decisions)
+        .then(|| ctx.query::<DecisionView>("created > 0").map_err(refused("decisions")))
+        .transpose()?;
     // Watched from before any of them answers, so that every arrival is heard.
     let (arrivals, ends) = (Arrivals::default(), Ends::default());
-    let watching = vec![
-        arrivals.watch(&tasks),
-        arrivals.watch(&relations),
-        arrivals.watch(&scopes),
-        arrivals.watch(&principals),
-        arrivals.watch(&messages),
-        arrivals.watch(&anchors),
-        arrivals.watch(&decisions),
-        ends.watch(&relations),
-    ];
+    let mut watching = vec![arrivals.watch(&tasks), arrivals.watch(&relations), ends.watch(&relations)];
+    watching.extend(scopes.as_ref().map(|query| arrivals.watch(query)));
+    watching.extend(principals.as_ref().map(|query| arrivals.watch(query)));
+    watching.extend(messages.as_ref().map(|query| arrivals.watch(query)));
+    watching.extend(anchors.as_ref().map(|query| arrivals.watch(query)));
+    watching.extend(decisions.as_ref().map(|query| arrivals.watch(query)));
     let store = Store {
         tasks,
         relations,
@@ -99,6 +133,7 @@ pub fn open_with_predicate(task_predicate: &str) -> Result<(), String> {
         ends,
         _watching: watching,
         task_predicate: task_predicate.to_owned(),
+        reads: reads.to_vec(),
     };
     STORE.set(SendWrapper::new(store)).ok();
     spawn_local(record_the_daemons_answer());
@@ -109,6 +144,12 @@ fn store() -> &'static Store {
     STORE.get().expect("store opened by App")
 }
 
+/// The standing query of `collection`, which the page must have named when it opened the store:
+/// reading one it did not name is the page's mistake, and stops it rather than show nothing.
+fn opened<V: View + Clone + 'static>(query: &Option<LiveQuery<V>>, collection: Collection) -> &LiveQuery<V> {
+    query.as_ref().unwrap_or_else(|| panic!("the page reads {collection:?}, which it did not open the store with"))
+}
+
 pub fn tasks() -> Vec<TaskView> {
     store().tasks.get()
 }
@@ -116,17 +157,17 @@ pub fn relations() -> Vec<RelationView> {
     store().relations.get()
 }
 pub fn scopes() -> Vec<ScopeView> {
-    store().scopes.get()
+    opened(&store().scopes, Collection::Scopes).get()
 }
 pub fn principals() -> Vec<PrincipalView> {
-    store().principals.get()
+    opened(&store().principals, Collection::Principals).get()
 }
 pub fn messages() -> Vec<MessageView> {
-    store().messages.get()
+    opened(&store().messages, Collection::Messages).get()
 }
 /// Every decision, by number (then by creation, should two share a number).
 pub fn decisions() -> Vec<DecisionView> {
-    let mut found = store().decisions.get();
+    let mut found = opened(&store().decisions, Collection::Decisions).get();
     found.sort_by_key(|d| (d.number().unwrap_or(0), d.created().unwrap_or(0)));
     found
 }
@@ -147,20 +188,30 @@ pub fn standing_loaded() -> bool {
     store().answered.get()
 }
 
-/// Records that the daemon has answered every standing query, or that one failed: a failure is
-/// logged and counts as an answer, so nothing waits for it forever. The daemon answers them side
-/// by side, so waiting for each in turn takes as long as the slowest.
+/// Records that the daemon has answered every standing query the page opened, or that one failed:
+/// a failure is logged and counts as an answer, so nothing waits for it forever. The daemon answers
+/// them side by side, so waiting for each in turn takes as long as the slowest.
 async fn record_the_daemons_answer() {
     let store = store();
-    let answers = [
+    let mut answers = vec![
         ("tasks", store.tasks.wait_durable_answered().await),
         ("relations", store.relations.wait_durable_answered().await),
-        ("scopes", store.scopes.wait_durable_answered().await),
-        ("principals", store.principals.wait_durable_answered().await),
-        ("messages", store.messages.wait_durable_answered().await),
-        ("anchors", store.anchors.wait_durable_answered().await),
-        ("decisions", store.decisions.wait_durable_answered().await),
     ];
+    if let Some(scopes) = &store.scopes {
+        answers.push(("scopes", scopes.wait_durable_answered().await));
+    }
+    if let Some(principals) = &store.principals {
+        answers.push(("principals", principals.wait_durable_answered().await));
+    }
+    if let Some(messages) = &store.messages {
+        answers.push(("messages", messages.wait_durable_answered().await));
+    }
+    if let Some(anchors) = &store.anchors {
+        answers.push(("anchors", anchors.wait_durable_answered().await));
+    }
+    if let Some(decisions) = &store.decisions {
+        answers.push(("decisions", decisions.wait_durable_answered().await));
+    }
     for (what, answer) in answers {
         if let Err(e) = answer {
             tracing::warn!("the {what} query did not load: {e}");
@@ -325,19 +376,19 @@ pub fn task(id: EntityId) -> Option<TaskView> {
     member(&store().tasks, id)
 }
 pub fn scope(id: EntityId) -> Option<ScopeView> {
-    member(&store().scopes, id)
+    member(opened(&store().scopes, Collection::Scopes), id)
 }
 pub fn message(id: EntityId) -> Option<MessageView> {
-    member(&store().messages, id)
+    member(opened(&store().messages, Collection::Messages), id)
 }
 pub fn anchor(id: EntityId) -> Option<CodeAnchorView> {
-    member(&store().anchors, id)
+    member(opened(&store().anchors, Collection::Anchors), id)
 }
 pub fn decision(id: EntityId) -> Option<DecisionView> {
-    member(&store().decisions, id)
+    member(opened(&store().decisions, Collection::Decisions), id)
 }
 pub fn principal(id: EntityId) -> Option<PrincipalView> {
-    member(&store().principals, id)
+    member(opened(&store().principals, Collection::Principals), id)
 }
 pub fn relation(id: EntityId) -> Option<RelationView> {
     member(&store().relations, id)
