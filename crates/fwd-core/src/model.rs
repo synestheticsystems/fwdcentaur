@@ -43,6 +43,7 @@ macro_rules! string_enum_property {
 // Principal
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -65,6 +66,7 @@ string_enum_property!(PrincipalKind);
 /// `ops::set_role`). A principal whose stored role is a word outside the set, as `supervisor` is
 /// until `fwd admin migrate` carries it over (`ops::migrate_roles`), reads as having none.
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -182,6 +184,7 @@ pub struct Repo {
 // Task
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -273,6 +276,7 @@ pub struct Task {
 // Relation
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -322,6 +326,7 @@ pub enum RelationKind {
 string_enum_property!(RelationKind);
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -376,6 +381,7 @@ pub struct Relation {
 /// revision of it. An anchor made on a revision (`fwd comment --against`: the index, HEAD or a
 /// commit) has that revision's content for its basis.
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -511,6 +517,7 @@ pub struct CodeAnchor {
 // Message
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -537,6 +544,7 @@ impl Priority {
 }
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -607,6 +615,7 @@ pub struct Message {
 // Notification
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -661,6 +670,7 @@ pub enum NotificationType {
 string_enum_property!(NotificationType);
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -705,6 +715,7 @@ pub struct Notification {
 // Scope
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]
@@ -782,6 +793,7 @@ pub mod before_d108 {
 // Decision
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
 )]

@@ -4,7 +4,11 @@
 //! See docs/design/data-model.md.
 //!
 //! Features: `native` (default) adds the daemon client, the project directories and git-driven
-//! anchoring; `wasm` compiles the rest for the browser (crates/fwd-web).
+//! anchoring; `wasm` compiles the rest for the browser (crates/fwd-web); `uniffi` gives the models
+//! bindings for a Swift app.
+
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
 
 pub mod anchor_name;
 #[cfg(feature = "native")]
