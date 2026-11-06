@@ -134,15 +134,20 @@ export class WallboardRuntime {
       if (this.statusFields[i].textContent !== value) this.statusFields[i].textContent = value;
     }
   }
+  // What the status row says of the live view, as `status` takes it: the connection first, then a
+  // failure that stands, then whether the view has settled on what the daemon sent. Only a view it
+  // calls current, LIVE, may give way to replay.
+  liveStatus() {
+    if (!this.connected) return this.armed ? ['offline', 'OFFLINE', 'Last view', 'Reconnecting…']
+      : ['offline', 'CONNECTING', 'Waiting', 'Waiting for the live connection'];
+    if (this.diagnostics.issues.graph?.active) return ['offline', 'STALE', 'Last view', 'Graph update failed'];
+    if (this.diagnostics.issues.configuration?.active) return ['offline', 'STALE', 'Last view', 'Settings update refused'];
+    if (!this.armed || !this.loaded || this.syncing)
+      return ['syncing', 'SYNCING', 'Catching up', this.armed ? 'Keeping the last view' : 'Loading the graph'];
+    return ['current', 'LIVE', 'Now', 'Current graph'];
+  }
   showLiveStatus() {
-    if (this.replay) return;
-    if (!this.connected) this.status('offline', this.armed ? 'OFFLINE' : 'CONNECTING',
-      this.armed ? 'Last view' : 'Waiting', this.armed ? 'Reconnecting…' : 'Waiting for the live connection');
-    else if (this.diagnostics.issues.graph?.active) this.status('offline', 'STALE', 'Last view', 'Graph update failed');
-    else if (this.diagnostics.issues.configuration?.active) this.status('offline', 'STALE', 'Last view', 'Settings update refused');
-    else if (!this.armed || !this.loaded || this.syncing) this.status('syncing', 'SYNCING',
-      'Catching up', this.armed ? 'Keeping the last view' : 'Loading the graph');
-    else this.status('current', 'LIVE', 'Now', 'Current graph');
+    if (!this.replay) this.status(...this.liveStatus());
   }
   replayAge(at) {
     const minutes = Math.max(0, Math.floor((this.now() - at) / 60000));
@@ -465,8 +470,12 @@ export class WallboardRuntime {
       if (!this.replay) this.scheduleReplay();
     }, this.settings.replay.interval_seconds * 1000);
   }
+  // Replay takes the live view's place only while the status row calls that view current, so that it
+  // never covers an outage, a catch-up or a failure, which the row must say for as long as they last,
+  // and only once the view's own cues have ended.
   startReplay() {
-    if (!this.armed || this.pending || this.wave || this.replay || this.effects.size || document.hidden) return false;
+    const [mode] = this.liveStatus();
+    if (mode !== 'current' || this.pending || this.wave || this.replay || this.effects.size || document.hidden) return false;
     let unreadable = false;
     const groups = this.history.groups().flatMap(group => {
       try { const before = readSnapshot(group.before), after = readSnapshot(group.after); const diff = changes(before, after);

@@ -132,6 +132,8 @@ them, so the display never loads the backlog of finished tasks; a proposed depen
 A status row above the graph says CONNECTING until the first graph, then LIVE, SYNCING while it
 catches up, OFFLINE with the last view while the connection is down, STALE when a frame could not be
 drawn or settings were refused, and during replay the age and the counts of the changes it plays.
+Replay never covers the others (Replay, below), and while it plays, the connection's own indicator
+shows in the corner.
 
 ### Live changes
 
@@ -170,6 +172,11 @@ groups, oldest first, for four seconds each, and stops within 23 seconds, back a
 groups with no net change are skipped, and a fresh live change ends it at once. In replay a departing
 card fades over three seconds, with no hold first, and arrival highlights finish in three seconds,
 so that each step settles before the next.
+
+Replay starts only from a live view the status row calls LIVE: connected, loaded and settled, with no
+failure standing and its own cues ended. An outage, a catch-up and a STALE view keep their status in
+view for as long as they last, however many intervals pass, and a disconnect, a refused revision or
+a frame that cannot be read ends a replay already playing.
 
 A history belongs to one project, set of statuses, card width, row limit and text size; a change to
 any of them starts a new one, and the history saved for any other is removed at that origin. Saved
@@ -357,9 +364,9 @@ check; the launcher's and the settings contract's Python tests; the build identi
 (`scripts/test_wallboard_identity.py`); the build; the runtime's unit tests in Node (diagnostics,
 history and change detection, settings, themes and the scratch test's isolation); and the browser
 checks, each against the production runtime, most of them on a virtual clock: motion and replay,
-membership changes, settings revisions, screen fitting, diagnostics, sound, and the production WASM
-layout driving the runtime. Continuous integration runs the same checks, the Rust and Python ones in
-its `rust` job and the rest in its `wallboard` job.
+when replay may start, membership changes, settings revisions, screen fitting, diagnostics, sound,
+and the production WASM layout driving the runtime. Continuous integration runs the same checks, the
+Rust and Python ones in its `rust` job and the rest in its `wallboard` job.
 
 Two integration tests stay opt-in, since each needs what the suite never touches.
 

@@ -152,7 +152,9 @@ html, body, body *, body *::before, body *::after { cursor: none !important; }
 .wallboard-mode-detail { margin-left: auto; font-size: clamp(16px, .8vw, 30px); }
 .wallboard-replay.current .wallboard-mode-tag::before { content: ''; width: .38em; height: .38em; border-radius: 50%; background: var(--wb-live); }
 .wallboard-replay.offline .wallboard-mode-tag { color: var(--wb-offline); }
-.wallboard:has(.wallboard-replay) .wallboard-connection { display: none; }
+/* The status row says the connection's state in every mode but replay; while replay plays, the
+   connection's own indicator says it. */
+.wallboard:has(.wallboard-replay:not(.replaying)) .wallboard-connection { display: none; }
 @media (max-width: 700px) { .wallboard-mode-detail { flex-basis: 100%; margin-left: 0; } }
 .wallboard-replay:empty, .wallboard-replay[hidden], .wallboard-wait[hidden] { display: none; }
 .wallboard-wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--wb-status); margin: 32px; text-align: center; }
