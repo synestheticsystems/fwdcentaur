@@ -24,8 +24,9 @@ export class LocalHistory {
         // A parse error's message quotes the saved snapshots, which hold task content.
         try { value = JSON.parse(saved); } catch { throw Error('Unparsable history cache'); }
         if (value.version !== 1 || !Array.isArray(value.entries)) throw Error('Invalid history cache');
-        this.entries = value.entries.filter(entry => entry &&
-          Number.isFinite(entry.at) && typeof entry.before === 'string' && typeof entry.after === 'string');
+        // Every entry records the build that wrote it, which replay groups by (`groups`).
+        this.entries = value.entries.filter(entry => entry && Number.isFinite(entry.at) && typeof entry.build === 'string'
+          && entry.build !== '' && typeof entry.before === 'string' && typeof entry.after === 'string');
         const dropped = value.entries.length - this.entries.length;
         if (dropped) this.diagnostics?.issue('history', 'invalid-entry', `${dropped} of ${value.entries.length} entries unusable`);
       }
@@ -67,9 +68,8 @@ export class LocalHistory {
   }
   // Merges what happened together into one replay step, which compares its first snapshot with its
   // last. What a card's revision hashes can change between builds, and a step spanning two would report
-  // every card that stayed as edited, so each group holds entries of one build. Entries that record no
-  // build group only among themselves. A reload of one build ends no group, since its revisions still
-  // compare.
+  // every card that stayed as edited, so each group holds entries of one build. A reload of one build
+  // ends no group, since its revisions still compare.
   groups() {
     this.prune();
     const groups = [];
@@ -83,12 +83,10 @@ export class LocalHistory {
 }
 
 // Replay compares snapshots rendered for one query with one card geometry. These settings name that
-// context, and a change to any of them starts a fresh history. Text scale joins the key only when it
-// is not 100, so that histories saved before text scaling existed stay readable.
+// context, and a change to any of them starts a fresh history.
 export function historyContext(settings) {
-  const fields = [settings.project_id, [...settings.statuses].sort(), settings.max_rows, settings.node_width];
-  if (settings.text_scale_percent !== 100) fields.push(settings.text_scale_percent);
-  return JSON.stringify(fields);
+  return JSON.stringify([settings.project_id, [...settings.statuses].sort(), settings.max_rows, settings.node_width,
+    settings.text_scale_percent]);
 }
 
 // Saved history is data, not executable markup. Only the SVG vocabulary emitted by Rust is

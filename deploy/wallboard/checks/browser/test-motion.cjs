@@ -188,7 +188,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     // Quiet displays reach back beyond a day instead of losing all replay content.
     await page.evaluate(() => {
       const runtime = fixture.runtime;
-      runtime.history.entries = [{ at: Date.now() - 26 * 3600000,
+      runtime.history.entries = [{ at: Date.now() - 26 * 3600000, build: runtime.history.build,
         before: fixture.snapshot([{id:'quiet',title:'Quiet day',what:'Before',priority:1}]),
         after: fixture.snapshot([{id:'quiet',title:'Quiet day',what:'Yesterday',priority:1}]) }];
       if (!runtime.startReplay()) throw Error('Old retained history did not replay');

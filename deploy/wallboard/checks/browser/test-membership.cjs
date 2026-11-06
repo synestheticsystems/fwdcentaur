@@ -276,8 +276,6 @@ const ONE_FRAME = 20;
     };
     await replayAcrossUpgradeFrom('another-build');
     console.log('PASS a saved entry of another build and a live change within 30 seconds replay as two steps, 1 added then 1 removed, with no edit invented on the cards that stayed');
-    await replayAcrossUpgradeFrom(undefined);
-    console.log('PASS likewise for a saved entry that records no build');
 
     // A reload of one build leaves revisions comparable, so it ends no group: a card arriving either
     // side of it is one step.

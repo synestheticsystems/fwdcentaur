@@ -457,4 +457,5 @@ A card's revision means something only within one build, since what it hashes ca
 compares live frames only with frames it received itself, and its first frame is a quiet start, so
 an upgrade cues nothing. Replay compares saved snapshots with each other. Each history entry records
 the build that wrote it, and a replay group holds entries of one build, so no group spans an
-upgrade. A saved frame in which only arrows changed replays as "Observed change", naming no card.
+upgrade; a saved entry that records no build is unusable, and dropped. A saved frame in which only
+arrows changed replays as "Observed change", naming no card.

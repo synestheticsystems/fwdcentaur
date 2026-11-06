@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LocalHistory, changes } from '../../../../crates/fwd-web/src/wallboard/wallboard-history.mjs';
+import { LocalHistory, changes, historyContext } from '../../../../crates/fwd-web/src/wallboard/wallboard-history.mjs';
 import { Diagnostics } from '../../../../crates/fwd-web/src/wallboard/wallboard-diagnostics.mjs';
 import { buildInfo } from '../../../../crates/fwd-web/src/wallboard/wallboard-build.mjs';
 
@@ -106,8 +106,7 @@ test('an entry records the build that wrote it, and keeps it through a save and 
 
 test('a replay group holds entries of one build, since the revisions of two builds do not compare', () => {
   const now = 100000000;
-  // A saved cache with one entry per build named, all within 30 seconds. An entry given no build holds
-  // no such field.
+  // A saved cache with one entry per build named, all within 30 seconds.
   const groupsOf = (...builds) => {
     const storage = new Storage();
     const entries = builds.map((build, i) => ({ at: now - 20000 + i * 5000, build, before: `before${i}`, after: `after${i}` }));
@@ -118,10 +117,7 @@ test('a replay group holds entries of one build, since the revisions of two buil
   const merged = (first, last) => [`before${first}`, `after${last}`, last - first + 1];
   assert.deepEqual(groupsOf('build-a', 'build-b'), [alone(0), alone(1)], 'two builds stay two groups');
   assert.deepEqual(groupsOf('build-a', 'build-a'), [merged(0, 1)], 'one build merges as before');
-  assert.deepEqual(groupsOf(undefined, 'build-a'), [alone(0), alone(1)], 'no build stays apart from a build after it');
-  assert.deepEqual(groupsOf('build-a', undefined), [alone(0), alone(1)], 'and from a build before it, as after a rollback');
-  assert.deepEqual(groupsOf(undefined, undefined), [merged(0, 1)], 'two with no build merge as before');
-  assert.deepEqual(groupsOf(undefined, undefined, 'build-a', 'build-a'), [merged(0, 1), merged(2, 3)], 'each side of an upgrade still merges');
+  assert.deepEqual(groupsOf('build-a', 'build-a', 'build-b', 'build-b'), [merged(0, 1), merged(2, 3)], 'each side of an upgrade still merges');
   assert.deepEqual(groupsOf('build-a', 'build-b', 'build-a'), [alone(0), alone(1), alone(2)], 'a group ends at another build for good');
 });
 
@@ -139,20 +135,24 @@ test('a reload of one build continues a group through the saved cache, and an up
   assert.deepEqual(reloadedInto('build-b'), [['a', 'b', 1], ['b', 'c', 1]]);
 });
 
-test('a cache whose entries record no build loads whole, and a save keeps it under its key and version', () => {
+test('a saved entry that records no build is unusable: dropped, diagnosed, and left out of the next save', () => {
   const now = 100000000, diagnostics = new Diagnostics(), storage = new Storage();
   const key = 'fwd-wallboard-history-v1:fixture';
-  const entries = [{ at: now - 20000, before: 'a', after: 'b' }, { at: now - 10000, before: 'b', after: 'c' }];
-  storage.setItem(key, JSON.stringify({ version: 1, entries }));
+  const usable = { at: now - 10000, build: 'build-a', before: 'b', after: 'c' };
+  const unusable = [{ at: now - 20000, before: 'a', after: 'b' }, { at: now - 15000, build: '', before: 'a', after: 'b' },
+    { at: now - 12000, build: 7, before: 'a', after: 'b' }];
+  storage.setItem(key, JSON.stringify({ version: 1, entries: [...unusable, usable] }));
   const history = new LocalHistory('fixture', storage, () => now, diagnostics, 'build-a');
-  assert.deepEqual(history.entries, entries);
-  assert.equal(history.persisted, true);
-  assert.equal(diagnostics.issues.history, undefined, 'nothing about such a cache is an issue');
-  history.append(frame('c'), frame('d'), now);
-  assert.deepEqual(spans(history), [['a', 'c', 2], ['c', 'd', 1]]);
+  assert.deepEqual(history.entries, [usable]);
+  assert.deepEqual(issue(diagnostics), ['invalid-entry', '3 of 4 entries unusable', true]);
   history.save();
-  assert.deepEqual(JSON.parse(storage.getItem(key)),
-    { version: 1, entries: [...entries, { at: now, build: 'build-a', before: 'c', after: 'd' }] });
+  assert.deepEqual(JSON.parse(storage.getItem(key)), { version: 1, entries: [usable] });
+});
+
+test('the context of a history names the project, statuses, row cap, card width and text size, the default size too', () => {
+  const settings = { project_id: 'a-project', statuses: ['open', 'in_progress'], max_rows: 8, node_width: 360, text_scale_percent: 100 };
+  assert.equal(historyContext(settings), JSON.stringify(['a-project', ['in_progress', 'open'], 8, 360, 100]));
+  assert.notEqual(historyContext(settings), historyContext({ ...settings, text_scale_percent: 125 }));
 });
 
 test('storage failure or malformed saved history cannot stop live presentation, and each is diagnosed', () => {
@@ -174,7 +174,7 @@ test('storage failure or malformed saved history cannot stop live presentation, 
 test('unusable saved entries and a missing store are diagnosed, and a save keeps a replay finding', () => {
   const now = 100000000, diagnostics = new Diagnostics(), storage = new Storage();
   storage.setItem('fwd-wallboard-history-v1:mixed', JSON.stringify({ version: 1,
-    entries: [{ at: now, before: 'a', after: 'b' }, { at: 'yesterday', before: 'Saved task title' }] }));
+    entries: [{ at: now, build: 'build-a', before: 'a', after: 'b' }, { at: 'yesterday', before: 'Saved task title' }] }));
   const history = new LocalHistory('mixed', storage, () => now, diagnostics);
   assert.equal(history.entries.length, 1);
   assert.deepEqual(issue(diagnostics), ['invalid-entry', '1 of 2 entries unusable', true]);
