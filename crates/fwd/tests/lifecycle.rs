@@ -2,7 +2,7 @@
 //! stop and restart, on the same port; a stale port file is recovered without killing any pid,
 //! and one that names another daemon's port is not trusted; a project a per-project daemon from
 //! an earlier build still holds is left to it; one daemon hosts every project, including one
-//! created while it runs; sutra shows the daemon while it runs, and nothing of it once it stops;
+//! created while it runs; it keeps a dev-runner entry while it runs, and leaves none once it stops;
 //! a `fwd watch` with no timeout hears across a restart, on the same port or another, and says
 //! nothing about it, and one given `--timeout` ends once it has passed; either exits within a
 //! second of its last line. Any other command caught waiting on its daemon when the daemon stops
@@ -446,12 +446,12 @@ async fn a_project_created_while_the_daemon_runs_is_hosted_without_a_restart() -
     Ok(())
 }
 
-/// Sutra, a dashboard of the dev runners on a machine, shows the daemon from the files it keeps
-/// in sutra's registry: the card, naming the data directory, the daemon's pid and its port, with
-/// one row, `daemon`, that counts the projects open (not one another daemon holds, until it opens
-/// on request) and no row per project; and nothing once the daemon has stopped.
+/// While the daemon runs, the dev-runner registry holds its entry: the meta file, naming the data
+/// directory, the daemon's pid and its port, and one status file, for the unit `daemon`, that
+/// counts the projects open (not one another daemon holds, until it opens on request), with none
+/// per project. Once the daemon has stopped, the registry holds nothing of it.
 #[tokio::test]
-async fn sutra_shows_the_daemon_while_it_runs_and_nothing_once_it_stops() -> Result<()> {
+async fn the_dev_runner_registry_holds_the_daemons_entry_while_it_runs_and_nothing_once_it_stops() -> Result<()> {
     let (dir, paths, first) = setup()?;
     new_project(&paths, &dir.path().join("second"), "My Project!")?;
     let held = new_project(&paths, &dir.path().join("held"), "held")?;
@@ -473,7 +473,7 @@ async fn sutra_shows_the_daemon_while_it_runs_and_nothing_once_it_stops() -> Res
         names.sort();
         Ok(names)
     };
-    assert_eq!(files()?, [id.clone(), format!("{id}.daemon.status")], "the card and its one row");
+    assert_eq!(files()?, [id.clone(), format!("{id}.daemon.status")], "the meta file and its one status file");
     let meta: BTreeMap<String, String> = std::fs::read_to_string(registry.join(&id))?
         .lines()
         .filter_map(|line| line.split_once('='))
@@ -481,17 +481,17 @@ async fn sutra_shows_the_daemon_while_it_runs_and_nothing_once_it_stops() -> Res
         .collect();
     assert_eq!(meta.keys().collect::<Vec<_>>(), ["DAEMON_PORT", "DIR", "PID", "STARTED"], "{meta:?}");
     assert_eq!(meta["DIR"], paths.data_dir.display().to_string());
-    assert_eq!(meta["PID"], pf.pid.to_string(), "the pid sutra checks and signals is the daemon's");
+    assert_eq!(meta["PID"], pf.pid.to_string(), "the pid a reader may check and signal is the daemon's");
     assert!(meta["STARTED"].parse::<u64>().is_ok(), "STARTED is Unix seconds: {meta:?}");
-    assert_eq!(meta["DAEMON_PORT"], pf.port.to_string(), "the row carries the daemon's port");
-    let row = || std::fs::read_to_string(registry.join(format!("{id}.daemon.status")));
-    assert_eq!(row()?, "ready: 2 projects\n", "the project another daemon holds is not counted");
+    assert_eq!(meta["DAEMON_PORT"], pf.port.to_string(), "the daemon unit's port is the daemon's");
+    let status = || std::fs::read_to_string(registry.join(format!("{id}.daemon.status")));
+    assert_eq!(status()?, "ready: 2 projects\n", "the project another daemon holds is not counted");
 
     assert!(daemon::host(&client.pf, &held).await.is_err(), "the earlier daemon still holds it");
-    assert_eq!(row()?, "ready: 2 projects\n", "a project that fails to open changes nothing on the card");
+    assert_eq!(status()?, "ready: 2 projects\n", "a project that fails to open leaves the status file as it was");
     earlier.stop()?;
     daemon::host(&client.pf, &held).await?;
-    assert_eq!(row()?, "ready: 3 projects\n", "a project that opens on request is counted");
+    assert_eq!(status()?, "ready: 3 projects\n", "a project that opens on request is counted");
 
     drop(client);
     assert!(daemon::stop(&paths).await?);

@@ -32,7 +32,7 @@ const env = {
   ...process.env,
   FWD_RUNTIME_DIR: path.join(T, "run"),
   FWD_DATA_DIR: path.join(T, "data"),
-  // The daemon publishes its status for sutra; a scratch daemon must not appear on the real dashboard.
+  // A scratch dev-runner registry keeps test daemons' entries out of the real one, ~/.dev-runner/.
   FWD_DEV_RUNNER_DIR: path.join(T, "dev-runner"),
 };
 // Settings a caller's shell may carry that would point `fwd` at another project, principal,
