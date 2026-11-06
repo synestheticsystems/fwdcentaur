@@ -80,8 +80,8 @@ def main():
         Check('Clippy for wasm32', [*wasm, '--', '-D', 'warnings'], repo),
         Check('Clippy for wasm32 with the wallboard feature', [*wasm, '--features', 'wallboard', '--', '-D', 'warnings'], repo),
         Check('Rust formatting', ['cargo', 'fmt', '--all', '--check', '--manifest-path', 'crates/fwd-web/Cargo.toml'], repo),
-        Check('Host configuration', [sys.executable, '-m', 'unittest', 'discover', '-s',
-                                     'deploy/wallboard/checks/launcher', '-p', 'test_*.py', '-v'], repo),
+        Check('Launcher configuration', [sys.executable, '-m', 'unittest', 'discover', '-s',
+                                         'deploy/wallboard/checks/launcher', '-p', 'test_*.py', '-v'], repo),
         Check('Build identity', [sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts',
                                  '-p', 'test_wallboard_identity.py', '-v'], repo),
         # The build writes the two modules the runtime's unit tests import, so it comes before them.

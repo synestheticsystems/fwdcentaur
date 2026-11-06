@@ -121,9 +121,10 @@ impl Availability {
     }
 }
 
-/// The project and settings that the wallboard's own server generates from its wallboard.json.
-/// Fetching them never reaches the daemon, so a cold start gets this far while no daemon answers.
-async fn project() -> Result<(session::Project, Settings), String> {
+/// Loads the project and settings that the wallboard's own server generates from its
+/// wallboard.json. Loading them never reaches the daemon, so a cold start gets this far while no
+/// daemon answers.
+async fn load_configuration() -> Result<(session::Project, Settings), String> {
     let window = web_sys::window().ok_or("No browser window")?;
     let response = JsFuture::from(window.fetch_with_str("/wallboard-config.json"))
         .await
@@ -173,8 +174,8 @@ pub fn Wallboard() -> impl IntoView {
     spawn_local(async move {
         mark_boot("mounted");
         let (project, settings) = loop {
-            match project().await {
-                Ok(project) => break project,
+            match load_configuration().await {
+                Ok(configuration) => break configuration,
                 Err(why) => {
                     error.set(Some(why));
                     session::sleep_ms(3_000).await;

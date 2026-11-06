@@ -164,24 +164,25 @@ chromium --kiosk --autoplay-policy=no-user-gesture-required http://127.0.0.1:300
 ```
 
 To run the launcher as a service, copy `dist/` and the files `wallboard.py`, `settings.py`,
-`wallboard-contract.json`, `build-info.json`, `wallboard-app.service`, `README.md` and `LICENSE`
-to `/srv/wallboard/current`, with your `wallboard.json`, owned by the user who runs the display,
-and install `wallboard-app.service` as a user unit there:
+`wallboard-contract.json`, `build-info.json`, `wallboard-launcher.service`, `README.md` and
+`LICENSE` to `/srv/wallboard/current`, with your `wallboard.json`, owned by the user who runs the
+display, and install `wallboard-launcher.service` as a user unit there:
 
 ```sh
 cd /srv/wallboard/current
 python3 wallboard.py --check
 mkdir -p ~/.config/systemd/user
-cp wallboard-app.service ~/.config/systemd/user/
+cp wallboard-launcher.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now wallboard-app.service
+systemctl --user enable --now wallboard-launcher.service
 loginctl enable-linger "$USER"   # so that it starts at boot, before anyone logs in
 ```
 
 To update, build again and copy the whole `dist/` tree and the files `wallboard.py`, `settings.py`,
 `wallboard-contract.json`, `build-info.json`, `README.md` and `LICENSE` over the installed ones,
-keeping `wallboard.json`. Then restart `wallboard-app.service`, which serves only the files it found
-when it started, and reload the page. A configuration change needs the same restart and reload.
+keeping `wallboard.json`. Then restart `wallboard-launcher.service`, which serves only the files it
+found when it started, and reload the page. A configuration change needs the same restart and
+reload.
 
 ## When something is wrong
 
@@ -190,8 +191,8 @@ when it started, and reload the page. A configuration change needs the same rest
   `daemon_origin` name its current port, and that the tunnel is up when there is one. The page
   joins on its own once the daemon answers.
 - **The page does not load.** The launcher is not running, or refused its configuration:
-  `python3 wallboard.py --check` says why, and `journalctl --user -u wallboard-app.service` shows the
-  service's log.
+  `python3 wallboard.py --check` says why, and `journalctl --user -u wallboard-launcher.service`
+  shows the service's log.
 - **OFFLINE, Last view.** The connection dropped after the wallboard had joined. It keeps the same
   page, node and last view and retries, at intervals growing from half a second to ten seconds; no
   reload is needed. A browser restarted while the daemon is out of reach waits for it: the page

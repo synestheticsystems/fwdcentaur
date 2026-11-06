@@ -1,4 +1,4 @@
-//! The client projection of the versioned settings contract used by the host and presentation runtime.
+//! The client projection of the versioned settings contract used by the launcher and presentation runtime.
 use fwd_core::model::TaskStatus;
 use serde_json::{json, Value};
 use std::sync::LazyLock;

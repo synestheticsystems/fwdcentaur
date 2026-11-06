@@ -42,11 +42,11 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
       const peak=Math.max(...samples.map(Math.abs));assert.ok(peak>.06&&peak<.12,kind+' has a quiet, unclipped signal');
       assert.ok(samples.every(Number.isFinite));assert.equal(samples[0],0);
       assert.ok(samples.slice(length).every(sample=>sample===0),'cue must finish rather than leave a continuous signal');
-      const approved=fs.readFileSync(path.join(__dirname,'../../sounds',kind+'.wav'));
-      assert.equal(length,(approved.length-44)/2);
-      const pcmError=Math.max(...samples.slice(0,length).map((value,i)=>Math.abs(value-approved.readInt16LE(44+i*2)/32768)));
+      const bundled=fs.readFileSync(path.join(__dirname,'../../sounds',kind+'.wav'));
+      assert.equal(length,(bundled.length-44)/2);
+      const pcmError=Math.max(...samples.slice(0,length).map((value,i)=>Math.abs(value-bundled.readInt16LE(44+i*2)/32768)));
       console.log(kind+' maximum PCM rounding difference: '+pcmError);
-      assert.ok(pcmError<1/32768,'playback preserves the approved clip within one 16-bit PCM step');
+      assert.ok(pcmError<1/32768,'playback preserves the bundled clip within one 16-bit PCM step');
       const jumps=samples.slice(1).map((sample,i)=>Math.abs(sample-samples[i]));assert.ok(Math.max(...jumps)<.02,'soft envelope avoids clicks');
       if(process.env.WALLBOARD_SOUND_PREVIEW_DIR){
         const output=path.join(process.env.WALLBOARD_SOUND_PREVIEW_DIR,kind+'.wav');fs.mkdirSync(path.dirname(output),{recursive:true});
@@ -96,7 +96,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
       return {atRevision,...pastTheFirstTimer,afterTheLaterCuesTimer};
     });
     assert.deepEqual(idle,{atRevision:1,afterRevision:1,afterDisposal:0,afterLaterCue:0,afterTheLaterCuesTimer:1});
-    console.log('PASS approved wood-and-air clips play intact; silent preload, complete tails, idle suspension, cooldown, mixed-batch cue, mute, disabled and disposal gates; unavailable audio is diagnosed; a later cue, a disabling revision and disposal each cancel the idle timer');
+    console.log('PASS the bundled wood-and-air clips play intact; silent preload, complete tails, idle suspension, cooldown, mixed-batch cue, mute, disabled and disposal gates; unavailable audio is diagnosed; a later cue, a disabling revision and disposal each cancel the idle timer');
 
     await page.clock.install({time:new Date('2026-11-01T12:00:00Z')});
     await page.reload();await page.waitForFunction(()=>window.fixture);

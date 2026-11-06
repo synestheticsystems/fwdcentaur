@@ -19,7 +19,7 @@ function collect(directory, prefix, assets) {
 }
 
 async function startFixtureServer(port = 0) {
-  const assets = new Map([['/', path.join(__dirname, 'motion-fixture.html')]]);
+  const assets = new Map([['/', path.join(__dirname, 'fixture.html')]]);
   collect(path.join(source, 'crates/fwd-web/src'), '/crates/fwd-web/src', assets);
   collect(path.join(bundle, 'sounds'), '/sounds', assets);
   if (fs.existsSync(path.join(bundle, 'dist'))) collect(path.join(bundle, 'dist'), '/built', assets);

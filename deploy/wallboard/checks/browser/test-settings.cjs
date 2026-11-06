@@ -54,7 +54,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     await send(tasks.slice(1), { project_id: 'another-project' }); await page.clock.runFor(2000);
     state = await inspect();
     assert.deepEqual(state.cards, ['a', 'b']); assert.equal(state.departing, 0); assert.equal(state.wave, false);
-    assert.equal(state.project, 'motion-test'); assert.equal(state.historyKey, refused.historyKey);
+    assert.equal(state.project, 'fixture-project'); assert.equal(state.historyKey, refused.historyKey);
     assert.match(state.banner, /^STALE Last view Settings update refused$/);
     assert.deepEqual([state.issue.reason, state.issue.count],
       ['Query changes require replacing the data subscription first', refused.issue.count + 1]);

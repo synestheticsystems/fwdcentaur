@@ -127,7 +127,7 @@ class ProxyConfiguration(unittest.TestCase):
                     public(dict(self.settings, sound=sound))
         replay = {"enabled": False, "interval_seconds": 600}
         self.assertEqual(public(dict(self.settings, replay=replay))["replay"], replay)
-        self.assertEqual(public(dict(self.settings, replay=dict(replay, lookback_minutes=120)))["replay"], replay)
+        self.assertEqual(public(dict(self.settings, replay=dict(replay, not_a_setting=120)))["replay"], replay)
         for replay in [None, [], {"enabled": 1}, {"interval_seconds": True},
                        {"interval_seconds": 59}, {"interval_seconds": 3601}]:
             with self.subTest(replay=replay):

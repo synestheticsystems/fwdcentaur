@@ -132,10 +132,11 @@
     }
   },
   {
-    "name": "retired-replay-lookback-ignored",
+    "name": "unknown-keys-ignored",
     "input": {
+      "not_a_setting": 1,
       "replay": {
-        "lookback_minutes": 120
+        "not_a_setting": 120
       }
     },
     "expected": {

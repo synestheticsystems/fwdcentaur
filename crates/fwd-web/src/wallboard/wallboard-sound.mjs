@@ -12,7 +12,7 @@ export async function loadSounds(context) {
 export function playCue(context, buffer, volume, at = context.currentTime + .02) {
   const source = context.createBufferSource(), gain = context.createGain();
   source.buffer = buffer;
-  gain.gain.value = volume / .30; // The approved clips were authored at the default 30% app level.
+  gain.gain.value = volume / .30; // The clips were authored at the default volume, 30.
   source.connect(gain); gain.connect(context.destination);
   source.onended = () => { source.disconnect(); gain.disconnect(); };
   source.start(at);

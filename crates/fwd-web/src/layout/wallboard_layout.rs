@@ -78,11 +78,11 @@ impl Layout {
         }
         let mut group = Group::new(&(0..n).collect::<Vec<_>>(), &pairs, &column, &rank, |_| 0, |_| 0);
         group.task_height = height;
-        group.gap = 16.0;
+        group.row_gap = 16.0;
         let priorities: Vec<_> = sorted.iter().map(|&task| tasks[task].priority).collect();
         let columns = group.wallboard_order(group.order_auto(group.columns_by_tie(true)), &priorities);
         let needed = group.needs(&columns, 1)[0];
-        let limit = cap as f64 * height + cap.saturating_sub(1) as f64 * group.gap;
+        let limit = cap as f64 * height + cap.saturating_sub(1) as f64 * group.row_gap;
         let heights = group.pulled(&columns, &[(PAD, PAD + needed.max(limit))]);
         let mut placed = Placed {
             centre: vec![0.0; n],
@@ -100,20 +100,20 @@ impl Layout {
             .collect();
         spread_ends_with(&mut lines, &placed.centre, (height - 28.0).min(112.0), 28.0);
         let routes: BTreeMap<_, _> = lines.into_iter().map(|line| (line.pair, line.route)).collect();
-        // Spend horizontal room where arrows actually run. Empty columns keep a compact gap;
+        // Spend horizontal room where arrows actually run. A gutter no arrow crosses stays compact;
         // a busy gutter needs room for curves to separate rather than become a vertical bundle.
-        let gaps: Vec<_> = (0..occupied.len().saturating_sub(1))
+        let gutters: Vec<_> = (0..occupied.len().saturating_sub(1))
             .map(|c| if pairs.iter().any(|&(a, b)| column[a] <= c && column[b] > c) { 300.0 } else { 64.0 })
             .collect();
         let mut left = vec![PAD; occupied.len()];
         for c in 1..left.len() {
-            left[c] = left[c - 1] + width + gaps[c - 1];
+            left[c] = left[c - 1] + width + gutters[c - 1];
         }
-        // Map both card interiors and gaps piecewise, including any future waypoint positions.
+        // Map both card interiors and gutters piecewise, including any future waypoint positions.
         let map_x = |x: f64| {
             let c = (((x - PAD) / (W + GX)).floor() as usize).min(left.len().saturating_sub(1));
             let offset = x - PAD - c as f64 * (W + GX);
-            left[c] + if offset <= W { offset * width / W } else { width + (offset - W) * gaps[c] / GX }
+            left[c] + if offset <= W { offset * width / W } else { width + (offset - W) * gutters[c] / GX }
         };
         let boxes: Vec<_> = number.iter().map(|&t| (left[column[t]], placed.centre[t] - height / 2.0)).collect();
         let routes = given

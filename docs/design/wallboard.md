@@ -60,16 +60,16 @@ how to build, configure, connect and run it, and what to do when something is wr
 ### What the renderer and the packing take from the core
 
 The renderer (`graph/wallboard_render.rs`) and the packing (`layout/wallboard_layout.rs`) are child
-modules of `graph.rs` and `layout.rs`, so they use private items there. Each imports them in one `use super::{…}`
-list, so renaming one in the core fails to compile there:
+modules of `graph.rs` and `layout.rs`, so they use private items there. Each imports them in one
+`use super::{…}` list, so renaming one in the core fails to compile there:
 
 - From `graph.rs`: `Edge` (its fields `first`, `then`, `kind` and `proposed`, and `Edge::of`),
   `also_part_of`, `implied` and `path`.
-- From `layout.rs`: `Group` (its fields `task`, `before`, `after`, `chains`, `task_height` and `gap`,
-  and its methods `new`, `columns_by_tie`, `order_auto`, `needs`, `pulled`, `place`, `places` and
-  `crossings`); `Placed` and `Line`, built field by field; `urgency`, `numbered`, `without_loops`,
-  `columns_of`, `groups_of` and `spread_ends_with`; the constants `PAD`, `W` and `GX`; and the
-  public `Layout`, `Task` and `Drawing`.
+- From `layout.rs`: `Group` (its fields `task`, `before`, `after`, `chains`, `task_height` and
+  `row_gap`, and its methods `new`, `columns_by_tie`, `order_auto`, `needs`, `pulled`, `place`,
+  `places` and `crossings`); `Placed` and `Line`, built field by field; `urgency`, `numbered`,
+  `without_loops`, `columns_of`, `groups_of` and `spread_ends_with`; the constants `PAD`, `W` and
+  `GX`; and the public `Layout`, `Task` and `Drawing`.
 
 A field or method cannot be named in a `use`, so a rename of one fails where the wallboard uses it.
 Their tests are child modules too, and use the Graph page's test helpers `id`, `task`, `waits` and
@@ -84,8 +84,8 @@ Everything else the wallboard uses is crate-public: `store`'s standing queries a
 limits of every setting. It is a small format of its own, not JSON Schema. The build turns it into a
 JavaScript module; Python and Rust read the JSON. All three run the cases in
 `deploy/wallboard/checks/settings-cases.json`, each named for its scenario. Known settings are checked
-strictly; unknown keys are ignored, a retired replay setting among them, so that the host can keep
-its own keys beside the settings. A missing `schema_version` means version 1, and another version is
+strictly; unknown keys are ignored, so that the launcher can keep its own keys beside the
+settings. A missing `schema_version` means version 1, and another version is
 refused. `theme_schedule: null` means a palette chosen by hand, and an enabled schedule needs both
 coordinates.
 
@@ -363,13 +363,14 @@ its `rust` job and the rest in its `wallboard` job.
 
 Two integration tests stay opt-in, since each needs what the suite never touches.
 
-`deploy/wallboard/checks/test-browser.cjs` reads a live project through a daemon that already runs.
-It needs Caddy, the locked Playwright that the check script installs, and the configuration of an
-existing project with tasks in the statuses it shows:
+`deploy/wallboard/checks/test-live-daemon.cjs` reads a live project through a daemon that already
+runs. It needs Caddy, the locked Playwright that the check script installs, and the configuration of
+an existing project with tasks in the statuses it shows:
 
 ```sh
 WALLBOARD_CONFIG=/path/to/wallboard.json CADDY=/path/to/caddy \
-  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/checks/test-browser.cjs
+  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright \
+  node deploy/wallboard/checks/test-live-daemon.cjs
 ```
 
 It runs the launcher on a free port with a relay of its own in front of the configured daemon,
@@ -387,7 +388,8 @@ opened, and a card's revision stating its task's relations. It takes about twelv
 bash scripts/build-wallboard.sh
 bash scripts/build-web.sh && cargo build -p fwd   # the daemon serves the page the first scenario opens
 SCRATCH_DAEMON=target/debug/fwd SCRATCH_CLIENT=target/debug/fwd \
-  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/checks/test-scratch-daemon.cjs
+  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright \
+  node deploy/wallboard/checks/test-scratch-daemon.cjs
 ```
 
 `SCRATCH_CLIENT` is `fwd` built from this checkout, which writes the not-before dates.

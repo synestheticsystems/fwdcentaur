@@ -1,5 +1,5 @@
 [Unit]
-Description=fwd wallboard: its assets and its project's WebSocket proxy
+Description=fwd wallboard launcher: the page's assets and its project's WebSocket, through Caddy
 After=network.target
 
 [Service]

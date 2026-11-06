@@ -950,8 +950,8 @@ fn groups_of(n: usize, pairs: &[(usize, usize)]) -> (Vec<Vec<usize>>, Vec<usize>
 struct Group {
     /// The height of a task's box: `H`, or the height of the wallboard's cards.
     task_height: f64,
-    /// The least gap between two neighbours in a column: `GY`, or the wallboard's tighter one.
-    gap: f64,
+    /// The least vertical gap between two neighbours in a column: `GY`, or the wallboard's tighter one.
+    row_gap: f64,
     /// Per node: the number of the task it is, or none for a waypoint.
     task: Vec<Option<usize>>,
     /// Per node: its column.
@@ -984,7 +984,7 @@ impl Group {
     ) -> Group {
         let mut group = Group {
             task_height: H,
-            gap: GY,
+            row_gap: GY,
             task: Vec::new(),
             column: Vec::new(),
             before: Vec::new(),
@@ -1061,7 +1061,7 @@ impl Group {
 
     /// How far apart the centres of two neighbours in a column must be.
     fn spacing(&self, v: usize, w: usize) -> f64 {
-        self.half(v) + self.half(w) + self.gap
+        self.half(v) + self.half(w) + self.row_gap
     }
 
     /// The group's columns, each sorted by tier, then by `tie`: its tasks, and with `waypoints` its
