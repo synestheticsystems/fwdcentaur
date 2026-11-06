@@ -1,10 +1,10 @@
 <!doctype html><meta charset="utf-8"><title>Wallboard runtime test fixture</title>
 <link rel="stylesheet" href="/crates/fwd-web/src/app.css">
-<link rel="stylesheet" href="/crates/fwd-web/src/wallboard.css">
+<link rel="stylesheet" href="/crates/fwd-web/src/wallboard/wallboard.css">
 <main class="wallboard"><div class="wallboard-graph" role="img" aria-label="Task graph"></div></main>
 <script type="module">
-import { WallboardRuntime } from '/crates/fwd-web/src/wallboard-runtime.mjs';
-import { readSnapshot } from '/crates/fwd-web/src/wallboard-history.mjs';
+import { WallboardRuntime } from '/crates/fwd-web/src/wallboard/wallboard-runtime.mjs';
+import { readSnapshot } from '/crates/fwd-web/src/wallboard/wallboard-history.mjs';
 const escape = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const settings = { project_id: 'motion-test', statuses: ['open','in_progress','in_review','proposed'],
   max_rows: 8, node_width: 440, replay: { enabled: true, interval_seconds: 180 } };

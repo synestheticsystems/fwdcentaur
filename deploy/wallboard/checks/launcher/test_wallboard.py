@@ -1,8 +1,12 @@
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
+# The launcher, two directories up.
+LAUNCHER = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(LAUNCHER))
 from wallboard import configuration
 
 
@@ -13,7 +17,7 @@ class ProxyConfiguration(unittest.TestCase):
         self.dist = Path(self.temp.name)
         (self.dist / "index.html").touch()
         (self.dist / "fwd-web_bg.wasm").touch()
-        self.settings = json.loads(Path(__file__).with_name("wallboard.example.json").read_text())
+        self.settings = json.loads((LAUNCHER / "wallboard.example.json").read_text())
 
     def test_one_source_controls_project_tunnel_and_daemon_origin(self):
         self.settings["project_id"] = "11111111-1111-4111-8111-111111111111"
@@ -103,13 +107,13 @@ class ProxyConfiguration(unittest.TestCase):
                     configuration(dict(self.settings, **{key: value}), self.dist)
 
     def test_replay_defaults_validation_and_nested_wasm_modules(self):
-        modules = self.dist / "snippets" / "fwd-web-test" / "src"
+        modules = self.dist / "snippets" / "fwd-web-test" / "src" / "wallboard"
         modules.mkdir(parents=True)
         (modules / "wallboard-runtime.mjs").touch()
 
         def public(settings):
             routes = configuration(settings, self.dist)["apps"]["http"]["servers"]["wallboard"]["routes"]
-            self.assertIn("/snippets/fwd-web-test/src/wallboard-runtime.mjs", routes[2]["match"][0]["path"])
+            self.assertIn("/snippets/fwd-web-test/src/wallboard/wallboard-runtime.mjs", routes[2]["match"][0]["path"])
             return json.loads(routes[0]["handle"][0]["body"])
 
         self.assertEqual(public(self.settings)["replay"],

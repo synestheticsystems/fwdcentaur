@@ -14,7 +14,7 @@ fi
 # Before trunk runs, the two modules the runtime imports that the build writes: the settings contract
 # as JavaScript, and what this build is (scripts/wallboard_identity.py), which build-info.json records
 # for the bundle too.
-python3 - "$bundle/wallboard-contract.json" "$repo/crates/fwd-web/src/wallboard-contract.mjs" <<'PY'
+python3 - "$bundle/wallboard-contract.json" "$repo/crates/fwd-web/src/wallboard/wallboard-contract.mjs" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -36,8 +36,8 @@ cp -R wallboard-dist "$bundle/dist"
 cp -R "$bundle/sounds" "$bundle/dist/"
 # wasm-bindgen copies only the modules Rust imports; the modules they import, and SunCalc's license,
 # go beside them.
-for module in "$bundle"/dist/snippets/fwd-web-*/src/wallboard-runtime.mjs; do
-    cp src/wallboard-*.mjs src/suncalc.mjs src/LICENSE-suncalc.txt src/SUNCALC.md "$(dirname "$module")/"
+for module in "$bundle"/dist/snippets/fwd-web-*/src/wallboard/wallboard-runtime.mjs; do
+    cp src/wallboard/*.mjs src/wallboard/LICENSE-suncalc.txt src/wallboard/SUNCALC.md "$(dirname "$module")/"
 done
 cp "$repo/LICENSE" "$bundle/LICENSE"
 printf 'built the wallboard bundle in %s\n' "$bundle"

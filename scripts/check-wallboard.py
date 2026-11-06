@@ -25,14 +25,17 @@ require(process.argv[1]).launchChromium()
 Check = namedtuple('Check', 'name command cwd')
 
 
-def runtime_unit_tests(repo):
-    tests = sorted(str(path.relative_to(repo)) for path in (repo / 'deploy/wallboard').glob('test-*.mjs'))
+def unit_tests(repo):
+    """Node's test runner over the unit tests, one directory below checks/: the runtime modules' in unit/,
+    and the scratch-daemon harness's beside it, in scratch-daemon/."""
+    tests = sorted(str(path.relative_to(repo)) for path in (repo / 'deploy/wallboard/checks').glob('*/test-*.mjs'))
     return ['node', '--test', *tests]
 
 
 def main():
     repo = Path(__file__).resolve().parent.parent
     deploy = repo / 'deploy/wallboard'
+    checks = deploy / 'checks'
     # What the checks keep between runs: Playwright's browser, and their report.
     output = repo / 'target/wallboard'
     parser = argparse.ArgumentParser(description=__doc__)
@@ -52,9 +55,9 @@ def main():
         parser.error(message)
 
     def record_browser():
-        report['tools']['playwright'] = json.loads((deploy / 'node_modules/playwright/package.json').read_text())['version']
-        chromium = subprocess.run(['node', '-e', CHROMIUM_VERSION, str(deploy / 'fixture-server.cjs')],
-                                  cwd=deploy, env=env, capture_output=True, text=True)
+        report['tools']['playwright'] = json.loads((checks / 'node_modules/playwright/package.json').read_text())['version']
+        chromium = subprocess.run(['node', '-e', CHROMIUM_VERSION, str(checks / 'browser/fixture-server.cjs')],
+                                  cwd=checks, env=env, capture_output=True, text=True)
         if chromium.returncode:
             fail('Chromium could not be launched: rerun with --install-browser to install Playwright\'s pinned build '
                  f'into {output / "ms-playwright"}, or set CHROME. {chromium.stderr.strip()[-400:]}')
@@ -68,8 +71,8 @@ def main():
     # Everything the suite does, in order. Each check names itself once, here; the plain functions
     # between them record or complete what the checks use.
     steps = [
-        Check('Install locked browser test dependencies', ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], deploy),
-        *([Check('Install pinned Chromium', ['node', 'node_modules/playwright/cli.js', 'install', 'chromium'], deploy)]
+        Check('Install locked browser test dependencies', ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], checks),
+        *([Check('Install pinned Chromium', ['node', 'node_modules/playwright/cli.js', 'install', 'chromium'], checks)]
           if args.install_browser else []),
         record_browser,
         Check('Rust behavior and layout', ['cargo', 'test', *crate, '--features', 'wallboard'], repo),
@@ -78,16 +81,15 @@ def main():
         Check('Clippy for wasm32 with the wallboard feature', [*wasm, '--features', 'wallboard', '--', '-D', 'warnings'], repo),
         Check('Rust formatting', ['cargo', 'fmt', '--all', '--check', '--manifest-path', 'crates/fwd-web/Cargo.toml'], repo),
         Check('Host configuration', [sys.executable, '-m', 'unittest', 'discover', '-s',
-                                     'deploy/wallboard', '-p', 'test_*.py', '-v'], repo),
+                                     'deploy/wallboard/checks/launcher', '-p', 'test_*.py', '-v'], repo),
         Check('Build identity', [sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts',
                                  '-p', 'test_wallboard_identity.py', '-v'], repo),
         # The build writes the two modules the runtime's unit tests import, so it comes before them.
         Check('Production WASM build', ['bash', 'scripts/build-wallboard.sh'], repo),
         record_build,
-        Check('Runtime unit tests', runtime_unit_tests, repo),
-        *(Check(f'{path.name.removeprefix("test-").removesuffix("-browser.cjs").title()} browser integration',
-                ['node', str(path.relative_to(repo))], repo)
-          for path in sorted(deploy.glob('test-*-browser.cjs'))),
+        Check('Unit tests', unit_tests, repo),
+        *(Check(f'{path.stem.removeprefix("test-").title()} browser integration', ['node', str(path.relative_to(repo))], repo)
+          for path in sorted(checks.glob('browser/test-*.cjs'))),
     ]
     # Until the last check passes, the report says it has not: a run that stops early shows what
     # failed and what never ran, never an earlier run's result.

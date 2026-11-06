@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Diagnostics, markBoot, reasonOf } from '../../crates/fwd-web/src/wallboard-diagnostics.mjs';
+import { Diagnostics, markBoot, reasonOf } from '../../../../crates/fwd-web/src/wallboard/wallboard-diagnostics.mjs';
 
 test('diagnostics aggregate repeated failures into one record per area, and snapshots are copies', () => {
   let now = 100, clock = 0;

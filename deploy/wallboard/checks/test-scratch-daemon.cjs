@@ -2,26 +2,26 @@
 // own temporary directories, with real time and real writes. It proves the Rust wiring that the
 // synthetic checks cannot reach, and scripts/check-wallboard.py does not run it. See docs/design/wallboard.md.
 const fs = require('node:fs'), path = require('node:path');
-const { requestedBinaries, openEnvironment } = require('./scratch/environment.cjs');
-const { openReport } = require('./scratch/report.cjs');
-const { openDaemon } = require('./scratch/daemon.cjs');
-const { startCaddyStandIn } = require('./scratch/caddy-stand-in.cjs');
-const { BUILD } = require('./scratch/display.cjs');
-const { launchChromium } = require('./fixture-server.cjs');
+const { requestedBinaries, openEnvironment } = require('./scratch-daemon/environment.cjs');
+const { openReport } = require('./scratch-daemon/report.cjs');
+const { openDaemon } = require('./scratch-daemon/daemon.cjs');
+const { startCaddyStandIn } = require('./scratch-daemon/caddy-stand-in.cjs');
+const { BUILD } = require('./scratch-daemon/display.cjs');
+const { launchChromium } = require('./browser/fixture-server.cjs');
 
 const SCENARIOS = {
-  'first-contact': require('./scratch/scenarios/first-contact.cjs'),
-  dates: require('./scratch/scenarios/dates.cjs'),
-  reconnect: require('./scratch/scenarios/reconnect.cjs'),
-  'page-clock': require('./scratch/scenarios/page-clock.cjs'),
-  membership: require('./scratch/scenarios/membership.cjs'),
-  relations: require('./scratch/scenarios/relations.cjs'),
+  'first-contact': require('./scratch-daemon/scenarios/first-contact.cjs'),
+  dates: require('./scratch-daemon/scenarios/dates.cjs'),
+  reconnect: require('./scratch-daemon/scenarios/reconnect.cjs'),
+  'page-clock': require('./scratch-daemon/scenarios/page-clock.cjs'),
+  membership: require('./scratch-daemon/scenarios/membership.cjs'),
+  relations: require('./scratch-daemon/scenarios/relations.cjs'),
 };
 
 (async () => {
   const chosen = process.env.SCRATCH_SCENARIOS ? process.env.SCRATCH_SCENARIOS.split(',') : Object.keys(SCENARIOS);
   for (const name of chosen) if (!SCENARIOS[name]) throw Error(`No scenario ${name}; there are ${Object.keys(SCENARIOS).join(', ')}`);
-  if (!fs.existsSync(path.join(__dirname, 'dist'))) throw Error('Run scripts/build-wallboard.sh first: this test drives the bundle it builds');
+  if (!fs.existsSync(path.join(__dirname, '../dist'))) throw Error('Run scripts/build-wallboard.sh first: this test drives the bundle it builds');
   const binaries = requestedBinaries();
   const root = openEnvironment();
   const report = openReport(path.join(root, 'logs'));

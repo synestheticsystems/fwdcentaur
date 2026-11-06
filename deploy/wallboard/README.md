@@ -3,8 +3,9 @@
 The wallboard shows one project's task graph on a dedicated monitor, all day, with no one at the
 keyboard: the work in the statuses you choose, what waits on what, and what changed recently. This
 directory holds what runs beside the display: the launcher (`wallboard.py`), its settings contract,
-an example configuration, an example systemd unit, the sound cues and the tests. The browser page
-itself is the web crate built with its `wallboard` feature (`crates/fwd-web`).
+an example configuration, an example systemd unit and the sound cues, with the wallboard's checks in
+`checks/`. The browser page itself is the web crate built with its `wallboard` feature
+(`crates/fwd-web`).
 
 The page is an ephemeral Ankurah browser node, like the web UI the daemon serves. It reads one
 project from a daemon that already runs, through a proxy the launcher configures, and writes
@@ -27,7 +28,7 @@ To build, on any machine with a checkout of this repository:
   `TRUNK_OFFLINE` unset, or it cannot use them.
 
 To run the checks as well: Node 22 or newer, with npm. The browser checks use Playwright 1.62.1, as
-`package-lock.json` locks it, and the Chromium build that Playwright version pins.
+`checks/package-lock.json` locks it, and the Chromium build that Playwright version pins.
 
 To run the wallboard, on the machine attached to the display:
 

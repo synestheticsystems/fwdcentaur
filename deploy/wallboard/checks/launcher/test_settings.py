@@ -1,12 +1,16 @@
 import json
 from pathlib import Path
+import sys
 import unittest
+
+# The launcher, two directories up, reads its settings with this module.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from settings import validate_settings
 
 
 class SettingsContract(unittest.TestCase):
     def test_shared_conformance(self):
-        for case in json.loads(Path(__file__).with_name('settings-cases.json').read_text()):
+        for case in json.loads(Path(__file__).resolve().parents[1].joinpath('settings-cases.json').read_text()):
             with self.subTest(case=case['name']):
                 if case.get('invalid'):
                     with self.assertRaises(ValueError):

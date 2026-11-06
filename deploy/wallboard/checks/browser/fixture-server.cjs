@@ -5,7 +5,8 @@
 const fs = require('node:fs'), http = require('node:http'), path = require('node:path');
 const { chromium } = require('playwright');
 
-const source = path.resolve(__dirname, '../..');
+const source = path.resolve(__dirname, '../../../..');
+const bundle = path.resolve(__dirname, '../..');
 const types = { '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json',
   '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.wav': 'audio/wav' };
 
@@ -20,8 +21,8 @@ function collect(directory, prefix, assets) {
 async function startFixtureServer(port = 0) {
   const assets = new Map([['/', path.join(__dirname, 'motion-fixture.html')]]);
   collect(path.join(source, 'crates/fwd-web/src'), '/crates/fwd-web/src', assets);
-  collect(path.join(__dirname, 'sounds'), '/sounds', assets);
-  if (fs.existsSync(path.join(__dirname, 'dist'))) collect(path.join(__dirname, 'dist'), '/built', assets);
+  collect(path.join(bundle, 'sounds'), '/sounds', assets);
+  if (fs.existsSync(path.join(bundle, 'dist'))) collect(path.join(bundle, 'dist'), '/built', assets);
   const server = http.createServer((request, response) => {
     const file = assets.get(request.url);
     if (!file) { response.writeHead(404); response.end(); return; }

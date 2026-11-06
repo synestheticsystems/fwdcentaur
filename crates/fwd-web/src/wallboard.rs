@@ -12,7 +12,6 @@ use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-#[path = "wallboard_settings.rs"]
 mod settings;
 pub use settings::{Presentation, Settings, TaskSelection};
 
@@ -152,13 +151,13 @@ async fn project() -> Result<(session::Project, Settings), String> {
     ))
 }
 
-#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard-theme.mjs")]
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard/wallboard-theme.mjs")]
 extern "C" {
     #[wasm_bindgen(js_name = configureTheme)]
     fn configure_theme(settings: &str);
 }
 
-#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard-diagnostics.mjs")]
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard/wallboard-diagnostics.mjs")]
 extern "C" {
     #[wasm_bindgen(js_name = markBoot)]
     fn mark_boot(stage: &str);

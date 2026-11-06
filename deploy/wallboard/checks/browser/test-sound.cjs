@@ -8,7 +8,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     const page=await browser.newPage(), errors=[];page.on('pageerror',error=>errors.push(String(error)));
     await page.goto(server.url);await page.waitForFunction(()=>window.fixture);
     const clips=await page.evaluate(async()=>{
-      const {loadSounds,playCue,LiveSound}=await import('/crates/fwd-web/src/wallboard-sound.mjs');
+      const {loadSounds,playCue,LiveSound}=await import('/crates/fwd-web/src/wallboard/wallboard-sound.mjs');
       const clips=[];
       for(const kind of ['arrival','departure','edit']){
         const context=new OfflineAudioContext(1,57600,48000);
@@ -42,7 +42,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
       const peak=Math.max(...samples.map(Math.abs));assert.ok(peak>.06&&peak<.12,kind+' has a quiet, unclipped signal');
       assert.ok(samples.every(Number.isFinite));assert.equal(samples[0],0);
       assert.ok(samples.slice(length).every(sample=>sample===0),'cue must finish rather than leave a continuous signal');
-      const approved=fs.readFileSync(path.join(__dirname,'sounds',kind+'.wav'));
+      const approved=fs.readFileSync(path.join(__dirname,'../../sounds',kind+'.wav'));
       assert.equal(length,(approved.length-44)/2);
       const pcmError=Math.max(...samples.slice(0,length).map((value,i)=>Math.abs(value-approved.readInt16LE(44+i*2)/32768)));
       console.log(kind+' maximum PCM rounding difference: '+pcmError);
@@ -59,8 +59,8 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
 
     await page.route('**/sounds/*.wav',route=>route.abort());
     const failure=await page.evaluate(async()=>{
-      const {LiveSound}=await import('/crates/fwd-web/src/wallboard-sound.mjs');
-      const {Diagnostics}=await import('/crates/fwd-web/src/wallboard-diagnostics.mjs');
+      const {LiveSound}=await import('/crates/fwd-web/src/wallboard/wallboard-sound.mjs');
+      const {Diagnostics}=await import('/crates/fwd-web/src/wallboard/wallboard-diagnostics.mjs');
       const diagnostics=new Diagnostics();
       const sound=new LiveSound({enabled:true,volume:30},Date.now,()=>true,diagnostics);
       const played=await sound.play({any:true,arrived:['a'],departed:[],edited:[]});
@@ -73,7 +73,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     // A cue arms one idle timer to suspend audio processing. A later cue replaces it, a revision that
     // disables sound suspends at once and cancels it, and disposal cancels it, so none acts late.
     const idle=await page.evaluate(async()=>{
-      const {LiveSound}=await import('/crates/fwd-web/src/wallboard-sound.mjs');
+      const {LiveSound}=await import('/crates/fwd-web/src/wallboard/wallboard-sound.mjs');
       const cue={any:true,arrived:['a'],departed:[],edited:[]},wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
       const afterCue=async()=>{
         let now=0;const sound=new LiveSound({enabled:true,volume:30},()=>now,()=>true);

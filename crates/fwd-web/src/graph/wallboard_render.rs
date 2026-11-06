@@ -94,7 +94,7 @@ pub fn WallboardGraph(
     }
 }
 
-#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard-runtime.mjs")]
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard/wallboard-runtime.mjs")]
 extern "C" {
     #[wasm_bindgen(js_name = mount)]
     fn wallboard_mount(host: &web_sys::Element, settings: &str, layout: &wasm_bindgen::JsValue);
@@ -465,5 +465,4 @@ fn wallboard_render(
 }
 
 #[cfg(test)]
-#[path = "wallboard_render_tests.rs"]
 mod tests;

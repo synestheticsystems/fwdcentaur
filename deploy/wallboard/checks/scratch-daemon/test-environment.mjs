@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isolate, assertIsolated } from './scratch/environment.cjs';
+import { isolate, assertIsolated } from './environment.cjs';
 
 const ROOT = '/run-root';
 const DIRECTORIES = { FWD_RUNTIME_DIR: `${ROOT}/run`, FWD_DATA_DIR: `${ROOT}/data`, FWD_DEV_RUNNER_DIR: `${ROOT}/dev-runner` };

@@ -1481,7 +1481,6 @@ fn nondecreasing(wants: &[f64], weights: &[f64]) -> Vec<f64> {
 // The wallboard's packing lays out with this module's groups, ordering, waypoints and routes, so it
 // is a child of this module, built only with the wallboard feature.
 #[cfg(feature = "wallboard")]
-#[path = "wallboard_layout.rs"]
 mod wallboard_layout;
 
 #[cfg(test)]

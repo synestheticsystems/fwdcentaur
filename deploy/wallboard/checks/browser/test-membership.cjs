@@ -18,8 +18,8 @@ const ONE_FRAME = 20;
     await page.waitForFunction(() => window.fixture);
     await pauseClock(page);
     await page.evaluate(async () => {
-      window.entry = await import('/crates/fwd-web/src/wallboard-runtime.mjs');
-      window.changes = (await import('/crates/fwd-web/src/wallboard-history.mjs')).changes;
+      window.entry = await import('/crates/fwd-web/src/wallboard/wallboard-runtime.mjs');
+      window.changes = (await import('/crates/fwd-web/src/wallboard/wallboard-history.mjs')).changes;
       fixture.runtime.dispose();
       // Replay starts only when a check asks for it, so that it cannot interrupt the others.
       fixture.settings.replay = { enabled: false, interval_seconds: 180 };
@@ -234,7 +234,7 @@ const ONE_FRAME = 20;
     // A reload with one entry already saved, within 30 seconds of a live change after it. What a card's
     // revision hashes can change between builds, so `scheme` stands for the build that drew a card.
     const work = (scheme, ...ids) => ids.map(id => ({ id, title: `Work ${id}`, priority: 2, revision: `${scheme}-${id}` }));
-    const thisBuild = await page.evaluate(async () => (await import('/crates/fwd-web/src/wallboard-build.mjs')).buildInfo.content_sha256);
+    const thisBuild = await page.evaluate(async () => (await import('/crates/fwd-web/src/wallboard/wallboard-build.mjs')).buildInfo.content_sha256);
     const reloadOnto = async ({ build, before, after }, tasks) => {
       await page.evaluate(({ build, before, after }) => {
         const { key } = entry.runtimeFor(host).history;

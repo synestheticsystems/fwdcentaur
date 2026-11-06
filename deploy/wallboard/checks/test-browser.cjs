@@ -9,7 +9,7 @@ const net = require('node:net');
 const http = require('node:http');
 const { createHash } = require('node:crypto');
 const { spawn } = require('node:child_process');
-const { launchChromium } = require('./fixture-server.cjs');
+const { launchChromium } = require('./browser/fixture-server.cjs');
 
 async function freePort() {
   const server = net.createServer();
@@ -34,12 +34,12 @@ const statusWithHeaders = (url, headers) => new Promise((resolve, reject) => {
   config.listen.port = await freePort();
   config.upstream.port = await freePort();
   fs.writeFileSync(path.join(root, 'wallboard.json'), JSON.stringify(config));
-  fs.symlinkSync(path.join(__dirname, 'dist'), path.join(root, 'dist'));
+  fs.symlinkSync(path.join(__dirname, '../dist'), path.join(root, 'dist'));
   const sockets = new Set();
   let relay;
   let browser;
   let output = '';
-  const caddy = spawn(process.env.PYTHON || 'python3', [path.join(__dirname, 'wallboard.py'),
+  const caddy = spawn(process.env.PYTHON || 'python3', [path.join(__dirname, '../wallboard.py'),
     '--config', path.join(root, 'wallboard.json'), '--caddy', process.env.CADDY || 'caddy']);
   caddy.stderr.on('data', chunk => output += chunk);
   const startRelay = async () => {
@@ -72,7 +72,7 @@ const statusWithHeaders = (url, headers) => new Promise((resolve, reject) => {
     browser = await launchChromium();
     const page = await browser.newPage({ viewport });
     // Content-free diagnostics from the production runtime, for the stages docs/design/wallboard.md splits a start into.
-    const runtimeModule = '/' + fs.readdirSync(path.join(__dirname, 'dist'), { recursive: true })
+    const runtimeModule = '/' + fs.readdirSync(path.join(__dirname, '../dist'), { recursive: true })
       .find(name => name.endsWith('wallboard-runtime.mjs'));
     const sampleDiagnostics = () => page.evaluate(async module =>
       (await import(module)).diagnosticsFor(document.querySelector('.wallboard-graph')), runtimeModule);

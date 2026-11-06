@@ -14,7 +14,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     await page.waitForFunction(() => window.fixture);
     await pauseClock(page);
     await page.evaluate(async () => {
-      window.entry = await import('/crates/fwd-web/src/wallboard-runtime.mjs');
+      window.entry = await import('/crates/fwd-web/src/wallboard/wallboard-runtime.mjs');
       fixture.runtime.dispose();
       window.host = document.querySelector('.wallboard-graph');
       window.revision = changes => JSON.stringify({ ...fixture.settings, ...changes });

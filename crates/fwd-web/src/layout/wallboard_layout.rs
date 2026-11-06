@@ -264,5 +264,4 @@ impl Group {
 }
 
 #[cfg(test)]
-#[path = "wallboard_layout_tests.rs"]
 mod tests;

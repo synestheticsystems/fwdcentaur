@@ -28,36 +28,39 @@ how to build, configure, connect and run it, and what to do when something is wr
   Origin to the daemon's own (`daemon.md`, the Host and Origin checks). Everything else answers 404.
   The page reaches the daemon only through it, on loopback, directly or through an SSH tunnel.
 - **Rust** draws: `wallboard.rs` fetches the configuration and mounts the display, and works out each
-  card's availability from the prerequisites it watches; `wallboard_settings.rs` holds the typed
-  settings; the renderer, `wallboard_render.rs`, and the packing, `wallboard_layout.rs`, are child
-  modules of `graph.rs` and `layout.rs`, so that they draw with the Graph page's own code. The
-  renderer gives the runtime each frame as SVG markup, with the settings revision it was drawn under.
-- **JavaScript** presents: `wallboard-runtime.mjs` owns the live and replay state, the timers, the
-  observers and the DOM. `wallboard-history.mjs` owns the witnessed history and the reading of
-  snapshots, `wallboard-sound.mjs` the audio, `wallboard-theme.mjs` the palettes and the solar timer,
-  and `wallboard-diagnostics.mjs` the diagnostics; the runtime disposes of all of them. The runtime
-  lays out with the renderer's own packing, which Rust hands it, when cards that are leaving still
-  need their places and when it fits the graph to the screen. SunCalc (`suncalc.mjs`, BSD-2-Clause,
+  card's availability from the prerequisites it watches; its child `wallboard/settings.rs` holds the
+  typed settings; the renderer, `graph/wallboard_render.rs`, and the packing,
+  `layout/wallboard_layout.rs`, are child modules of `graph.rs` and `layout.rs`, so that they draw
+  with the Graph page's own code. The renderer gives the runtime each frame as SVG markup, with the
+  settings revision it was drawn under.
+- **JavaScript** presents, from `crates/fwd-web/src/wallboard/` beside the stylesheet:
+  `wallboard-runtime.mjs` owns the live and replay state, the timers, the observers and the DOM.
+  `wallboard-history.mjs` owns the witnessed history and the reading of snapshots,
+  `wallboard-sound.mjs` the audio, `wallboard-theme.mjs` the palettes and the solar timer, and
+  `wallboard-diagnostics.mjs` the diagnostics; the runtime disposes of all of them. The runtime lays
+  out with the renderer's own packing, which Rust hands it, when cards that are leaving still need
+  their places and when it fits the graph to the screen. SunCalc (`suncalc.mjs`, BSD-2-Clause,
   `SUNCALC.md`) computes sunrise and sunset.
 - **The build**, `scripts/build-wallboard.sh`, writes two modules the runtime imports,
   `wallboard-contract.mjs` (the settings contract) and `wallboard-build.mjs` (what this build is),
   and the bundle's `build-info.json`: the commit it was built from and `content_sha256`, a hash of
   every file the bundle is built from, committed or not, so that any change to them makes another
   build (`scripts/wallboard_identity.py`). Those files are `crates/fwd-core` and `crates/fwd-web`;
-  the root `Cargo.toml`, whose workspace settings and dependencies `fwd-core` inherits;
-  `deploy/wallboard`; the build script and `wallboard_identity.py` themselves; and
-  `.cargo/config.toml`, `rust-toolchain.toml` and `LICENSE`. Its test checks that they hold every
-  manifest and the lockfile Cargo reads for the build, as `cargo metadata` names them, and that a
-  dependency feature `fwd-core` inherits from the root manifest changes the hash. The build never
-  builds or replaces the daemon or the page the daemon embeds, and it builds in a target directory
-  of its own, `crates/fwd-web/target/wallboard`: trunk copies every module it finds in its target
-  directory into the page it builds, so a shared one would carry the wallboard's modules into the
-  daemon's page.
+  the root `Cargo.toml`, whose workspace settings and dependencies `fwd-core` inherits; the settings
+  contract and the sounds in `deploy/wallboard`; the build script and `wallboard_identity.py`
+  themselves; and `.cargo/config.toml`, `rust-toolchain.toml` and `LICENSE`. The launcher and the
+  checks beside the bundle are not among them, so changing either makes no new build. Its tests check
+  that they hold every manifest and the lockfile Cargo reads for the build, as `cargo metadata` names
+  them, that a dependency feature `fwd-core` inherits from the root manifest changes the hash, and
+  that editing a check or the launcher does not. The build never builds or replaces the daemon or the
+  page the daemon embeds, and it builds in a target directory of its own,
+  `crates/fwd-web/target/wallboard`: trunk copies every module it finds in its target directory into
+  the page it builds, so a shared one would carry the wallboard's modules into the daemon's page.
 
 ### What the renderer and the packing take from the core
 
-The renderer (`wallboard_render.rs`) and the packing (`wallboard_layout.rs`) are child modules of
-`graph.rs` and `layout.rs`, so they use private items there. Each imports them in one `use super::{…}`
+The renderer (`graph/wallboard_render.rs`) and the packing (`layout/wallboard_layout.rs`) are child
+modules of `graph.rs` and `layout.rs`, so they use private items there. Each imports them in one `use super::{…}`
 list, so renaming one in the core fails to compile there:
 
 - From `graph.rs`: `Edge` (its fields `first`, `then`, `kind` and `proposed`, and `Edge::of`),
@@ -80,7 +83,7 @@ Everything else the wallboard uses is crate-public: `store`'s standing queries a
 `deploy/wallboard/wallboard-contract.json` is the settings contract: the types, defaults, enums and
 limits of every setting. It is a small format of its own, not JSON Schema. The build turns it into a
 JavaScript module; Python and Rust read the JSON. All three run the cases in
-`deploy/wallboard/settings-cases.json`, each named for its scenario. Known settings are checked
+`deploy/wallboard/checks/settings-cases.json`, each named for its scenario. Known settings are checked
 strictly; unknown keys are ignored, a retired replay setting among them, so that the host can keep
 its own keys beside the settings. A missing `schema_version` means version 1, and another version is
 refused. `theme_schedule: null` means a palette chosen by hand, and an enabled schedule needs both
@@ -320,14 +323,14 @@ representative update or an idle interval, sample before and after and subtract.
 
 ### Profiling the presentation with synthetic data
 
-`deploy/wallboard/profile-browser.cjs` measures the presentation only: the production WASM layout and
+`deploy/wallboard/checks/browser/profile.cjs` measures the presentation only: the production WASM layout and
 runtime, drawing a synthetic graph at 3840×2160 with no Ankurah connection. It reports the cold start
 of the presentation, the reconnect's quiet wait, the main thread's idle use and the timing totals,
 and its `kind` says that it leaves out Ankurah's synchronization. After `scripts/build-wallboard.sh`
 and the check script's `npm ci`:
 
 ```sh
-PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/profile-browser.cjs
+PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/checks/browser/profile.cjs
 ```
 
 It launches its own browser; `TEST_CDP` attaches it to a separately started test browser instead,
@@ -338,6 +341,13 @@ build's identity and counters, never task content. Timings on one machine are a 
 machine, not a claim about another.
 
 ## Checks
+
+The checks live in `deploy/wallboard/checks/`, apart from the bundle and from what its build identity
+hashes: `launcher/` holds the launcher's and the settings contract's Python tests, `unit/` the
+runtime's unit tests, `browser/` the browser checks with their fixture page and server and the
+profiler, and `scratch-daemon/` the scratch-daemon test's harness, with its unit test beside it.
+`settings-cases.json` holds the cases the contract's three readers share, and the two opt-in
+integration tests sit beside these directories.
 
 `scripts/check-wallboard.py` runs every check that needs no daemon, with synthetic data only. It
 installs the locked Playwright (`--install-browser` adds its pinned Chromium), runs the web crate's
@@ -353,13 +363,13 @@ its `rust` job and the rest in its `wallboard` job.
 
 Two integration tests stay opt-in, since each needs what the suite never touches.
 
-`deploy/wallboard/test-browser.cjs` reads a live project through a daemon that already runs. It needs
-Caddy, the locked Playwright that the check script installs, and the configuration of an existing
-project with tasks in the statuses it shows:
+`deploy/wallboard/checks/test-browser.cjs` reads a live project through a daemon that already runs.
+It needs Caddy, the locked Playwright that the check script installs, and the configuration of an
+existing project with tasks in the statuses it shows:
 
 ```sh
 WALLBOARD_CONFIG=/path/to/wallboard.json CADDY=/path/to/caddy \
-  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/test-browser.cjs
+  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/checks/test-browser.cjs
 ```
 
 It runs the launcher on a free port with a relay of its own in front of the configured daemon,
@@ -368,23 +378,23 @@ through the outage, the reconnect with the same node and its subscriptions sent 
 controls, the statuses shown, the fit to the screen in both orientations and the proxy's refusals. It
 never starts, stops, configures or writes to the daemon.
 
-`deploy/wallboard/test-scratch-daemon.cjs` drives the built bundle against a daemon it starts itself,
-in real time and with real writes. It covers the Rust wiring the synthetic checks cannot reach: the
-renderer asking the clock about a task's date, the clock starting only once the store has opened, and
-a card's revision stating its task's relations. It takes about twelve minutes:
+`deploy/wallboard/checks/test-scratch-daemon.cjs` drives the built bundle against a daemon it starts
+itself, in real time and with real writes. It covers the Rust wiring the synthetic checks cannot
+reach: the renderer asking the clock about a task's date, the clock starting only once the store has
+opened, and a card's revision stating its task's relations. It takes about twelve minutes:
 
 ```sh
 bash scripts/build-wallboard.sh
 bash scripts/build-web.sh && cargo build -p fwd   # the daemon serves the page the first scenario opens
 SCRATCH_DAEMON=target/debug/fwd SCRATCH_CLIENT=target/debug/fwd \
-  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/test-scratch-daemon.cjs
+  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/checks/test-scratch-daemon.cjs
 ```
 
 `SCRATCH_CLIENT` is `fwd` built from this checkout, which writes the not-before dates.
 `SCRATCH_DAEMON` is the `fwd` to run as the daemon: this checkout's too, or the build a display's
 daemon runs, to check the wallboard against it. The test also needs `python3`, `git` and `sqlite3`.
 `SCRATCH_SCENARIOS` chooses a comma-separated subset of the scenarios in
-`deploy/wallboard/scratch/scenarios/`, each of which opens its own project and page: `first-contact`
+`deploy/wallboard/checks/scratch-daemon/scenarios/`, each of which opens its own project and page: `first-contact`
 (a cold start with no daemon answering past one clock check, the clock starting only after the store
 opens, and the field's first registration), `dates` (the first load, a real date passing with no
 write, setting and clearing a date), `reconnect` (dates during an outage), `page-clock` (a hidden

@@ -285,7 +285,6 @@ pub fn GraphPage(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoic
 // The wallboard's renderer draws with this page's own edges, implied dependencies, parent lines and
 // paths, so it is a child of this module, built only with the wallboard feature.
 #[cfg(feature = "wallboard")]
-#[path = "wallboard_render.rs"]
 mod wallboard_render;
 #[cfg(feature = "wallboard")]
 pub(crate) use wallboard_render::WallboardGraph;

@@ -3,7 +3,7 @@
 const fs = require('node:fs'), http = require('node:http'), net = require('node:net'), path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
-const DEPLOY = path.resolve(__dirname, '..');
+const DEPLOY = path.resolve(__dirname, '../..');
 const TYPES = { '.css': 'text/css', '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.mjs': 'text/javascript',
   '.wasm': 'application/wasm', '.wav': 'audio/wav', '.png': 'image/png', '.md': 'text/plain', '.txt': 'text/plain' };
 

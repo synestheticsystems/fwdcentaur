@@ -2,7 +2,7 @@
 // running display, and what every scenario expects of it.
 const fs = require('node:fs'), path = require('node:path');
 
-const DEPLOY = path.resolve(__dirname, '..');
+const DEPLOY = path.resolve(__dirname, '../..');
 // How often the clock checks the dates to come.
 const CHECK_EVERY = 60_000;
 const FAR_FUTURE = '2099-01-01';

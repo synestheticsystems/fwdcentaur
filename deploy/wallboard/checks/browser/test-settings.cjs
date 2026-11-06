@@ -15,7 +15,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     await pauseClock(page);
     // Rust mounts one runtime on the graph host, then sends each frame with its settings revision.
     await page.evaluate(async () => {
-      window.entry = await import('/crates/fwd-web/src/wallboard-runtime.mjs');
+      window.entry = await import('/crates/fwd-web/src/wallboard/wallboard-runtime.mjs');
       fixture.runtime.dispose();
       fixture.settings.statuses = ['open', 'in_progress'];
       window.host = document.querySelector('.wallboard-graph');

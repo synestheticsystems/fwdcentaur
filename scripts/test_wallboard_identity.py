@@ -43,6 +43,24 @@ class BuildIdentity(unittest.TestCase):
         self.assertFalse(missing, f'Cargo reads these to build the wallboard, and the identity leaves them out: '
                                   f'{sorted(missing)}')
 
+    def test_editing_a_check_or_the_launcher_keeps_the_digest_and_editing_the_contract_changes_it(self):
+        beside = ['deploy/wallboard/wallboard.py', 'deploy/wallboard/checks/unit/test-settings.mjs',
+                  'deploy/wallboard/checks/browser/test-motion.cjs']
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory)
+            for name in [*wallboard_identity.inputs(REPO), *beside]:
+                (copy / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(REPO / name, copy / name)
+            run(['git', 'init', '-q'], copy)
+            before = wallboard_identity.content_sha256(copy)
+            for name in beside:
+                with (copy / name).open('a') as file:
+                    file.write('\n// An edit the bundle never sees.\n')
+            self.assertEqual(wallboard_identity.content_sha256(copy), before, 'the bundle is not built from these')
+            with (copy / 'deploy/wallboard/wallboard-contract.json').open('a') as contract:
+                contract.write('\n')
+            self.assertNotEqual(wallboard_identity.content_sha256(copy), before, 'the build reads the contract')
+
     def test_a_dependency_feature_the_core_inherits_from_the_root_manifest_changes_the_digest(self):
         with tempfile.TemporaryDirectory() as directory:
             # A checkout of the identity's inputs alone, so that Cargo can read nothing else either.

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LocalHistory, changes } from '../../crates/fwd-web/src/wallboard-history.mjs';
-import { Diagnostics } from '../../crates/fwd-web/src/wallboard-diagnostics.mjs';
-import { buildInfo } from '../../crates/fwd-web/src/wallboard-build.mjs';
+import { LocalHistory, changes } from '../../../../crates/fwd-web/src/wallboard/wallboard-history.mjs';
+import { Diagnostics } from '../../../../crates/fwd-web/src/wallboard/wallboard-diagnostics.mjs';
+import { buildInfo } from '../../../../crates/fwd-web/src/wallboard/wallboard-build.mjs';
 
 class Storage {
   values = new Map();

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { themeState, mountTheme, themeFor } from '../../crates/fwd-web/src/wallboard-theme.mjs';
-import { getTimes } from '../../crates/fwd-web/src/suncalc.mjs';
+import { themeState, mountTheme, themeFor } from '../../../../crates/fwd-web/src/wallboard/wallboard-theme.mjs';
+import { getTimes } from '../../../../crates/fwd-web/src/wallboard/suncalc.mjs';
 
 const settings = (latitude = 51.48, longitude = 0) => ({ theme: 'charcoal', theme_schedule: {
   enabled: true, latitude, longitude, day_theme: 'linen-indigo', night_theme: 'indigo-saffron',

@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 /// The contract bundled with this build, parsed once for every revision it validates.
 static CONTRACT: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../../../deploy/wallboard/wallboard-contract.json"))
+    serde_json::from_str(include_str!("../../../../deploy/wallboard/wallboard-contract.json"))
         .expect("the bundled settings contract is JSON")
 });
 
@@ -191,7 +191,8 @@ mod tests {
     use super::*;
     #[test]
     fn shared_contract_conformance() {
-        let cases: Value = serde_json::from_str(include_str!("../../../deploy/wallboard/settings-cases.json")).unwrap();
+        let cases: Value =
+            serde_json::from_str(include_str!("../../../../deploy/wallboard/checks/settings-cases.json")).unwrap();
         for case in cases.as_array().unwrap() {
             let result = Settings::parse(&case["input"]);
             if case["invalid"] == true {
