@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build the wallboard and run every check of it that needs no daemon, with synthetic data only:
 the Rust tests and lints of the web crate with and without the wallboard feature, the launcher's
-tests, the build identity's tests, the runtime's unit tests and the browser checks against the
-production WASM. It never contacts a daemon. docs/design/wallboard.md says what each check covers."""
+tests, the tests of the build's identity, notice and refusals, the runtime's unit tests and the browser checks
+against the production WASM. It never contacts a daemon. docs/design/wallboard.md says what each check covers."""
 import argparse
 from collections import namedtuple
 import json
@@ -82,8 +82,8 @@ def main():
         Check('Rust formatting', ['cargo', 'fmt', '--all', '--check', '--manifest-path', 'crates/fwd-web/Cargo.toml'], repo),
         Check('Launcher configuration', [sys.executable, '-m', 'unittest', 'discover', '-s',
                                          'deploy/wallboard/checks/launcher', '-p', 'test_*.py', '-v'], repo),
-        Check('Build identity', [sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts',
-                                 '-p', 'test_wallboard_identity.py', '-v'], repo),
+        Check('Build identity, notice and refusals', [sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts',
+                                            '-p', 'test_wallboard_*.py', '-v'], repo),
         # The build writes the two modules the runtime's unit tests import, so it comes before them.
         Check('Production WASM build', ['bash', 'scripts/build-wallboard.sh'], repo),
         record_build,

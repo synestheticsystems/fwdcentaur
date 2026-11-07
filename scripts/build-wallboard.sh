@@ -1,11 +1,33 @@
 #!/usr/bin/env bash
 # Build the wallboard (docs/design/wallboard.md): crates/fwd-web with its `wallboard` feature, from
-# wallboard.html, into the bundle in deploy/wallboard: dist/, build-info.json and LICENSE beside the
-# launcher. It builds neither the daemon nor the page the daemon embeds (scripts/build-web.sh).
-# Extra arguments go to trunk. Needs git, python3, trunk and the wasm32 target.
+# wallboard.html, into the bundle in deploy/wallboard: dist/, with its NOTICE.txt, and build-info.json
+# and LICENSE beside the launcher. It builds neither the daemon nor the page the daemon embeds
+# (scripts/build-web.sh). Extra arguments go to trunk. Needs git, python3, trunk and the wasm32 target.
+# WALLBOARD_REMAP_PATHS=1 makes an official build: the builder's paths are taken out of the
+# WebAssembly, where its panic messages would otherwise carry them, and the build fails if any is left.
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 bundle="$repo/deploy/wallboard"
+if [ "${WALLBOARD_REMAP_PATHS:-}" = 1 ]; then
+    # Cargo takes either of these in place of the target's flags, and would drop the remapping and
+    # .cargo/config.toml's flags with them, so an official build refuses them before it writes anything.
+    for variable in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS; do
+        if [ -n "${!variable+set}" ]; then
+            echo "WALLBOARD_REMAP_PATHS=1 refuses $variable: Cargo would take it in place of the remapping and of .cargo/config.toml's flags" >&2
+            exit 1
+        fi
+    done
+    cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+    # Cargo splits these flags on whitespace, and joins them to .cargo/config.toml's for the target.
+    for path in "$HOME" "$cargo_home" "$repo"; do
+        if [[ "$path" =~ [[:space:]] ]]; then
+            echo "WALLBOARD_REMAP_PATHS cannot remap a path with whitespace in it: $path" >&2
+            exit 1
+        fi
+    done
+    # The last prefix that matches wins, so the narrower ones come after $HOME.
+    export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="--remap-path-prefix=$HOME=home --remap-path-prefix=$cargo_home=cargo --remap-path-prefix=$repo=fwdcentaur"
+fi
 if ! command -v trunk >/dev/null; then
     echo "trunk is not installed: cargo install trunk --version 0.21.14 --locked" >&2
     exit 1
@@ -30,7 +52,23 @@ cd "$repo/crates/fwd-web"
 # every module it finds there into the page it builds, so the page the daemon embeds would otherwise
 # carry this build's modules.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/crates/fwd-web/target}/wallboard"
-NO_COLOR=true trunk build wallboard.html --release=true --dist wallboard-dist "$@"
+# wasm-bindgen leaves the modules of earlier builds in its output, and trunk copies all it finds there
+# into the page, so it starts empty: the bundle carries this build's modules alone.
+rm -rf "$CARGO_TARGET_DIR/wasm-bindgen"
+# Locked, so that the build reads the lockfile its identity hashed, as it was hashed.
+NO_COLOR=true trunk build wallboard.html --release=true --locked=true --dist wallboard-dist "$@"
+if [ "${WALLBOARD_REMAP_PATHS:-}" = 1 ]; then
+    # What the remapping is for: the WebAssembly names none of the builder's directories. grep exits 1
+    # when it finds none, and 2 when it cannot read the WebAssembly.
+    for path in "$HOME" "$cargo_home" "$repo"; do
+        LC_ALL=C grep -aqF -- "$path/" wallboard-dist/*.wasm && found=0 || found=$?
+        case $found in
+            0) echo "the wallboard's WebAssembly still names $path, a directory of its builder" >&2; exit 1 ;;
+            1) ;;
+            *) exit "$found" ;;
+        esac
+    done
+fi
 rm -rf "$bundle/dist"
 cp -R wallboard-dist "$bundle/dist"
 cp -R "$bundle/sounds" "$bundle/dist/"
@@ -40,4 +78,6 @@ for module in "$bundle"/dist/snippets/fwd-web-*/src/wallboard/wallboard-runtime.
     cp src/wallboard/*.mjs src/wallboard/LICENSE-suncalc.txt src/wallboard/SUNCALC.md "$(dirname "$module")/"
 done
 cp "$repo/LICENSE" "$bundle/LICENSE"
+# Who made the bundle, where its source is, and the licenses of what others made in it.
+python3 "$repo/scripts/wallboard_notices.py" "$repo" "$bundle/dist/NOTICE.txt"
 printf 'built the wallboard bundle in %s\n' "$bundle"

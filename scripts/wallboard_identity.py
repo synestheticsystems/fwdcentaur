@@ -12,13 +12,13 @@ import sys
 
 # What the bundle is built from: the web crate and the core it builds on; the root manifest, whose
 # workspace settings and dependencies fwd-core inherits; the settings contract, which the build turns
-# into a module and Rust compiles in; the sounds the bundle carries; the build itself; and the Cargo
-# configuration, toolchain and license the build reads or copies. The launcher beside the bundle and
+# into a module and Rust compiles in; the sounds the bundle carries; the build itself, with what writes
+# its notice; and the Cargo configuration, toolchain and license the build reads or copies. The launcher beside the bundle and
 # the wallboard's checks are no part of it, so that changing them makes no new build.
 # test_wallboard_identity.py checks that these hold every manifest Cargo reads for the build.
 INPUTS = ('crates/fwd-core', 'crates/fwd-web', 'Cargo.toml', 'deploy/wallboard/wallboard-contract.json',
           'deploy/wallboard/sounds', 'scripts/build-wallboard.sh', 'scripts/wallboard_identity.py',
-          '.cargo/config.toml', 'rust-toolchain.toml', 'LICENSE')
+          'scripts/wallboard_notices.py', '.cargo/config.toml', 'rust-toolchain.toml', 'LICENSE')
 
 
 def inputs(repo):

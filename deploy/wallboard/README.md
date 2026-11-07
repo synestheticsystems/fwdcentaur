@@ -51,10 +51,15 @@ bash scripts/build-wallboard.sh
 ```
 
 It builds `crates/fwd-web` with the `wallboard` feature, from `crates/fwd-web/wallboard.html`, and
-assembles the bundle here: `dist/` (the page, its WebAssembly, its JavaScript modules and the
-sounds), `build-info.json` (the commit it was built from and a hash of everything it was built
-from) and `LICENSE`, beside the launcher. It builds neither the daemon nor the page the daemon
-embeds (`scripts/build-web.sh`).
+assembles the bundle here: `dist/` (the page, its WebAssembly, its JavaScript modules, the sounds,
+and `NOTICE.txt`, which names who made the bundle, where its source is, and the licenses of what
+others made in it, with their texts), `build-info.json` (the commit it was built from and a hash of
+everything it was built from) and `LICENSE`, beside the launcher. It builds locked, never updating
+the lockfile, and builds neither the daemon nor the page the daemon embeds (`scripts/build-web.sh`).
+`WALLBOARD_REMAP_PATHS=1` builds as an official build does: it keeps the paths of your home,
+Cargo's and the checkout out of the WebAssembly, which a bundle built for others to run should not
+name, and fails if any is left. It refuses `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, which Cargo
+would take in place of the remapping.
 
 To check it, with synthetic data only and never a daemon:
 

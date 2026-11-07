@@ -37,7 +37,7 @@ jobs:
       - run: cargo test --manifest-path crates/fwd-web/Cargo.toml
       - run: cargo test --manifest-path crates/fwd-web/Cargo.toml --features wallboard
       - run: python3 -m unittest discover -s deploy/wallboard/checks/launcher -p 'test_*.py' -v   # the wallboard's launcher and its settings contract
-      - run: python3 -m unittest discover -s scripts -p 'test_wallboard_identity.py' -v   # the wallboard build's identity covers what Cargo reads for it
+      - run: python3 -m unittest discover -s scripts -p 'test_wallboard_*.py' -v   # the wallboard build's identity covers what Cargo reads for it, its notice what it compiles in, and an official build refuses the flags that would undo its remapping
       - run: bash scripts/build-web.sh   # the web UI into crates/fwd-web/dist; the next build embeds it
       - run: cargo build --workspace
       - run: bash scripts/smoke-roles.sh   # the fixed roles through the CLI against a scratch workspace; checks the served UI
@@ -73,7 +73,9 @@ jobs:
       # Playwright's pinned Chromium, with the system libraries it needs.
       - run: npx playwright install --with-deps chromium
         working-directory: deploy/wallboard/checks
-      - run: bash scripts/build-wallboard.sh
+      # Built as an official build is, with the builder's paths taken out of the WebAssembly: the
+      # build fails if any is left in it.
+      - run: WALLBOARD_REMAP_PATHS=1 bash scripts/build-wallboard.sh
       - run: node --test deploy/wallboard/checks/*/test-*.mjs
       - run: for check in deploy/wallboard/checks/browser/test-*.cjs; do node "$check"; done
   # The VS Code extension's suite (extensions/vscode, `npm test`) with VS Code on a virtual display,

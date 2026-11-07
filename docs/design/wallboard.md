@@ -43,23 +43,36 @@ how to build, configure, connect and run it, and what to do when something is wr
   `wallboard-diagnostics.mjs` the diagnostics; the runtime disposes of all of them. The runtime lays
   out with the renderer's own packing, which Rust hands it, when cards that are leaving still need
   their places and when it fits the graph to the screen; Rust refuses a request no frame it drew
-  could give, and the runtime reports that as the graph's failure (`layout_request.rs`). SunCalc (`suncalc.mjs`, BSD-2-Clause,
-  `SUNCALC.md`) computes sunrise and sunset.
+  could give, and the runtime reports that as the graph's failure (`layout_request.rs`). SunCalc
+  (`suncalc.mjs`, BSD-2-Clause, `SUNCALC.md`) computes sunrise and sunset.
 - **The build**, `scripts/build-wallboard.sh`, writes two modules the runtime imports,
   `wallboard-contract.mjs` (the settings contract) and `wallboard-build.mjs` (what this build is),
   and the bundle's `build-info.json`: the commit it was built from and `content_sha256`, a hash of
   every file the bundle is built from, committed or not, so that any change to them makes another
   build (`scripts/wallboard_identity.py`). Those files are `crates/fwd-core` and `crates/fwd-web`;
   the root `Cargo.toml`, whose workspace settings and dependencies `fwd-core` inherits; the settings
-  contract and the sounds in `deploy/wallboard`; the build script and `wallboard_identity.py`
-  themselves; and `.cargo/config.toml`, `rust-toolchain.toml` and `LICENSE`. The launcher and the
-  checks beside the bundle are not among them, so changing either makes no new build. Its tests check
-  that they hold every manifest and the lockfile Cargo reads for the build, as `cargo metadata` names
-  them, that a dependency feature `fwd-core` inherits from the root manifest changes the hash, and
-  that editing a check or the launcher does not. The build never builds or replaces the daemon or the
-  page the daemon embeds, and it builds in a target directory of its own,
+  contract and the sounds in `deploy/wallboard`; the build script, `wallboard_identity.py` and
+  `wallboard_notices.py`; and `.cargo/config.toml`, `rust-toolchain.toml` and `LICENSE`. The
+  launcher and the checks beside the bundle are not among them, so changing either makes no new
+  build. Its tests check that they hold every manifest and the lockfile Cargo reads for the build,
+  as `cargo metadata` names them, that a dependency feature `fwd-core` inherits from the root
+  manifest changes the hash, and that editing a check or the launcher does not. The build runs
+  locked, so it reads the lockfile it hashed as it was hashed. It never builds or replaces the
+  daemon or the page the daemon embeds, and it builds in a target directory of its own,
   `crates/fwd-web/target/wallboard`: trunk copies every module it finds in its target directory into
-  the page it builds, so a shared one would carry the wallboard's modules into the daemon's page.
+  the page it builds, so a shared one would carry the wallboard's modules into the daemon's page,
+  and the build empties wasm-bindgen's output there first, which keeps the modules of earlier
+  builds. The bundle says what it contains in `dist/NOTICE.txt` (`scripts/wallboard_notices.py`):
+  fwd's copyright and license and where its source is, then SunCalc and every crate compiled into
+  its WebAssembly, with the license texts each ships. A crate whose package ships none is taken
+  under Apache-2.0 when its license offers that; otherwise the notice carries its MIT text, kept in
+  `crates/fwd-web/licenses` as taken from its repository at the version locked (SPDX's for erased,
+  whose repository holds none), and it refuses to be written while a crate has no text. An official build sets
+  `WALLBOARD_REMAP_PATHS=1`, which remaps the builder's home, Cargo home and checkout in the paths
+  rustc writes into the WebAssembly's panic messages, where they would otherwise name the builder's
+  directories. Such a build refuses `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, which Cargo would take
+  in place of the remapping and of `.cargo/config.toml`'s flags, and fails if the WebAssembly still
+  names any of those directories; continuous integration builds so.
 
 ### What the renderer and the packing take from the core
 
@@ -395,8 +408,9 @@ integration tests sit beside these directories.
 installs the locked Playwright (`--install-browser` adds its pinned Chromium), runs the web crate's
 native tests with the `wallboard` feature, which cover the renderer, packing, settings and
 availability, and without it; clippy for wasm32 with and without the feature; the crate's rustfmt
-check; the launcher's and the settings contract's Python tests; the build identity's tests
-(`scripts/test_wallboard_identity.py`); the build; the runtime's unit tests in Node (diagnostics,
+check; the launcher's and the settings contract's Python tests; the tests of the build's identity,
+notice and refusals (`scripts/test_wallboard_identity.py`, `scripts/test_wallboard_notices.py`,
+`scripts/test_wallboard_build.py`); the build; the runtime's unit tests in Node (diagnostics,
 history and change detection, settings, themes and the scratch test's isolation); and the browser
 checks, each against the production runtime, most of them on a virtual clock: motion and replay,
 when replay may start, the wall clock stepping during cues, membership changes, settings revisions,
