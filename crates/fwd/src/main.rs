@@ -4490,6 +4490,32 @@ async fn notification_with_message(
     Ok((nj, message))
 }
 
+/// How many ready tasks `fwd prime` lists, so that what it puts into an agent's context stays
+/// short; a list it cut says so ([`primer_cut`]), and the hook's first line counts every one.
+const PRIMED_READY: usize = 10;
+/// How many unread notifications `fwd prime` lists, for the same reason.
+const PRIMED_UNREAD: usize = 20;
+
+/// What `fwd prime` says after its answer when it listed fewer of the `ready` tasks or the
+/// `unread` notifications than there are, as `fwd task list` says when its limit cut it, naming
+/// the commands that list them all; none when it listed every one. The task list is given a
+/// limit of every ready task, since its own default would cut a long one again; the inbox lists
+/// every unread notification as it is.
+fn primer_cut(ready: usize, unread: usize) -> Option<String> {
+    let mut shown = Vec::new();
+    let mut whole = Vec::new();
+    if ready > PRIMED_READY {
+        shown.push(format!("{PRIMED_READY} of {ready} ready tasks"));
+        whole.push(format!("`fwd task list --ready --limit {ready}`"));
+    }
+    if unread > PRIMED_UNREAD {
+        shown.push(format!("{PRIMED_UNREAD} of {unread} unread notifications"));
+        whole.push("`fwd inbox --unread`".to_string());
+    }
+    let verb = if whole.len() == 1 { "lists" } else { "list" };
+    (!shown.is_empty()).then(|| format!("fwd: {} shown; {} {verb} the rest", shown.join(" and "), whole.join(" and ")))
+}
+
 async fn run(app: &App, command: Command) -> Result<()> {
     let ctx = app.ctx();
     match command {
@@ -4739,7 +4765,19 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     let r = ops::readiness(ctx, t).await?;
                     out.push(ops::json_of_task(t, Some(&r))?);
                 }
-                app.print(Value::Array(out))
+                app.print(Value::Array(out))?;
+                // A list the limit cut looks like a whole one, so it says so beside the answer,
+                // which stays a plain array, and after it, where a terminal keeps it in sight. It
+                // names the filters this command reads (the global --scope is not one), less
+                // --status after --ready, which reads no status.
+                if tasks.len() > limit {
+                    let narrow = if ready { "--label or --mine" } else { "--status, --ready, --label or --mine" };
+                    app.note(format!(
+                        "fwd: {limit} of {} tasks shown; raise --limit, or narrow with {narrow}",
+                        tasks.len()
+                    ));
+                }
+                Ok(())
             }
             TaskCommand::Show { id, include } => {
                 let id = app.id(&id, &[Kind::Task]).await?;
@@ -5588,16 +5626,13 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     v["scope"] = ops::json_of_scope(&s)?;
                 }
             }
-            let ready: Vec<Value> = ops::ready_tasks(ctx, Some(app.me))
-                .await?
-                .iter()
-                .take(10)
-                .map(|t| ops::json_of_task(t, None))
-                .collect::<Result<_>>()?;
+            let ready_tasks = ops::ready_tasks(ctx, Some(app.me)).await?;
+            let ready: Vec<Value> =
+                ready_tasks.iter().take(PRIMED_READY).map(|t| ops::json_of_task(t, None)).collect::<Result<_>>()?;
             v["ready_tasks"] = Value::Array(ready);
             let unread = ops::inbox(ctx, app.me, true).await?;
             let mut lines = Vec::new();
-            for n in unread.iter().take(20) {
+            for n in unread.iter().take(PRIMED_UNREAD) {
                 let (nj, m) = notification_with_message(ctx, n, app.acting).await?;
                 lines.push(render_notification(&nj, m.as_ref(), true));
             }
@@ -5607,7 +5642,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 let mut text = format!(
                     "fwdcentaur context for {}: {} ready task(s), {} unread notification(s).\nReady: {}\nUnread:\n{}\nUse `fwd task next --claim` to take work, `fwd inbox pop` to read notifications.",
                     app.me_handle,
-                    v["ready_tasks"].as_array().map(Vec::len).unwrap_or(0),
+                    // Every ready task, as the unread count is every unread notification, though
+                    // `Ready:` lists only the first [`PRIMED_READY`].
+                    ready_tasks.len(),
                     unread.len(),
                     v["ready_tasks"].as_array().map(|a| a.iter().map(|t| format!("{} {}", t["id"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("; ")).unwrap_or_default(),
                     lines.join("\n")
@@ -5627,7 +5664,11 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 if let Some(guidance) = guidance {
                     app.note(format!("fwd: {guidance}"));
                 }
-                app.print(v)
+                app.print(v)?;
+                if let Some(cut) = primer_cut(ready_tasks.len(), unread.len()) {
+                    app.note(cut);
+                }
+                Ok(())
             }
         }
         Command::Session { command } => match command {
@@ -6309,6 +6350,30 @@ mod tests {
         let refusal = include(&["--include", "relations,everything"]).unwrap_err();
         let expected = "invalid value 'everything' for '--include <INCLUDE>': --include takes relations and messages";
         assert!(refusal.contains(expected), "{refusal}");
+    }
+
+    /// `fwd prime` says which of its lists it cut, of how many, and which commands list the rest;
+    /// lists it gave whole, however near their caps, it does not mention.
+    #[test]
+    fn the_primer_names_each_list_it_cut_and_where_the_rest_is() {
+        assert_eq!(primer_cut(PRIMED_READY, PRIMED_UNREAD), None);
+        assert_eq!(
+            primer_cut(12, 3).as_deref(),
+            Some("fwd: 10 of 12 ready tasks shown; `fwd task list --ready --limit 12` lists the rest")
+        );
+        // More than `fwd task list`'s default limit of 50: the command it names lists them all.
+        assert_eq!(
+            primer_cut(60, 3).as_deref(),
+            Some("fwd: 10 of 60 ready tasks shown; `fwd task list --ready --limit 60` lists the rest")
+        );
+        assert_eq!(
+            primer_cut(4, 31).as_deref(),
+            Some("fwd: 20 of 31 unread notifications shown; `fwd inbox --unread` lists the rest")
+        );
+        assert_eq!(
+            primer_cut(12, 31).as_deref(),
+            Some("fwd: 10 of 12 ready tasks and 20 of 31 unread notifications shown; `fwd task list --ready --limit 12` and `fwd inbox --unread` list the rest")
+        );
     }
 
     /// The words of every command that runs (`task create`, `inbox` and `inbox pop`), for the

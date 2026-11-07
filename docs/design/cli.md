@@ -88,7 +88,7 @@ fwd task create "Retry on websocket disconnect" \
     --not-before 2026-12-01          # not actionable before this: a day here, or an RFC 3339 instant
     [--propose] [--needs-review]
 fwd task show T72 [--include relations,messages]   # the fields, the assignee and the scopes it is worked in, its labels, then the checklist: "steps: 3 of 8 checked"; --include relations adds what it points at and what points at it, messages its comments, each thread under its first message (anchors and history are designed, not built)
-fwd task list [--ready|--blocked|--mine|--scope S3|--label X|--status open|--status proposed] [--limit N]   # --mine: assigned to you; --label bug: the tasks with that label
+fwd task list [--ready|--mine|--label X|--status open|--status proposed] [--limit N]   # --mine: assigned to you; --label bug: the tasks with that label; --limit: 50 unless given, and a list it cuts says so (--blocked and a list's own --scope S3 are designed, not built: the global --scope is the scope the session works in, which the list does not read)
 fwd task next [--claim]             # the highest-priority ready task for you (yours first, then unassigned ones) that you can start where you work, started with --claim
 fwd task assign T72 @alice | fwd task unassign T72   # the assignee (a field, never an edge); the new one is told
 fwd task approve T80 | reject T80 --reason "..."   # Proposed -> Open | Rejected
@@ -113,6 +113,14 @@ The reason `reject`, `return`, `cancel`, `reopen` and `rejustify` take is kept a
 Prose fields accept `@file` or `-` for stdin so agents never shell-escape multi-line text.
 
 A task's labels say what kind of work it is, so a list can be filtered by it: `bug` and `feature` are the labels the project uses by convention, and any other word will do (`../DECISIONS.md`, D97, "A task's kind, such as bug or feature, is a label, not a task type", 2026-09-28; `data-model.md`, Labels). `--label` on `task create` and `task amend` adds labels and `--unlabel` on `task amend` takes them off, each repeatable and taking several with commas between them; `task list --label bug` keeps the tasks with that label. A label is stored trimmed and in lower case, so `--label Bug` adds the label `bug` and `--unlabel BUG` takes it off, however it was written; adding a label the task has, or taking off one it lacks, changes nothing. A blank label, or one both added and taken off in one `task amend`, is refused before anything is written. `task show` prints the labels (`labels: bug, feature`), and the JSON of a task carries them as `labels`.
+
+`task list` shows at most `--limit` tasks, 50 unless given. A list the limit cut looks like a whole one, so it says so after the list, where a terminal keeps it in sight, on standard error and among an MCP caller's notes, counting the tasks the filters keep before the cut, while the JSON stays a plain array of the tasks shown:
+
+```text
+fwd: 50 of 318 tasks shown; raise --limit, or narrow with --status, --ready, --label or --mine
+```
+
+It names the filters this build reads, and leaves `--status` out after `--ready`, which reads no status.
 
 A priority is a word, now, next or later, on `task create` and `task amend` as on `ask` and `comment`, so that one vocabulary serves work and questions (task YtkOevUc, "Give fwd task create and fwd ask one priority vocabulary"). A task stores its priority as a number, which `task next` ranks lower first and the page shows as `P1` to `P3`: now is 1, next 2 and later 3; 0 and 4, which the page's form offers too, have no word, and a task may have no priority. A message keeps the word. Until 2026-09-30 the task commands took only the number, from 0 to 4, and this build still takes it on every one of these commands, saying on standard error that the next build refuses it: a task stores the number as it is, and a message reads it as the word nearest it (0 and 1 as now, 2 as next, 3 and 4 as later). Any other value is refused, naming what is taken:
 
@@ -234,6 +242,12 @@ fwd session detach
 fwd session stop-check --format hook   # emits Stop-hook JSON: block with unread inbox, else {}
 fwd session stamp                      # the fwd plugin's PreToolUse hook on Bash: reads the hook's JSON on standard input and, for a command made only of fwd (never admin, daemon, init, ui or project), cd and filters reading fwd's output, in a call that does not ask to run outside the sandbox, prints the JSON that approves it with FWD_CLAUDE_SESSION and FWD_CLAUDE_AGENT exported before it, the call's other arguments as given; prints nothing for any other command or call; needs no project and no daemon
 fwd prime [--format hook]              # bounded context block: scope, intention, assigned + ready tasks, unread inbox, recent changes
+```
+
+`fwd prime` lists the first ten ready tasks and the first twenty unread notifications. With `--format hook` its first line counts every one of each (`fwdcentaur context for impl-alice: 12 ready task(s), 3 unread notification(s).`); otherwise a list it cut says so after the answer, as `task list` does, naming the command that lists the rest, with a `--limit` of every ready task, since that list's own default of 50 would cut a long one again (`fwd inbox --unread` lists every unread notification as it is):
+
+```text
+fwd: 10 of 12 ready tasks shown; `fwd task list --ready --limit 12` lists the rest
 ```
 
 ## Inbox and notifications
