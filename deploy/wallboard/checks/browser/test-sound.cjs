@@ -18,26 +18,31 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
       }
       let now=0,allowed=true;const settings={enabled:true,volume:30};
       const sound=new LiveSound(settings,()=>now,()=>allowed);
+      // Each clip that starts playing, as Web Audio sees it, and the kind of cue it was loaded as.
+      const started=[],start=AudioBufferSourceNode.prototype.start;
+      AudioBufferSourceNode.prototype.start=function(...args){started.push(this.buffer);return start.apply(this,args);};
+      const playing=()=>Object.entries(sound.buffers).find(([,buffer])=>buffer===started.at(-1))?.[0];
       const diff=(arrived=[],departed=[],edited=[])=>({arrived,departed,edited,any:!!(arrived.length+departed.length+edited.length)});
       const early=await sound.play(diff(['early']));
       if(early || !await sound.prepare()) throw Error('Preloading must be silent and complete');
       if(sound.context.state!=='suspended') throw Error('Preloading must leave audio suspended');
       const results=[];
-      results.push(await sound.play(diff(['a'])),sound.lastKind);
+      results.push(await sound.play(diff(['a'])),playing());
       results.push(await sound.play(diff([],[],['a'])));
-      now+=4000;results.push(await sound.play(diff([],['a'])),sound.lastKind);
+      now+=4000;results.push(await sound.play(diff([],['a'])),playing());
       await new Promise(resolve=>setTimeout(resolve,1080));
       if(sound.context.state!=='running') throw Error('Full departure tail must finish before suspension');
       await new Promise(resolve=>setTimeout(resolve,250));
       if(sound.context.state!=='suspended') throw Error('Audio must suspend after the cue');
-      now+=4000;results.push(await sound.play(diff(['b'],['a'])),sound.lastKind);
+      now+=4000;results.push(await sound.play(diff(['b'],['a'])),playing());
       now+=4000;settings.volume=0;results.push(await sound.play(diff(['c'])));
       settings.volume=30;settings.enabled=false;results.push(await sound.play(diff(['c'])));
       settings.enabled=true;allowed=false;results.push(await sound.play(diff(['c'])));
       allowed=true;sound.dispose();results.push(await sound.play(diff(['c'])));
-      return {clips,results};
+      return {clips,results,starts:started.length};
     });
     assert.deepEqual(clips.results,[true,'arrival',false,true,'departure',true,'edit',false,false,false,false]);
+    assert.equal(clips.starts,3,'only the cues it plays start a clip');
     for(const {kind,samples,length} of clips.clips){
       const peak=Math.max(...samples.map(Math.abs));assert.ok(peak>.06&&peak<.12,kind+' has a quiet, unclipped signal');
       assert.ok(samples.every(Number.isFinite));assert.equal(samples[0],0);

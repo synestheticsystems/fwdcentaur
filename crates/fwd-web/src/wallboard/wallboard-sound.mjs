@@ -23,7 +23,7 @@ export class LiveSound {
   // cooldown runs on `clock`, a monotonic one, so that a wall clock stepped back cannot silence cues.
   constructor(settings, clock = () => performance.now(), allowed = () => true, diagnostics) {
     this.settings = settings; this.clock = clock; this.allowed = allowed; this.diagnostics = diagnostics;
-    this.lastAt = -Infinity; this.played = 0; this.pending = false; this.disposed = false;
+    this.lastAt = -Infinity; this.pending = false; this.disposed = false;
     void this.prepare();
   }
   configure(settings) {
@@ -64,7 +64,6 @@ export class LiveSound {
       // Never queue a delayed notification behind an autoplay prompt, reconnect or replay.
       if (this.context.state !== 'running' || this.disposed || !this.settings.enabled || !this.settings.volume || !this.allowed() || this.clock() - at > 500) return false;
       playCue(this.context, this.buffers[kind], volume);
-      this.played++; this.lastKind = kind;
       return true;
     } catch (error) { this.diagnostics?.issue('audio', 'unavailable', reasonOf(error)); return false; } // Audio failure must never interrupt the graph.
     finally {

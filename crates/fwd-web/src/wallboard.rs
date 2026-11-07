@@ -126,10 +126,10 @@ impl Availability {
     }
 }
 
-/// Loads the project and settings that the wallboard's own server generates from its
+/// Loads the project's id and the settings that the wallboard's own server generates from its
 /// wallboard.json. Loading them never reaches the daemon, so a cold start gets this far while no
 /// daemon answers.
-async fn load_configuration() -> Result<(session::Project, Settings), String> {
+async fn load_configuration() -> Result<(String, Settings), String> {
     let window = web_sys::window().ok_or("No browser window")?;
     let response = JsFuture::from(window.fetch_with_str("/wallboard-config.json"))
         .await
@@ -147,14 +147,7 @@ async fn load_configuration() -> Result<(session::Project, Settings), String> {
     let configuration: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("Invalid wallboard configuration: {e}"))?;
     let id = configuration["project_id"].as_str().filter(|id| !id.is_empty()).ok_or("Missing project_id")?;
-    Ok((
-        session::Project {
-            id: id.into(),
-            name: configuration["project_name"].as_str().unwrap_or("Graph").into(),
-            error: None,
-        },
-        Settings::parse(&configuration)?,
-    ))
+    Ok((id.into(), Settings::parse(&configuration)?))
 }
 
 #[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard/wallboard-theme.mjs")]
@@ -178,7 +171,7 @@ pub fn Wallboard() -> impl IntoView {
     let presentation = RwSignal::new(Presentation::default());
     spawn_local(async move {
         mark_boot("mounted");
-        let (project, settings) = loop {
+        let (project_id, settings) = loop {
             match load_configuration().await {
                 Ok(configuration) => break configuration,
                 Err(why) => {
@@ -191,7 +184,7 @@ pub fn Wallboard() -> impl IntoView {
         configure_theme(&settings.json().to_string());
         presentation.set(settings.presentation);
         error.set(None);
-        if let Err(why) = session::wallboard_node(project).await {
+        if let Err(why) = session::wallboard_node(&project_id).await {
             error.set(Some(why));
             return;
         }

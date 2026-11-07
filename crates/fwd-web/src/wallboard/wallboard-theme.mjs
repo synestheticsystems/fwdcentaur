@@ -1,7 +1,7 @@
 // All astronomy runs locally; no location lookup, weather service, or graph connection.
 import { getTimes } from './suncalc.mjs';
 
-import { LIGHT_THEMES, THEMES } from './wallboard-settings.mjs';
+import { LIGHT_THEMES } from './wallboard-settings.mjs';
 const DAY = 86400000;
 
 // Settings arrive validated by the shared contract: an enabled schedule always has coordinates
@@ -39,17 +39,16 @@ export class ThemeController {
     this.window.addEventListener('pageshow', this.onWake);
     this.refresh();
   }
-  // A new settings revision replaces the palette and schedule, and ends any preview.
+  // A new settings revision replaces the palette and schedule.
   configure(settings) {
-    this.settings = settings; this.preview = null;
+    this.settings = settings;
     return this.refresh();
   }
   refresh() {
     this.clearTimer(this.timer);
     if (this.disposed) return;
     const now = this.now();
-    if (this.preview && now >= this.preview.until) this.preview = null;
-    const state = this.preview ? { theme: this.preview.theme, mode: 'preview', next: null } : themeState(this.settings, now);
+    const state = themeState(this.settings, now);
     this.root.dataset.theme = state.theme;
     this.root.dataset.colorMode = LIGHT_THEMES.includes(state.theme) ? 'light' : 'dark';
     this.root.dataset.themeMode = state.mode;
@@ -60,18 +59,11 @@ export class ThemeController {
     this.document.body.style.backgroundColor = background;
     this.document.documentElement.style.colorScheme = this.root.dataset.colorMode;
     // At most one idle timer: recheck the clock after sleep/clock correction, and at the event.
-    const due = this.preview?.until ?? state.next?.at;
-    if (this.preview || state.mode === 'solar') {
-      this.timer = this.setTimer(() => this.refresh(), Math.min(60000, Math.max(100, (due ?? now + 60000) - now)));
+    if (state.mode === 'solar') {
+      this.timer = this.setTimer(() => this.refresh(), Math.min(60000, Math.max(100, (state.next?.at ?? now + 60000) - now)));
     }
     return state;
   }
-  showPreview(theme, duration = 30000) {
-    if (!THEMES.includes(theme)) throw new Error('Unknown wallboard theme');
-    this.preview = { theme, until: this.now() + Math.max(1000, Math.min(300000, duration)) };
-    return this.refresh();
-  }
-  resume() { this.preview = null; return this.refresh(); }
   dispose() {
     this.disposed = true; this.clearTimer(this.timer);
     this.document.removeEventListener('visibilitychange', this.onWake);
@@ -80,6 +72,7 @@ export class ThemeController {
   }
 }
 
+// The controller each root has, so that mounting another disposes the one before.
 const controllers = new WeakMap();
 export function mountTheme(root, settings, environment) {
   controllers.get(root)?.dispose();
@@ -87,7 +80,6 @@ export function mountTheme(root, settings, environment) {
   controllers.set(root, controller);
   return controller;
 }
-export function themeFor(root) { return controllers.get(root); }
 // Called as soon as local configuration loads, even while the graph is waiting for its peer.
 export function configureTheme(settings) {
   const root = document.querySelector('.wallboard');

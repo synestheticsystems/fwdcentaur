@@ -8,11 +8,13 @@ const CHECK_EVERY = 60_000;
 const FAR_FUTURE = '2099-01-01';
 const BUILD = JSON.parse(fs.readFileSync(path.join(DEPLOY, 'build-info.json')));
 
-// In the page before anything runs: every interval it starts, the wave's transitions, and when each
-// card comes and goes, by the page's own wall clock.
+// In the page before anything runs: every interval it starts, the wave's transitions, when each card
+// comes and goes, by the page's own wall clock, and each clip that starts playing, as Web Audio sees it.
 const INSTRUMENT = () => {
   const realNow = Date.now.bind(Date);
-  const seen = window.__scratch = { intervals: [], waves: [], arrivals: {}, departures: {}, realNow };
+  const seen = window.__scratch = { intervals: [], waves: [], arrivals: {}, departures: {}, clips: [], realNow };
+  const start = AudioBufferSourceNode.prototype.start;
+  AudioBufferSourceNode.prototype.start = function (...args) { seen.clips.push(this.buffer); return start.apply(this, args); };
   const setIntervalNative = window.setInterval;
   window.setInterval = function (handler, ms, ...rest) {
     seen.intervals.push({ ms, at: performance.now() });
@@ -39,7 +41,8 @@ const READ = async runtime => {
       waiting: card.dom.classList.contains('availability-waiting'), messages: Number(card.dom.querySelector('.count text')?.textContent ?? 0) }])) : {},
     arrows: r ? [...r.edges.keys()] : [], history: r?.history.entries.length ?? 0, lastAt: last?.at,
     lastChange: change && { arrived: change.arrived, departed: change.departed, edited: change.edited },
-    played: r?.sound.played ?? 0, lastKind: r?.sound.lastKind, diagnostics: diagnosticsFor(host), timeOrigin: performance.timeOrigin,
+    played: __scratch.clips.length, lastKind: Object.entries(r?.sound.buffers ?? {}).find(([, clip]) => clip === __scratch.clips.at(-1))?.[0],
+    diagnostics: diagnosticsFor(host), timeOrigin: performance.timeOrigin,
     page: { intervals: __scratch.intervals, waves: __scratch.waves, arrivals: __scratch.arrivals, departures: __scratch.departures },
     connection: document.querySelector('.wallboard-connection')?.dataset.connected };
 };

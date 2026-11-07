@@ -1,6 +1,5 @@
 import { contract } from './wallboard-contract.mjs';
 export const LIGHT_THEMES = contract.properties.theme_schedule.properties.day_theme.enum;
-export const THEMES = contract.properties.theme.enum;
 
 // A value the contract accepts, with its defaults filled in. Throws on anything else.
 export function validateSettings(value, spec = contract, path = 'settings') {

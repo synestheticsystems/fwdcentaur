@@ -62,7 +62,7 @@ async function startCaddyStandIn(root, report) {
     },
     serve(project, upstreamPort) {
       state.upstreamPort = upstreamPort; state.authority = `127.0.0.1:${upstreamPort}`; state.daemonOrigin = `http://127.0.0.1:${upstreamPort}`;
-      const settings = { project_id: project, project_name: 'Scratch integration', statuses: ['proposed', 'open', 'in_progress', 'in_review'],
+      const settings = { project_id: project, statuses: ['proposed', 'open', 'in_progress', 'in_review'],
         sound: { enabled: true, volume: 30 }, replay: { enabled: true, interval_seconds: 3600 }, fit_to_screen: true,
         listen: { host: '127.0.0.1', port }, upstream: { host: '127.0.0.1', port: upstreamPort }, daemon_origin: state.daemonOrigin };
       const settingsFile = path.join(root, 'wallboard-settings.json');

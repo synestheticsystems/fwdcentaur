@@ -79,7 +79,6 @@ keep it when you update the wallboard.
 | Field | Meaning |
 | --- | --- |
 | `project_id` | The UUID of the project to show, across all its scopes. In one of the project's repositories, `fwd daemon status` prints it as `project`. |
-| `project_name` | A label for the configuration; it does not choose the project. |
 | `statuses` | The statuses to show, from `proposed`, `open`, `in_progress` and `in_review`; `["in_progress"]` by default. Done, cancelled and rejected tasks are never shown. |
 | `max_rows` | The most cards in one column, from 3 to 16; 8 by default. More cards make more columns, so no task is dropped. |
 | `node_width` | A card's width at 100% text size, from 240 to 640; 360 by default. |

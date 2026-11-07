@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { themeState, mountTheme, themeFor } from '../../../../crates/fwd-web/src/wallboard/wallboard-theme.mjs';
+import { themeState, mountTheme } from '../../../../crates/fwd-web/src/wallboard/wallboard-theme.mjs';
 import { getTimes } from '../../../../crates/fwd-web/src/wallboard/suncalc.mjs';
 
 const settings = (latitude = 51.48, longitude = 0) => ({ theme: 'charcoal', theme_schedule: {
@@ -51,7 +51,7 @@ test('polar days and nights have no invented next event', () => {
   }
 });
 
-test('controller follows the clock offline, covers the page, expires previews, and cleans up', () => {
+test('controller follows the clock offline, covers the page, takes each revision, and cleans up', () => {
   let now = at('2026-03-20T05:00:00Z'), nextId = 0;
   const timers = new Map();
   const window = new EventTarget();
@@ -65,25 +65,17 @@ test('controller follows the clock offline, covers the page, expires previews, a
   assert.equal(root.dataset.theme, 'linen-indigo'); assert.equal(document.body.style.backgroundColor, 'rgb(241, 237, 229)');
   assert.equal(document.documentElement.style.backgroundColor, document.body.style.backgroundColor);
   assert.equal(document.documentElement.style.colorScheme, 'light');
-  controller.showPreview('sand-plum', 15000);
-  assert.equal(root.dataset.themeMode, 'preview'); assert.equal(timers.size, 1);
-  assert.equal([...timers.values()][0].delay, 15000);
-  now += 15000; [...timers.values()][0].callback();
-  assert.equal(root.dataset.theme, 'linen-indigo'); assert.equal(root.dataset.themeMode, 'solar');
   now = +getTimes(new Date(now), 51.48, 0).sunset - 500;
   controller.refresh(); assert.equal([...timers.values()][0].delay, 500);
   now += 500; [...timers.values()][0].callback();
   assert.equal(root.dataset.theme, 'indigo-saffron'); assert.equal(timers.size, 1);
-  controller.showPreview('sand-plum', 15000);
   controller.configure({ theme: 'graphite-coral', theme_schedule: null });
   assert.equal(root.dataset.theme, 'graphite-coral'); assert.equal(root.dataset.themeMode, 'manual');
-  assert.equal(timers.size, 0, 'a new revision ends the preview, and a manual palette needs no timer');
+  assert.equal(timers.size, 0, 'a manual palette needs no timer');
   controller.configure(settings());
   assert.equal(root.dataset.theme, 'indigo-saffron'); assert.equal(timers.size, 1);
   const replacement = mountTheme(root, { theme: 'porcelain-coral' }, environment);
-  assert.equal(controller.disposed, true); assert.equal(timers.size, 0);
-  assert.equal(themeFor(root), replacement);
+  assert.equal(controller.disposed, true, 'mounting another disposes the one before'); assert.equal(timers.size, 0);
   replacement.dispose(); now += 86400000; window.dispatchEvent(new Event('pageshow'));
   assert.equal(root.dataset.theme, 'porcelain-coral'); assert.equal(timers.size, 0);
-  assert.equal(themeFor(root), undefined, 'a disposed controller leaves the registry');
 });

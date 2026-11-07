@@ -38,8 +38,7 @@ def configuration(settings, dist):
         raise ValueError("daemon_origin must be the unchanged daemon's http://loopback-IP:port")
     authority = origin.netloc
     daemon_origin = f"http://{authority}"
-    public = json.dumps({**validate_settings(settings), "project_id": project,
-                         "project_name": settings.get("project_name", "Graph")})
+    public = json.dumps({**validate_settings(settings), "project_id": project})
     browser_origin = f"http://{listen}"
     local_host = str(ipaddress.ip_address(settings["listen"]["host"]))
     assets = sorted("/" + path.relative_to(dist).as_posix() for path in dist.rglob("*") if path.is_file())

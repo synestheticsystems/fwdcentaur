@@ -337,13 +337,19 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     nativePage.on('pageerror',error=>nativeErrors.push(String(error)));
     await nativePage.goto(server.url);
     await nativePage.waitForFunction(()=>window.fixture);
-    await nativePage.evaluate(()=>{
+    const solarTimer=await nativePage.evaluate(()=>{
       fixture.settings.theme_schedule={enabled:true,latitude:51.48,longitude:0,day_theme:'linen-indigo',night_theme:'indigo-saffron'};
-      fixture.reset();fixture.runtime.theme.showPreview('sand-plum',1000);
+      fixture.reset();
+      const theme=fixture.runtime.theme, armed=theme.timer, cleared=[], clearTimeout=window.clearTimeout;
+      // Coming back into view clears the schedule's timer and sets the next with the browser's own timers.
+      window.clearTimeout=timer=>{cleared.push(timer);return clearTimeout.call(window,timer);};
+      try { document.dispatchEvent(new Event('visibilitychange')); } finally { window.clearTimeout=clearTimeout; }
+      return {mode:document.querySelector('.wallboard').dataset.themeMode,armed:typeof armed,
+              cleared:cleared.includes(armed),rearmed:typeof theme.timer==='number'&&theme.timer!==armed};
     });
-    await nativePage.waitForFunction(()=>document.querySelector('.wallboard').dataset.themeMode==='solar');
+    assert.deepEqual(solarTimer,{mode:'solar',armed:'number',cleared:true,rearmed:true});
     assert.deepEqual(nativeErrors,[]);
-    console.log('PASS native browser timers initialize, expire previews and resume the solar schedule');
+    console.log('PASS native browser timers arm the solar schedule, and arm it again when the page comes back into view');
     // Resizing a fitted graph reuses card DOM and must not manufacture task changes or sounds.
     await nativePage.evaluate(({tasks,edges})=>{
       fixture.settings.fit_to_screen=true;fixture.reset();
