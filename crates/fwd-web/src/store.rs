@@ -20,7 +20,7 @@ use fwd_core::naming::{self, Named, Work};
 use fwd_core::rules::{self, Readiness, TaskSnapshot};
 use leptos::prelude::{untrack, ArcRwSignal, ArcTrigger, Get, Notify, Set, Track};
 use send_wrapper::SendWrapper;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use wasm_bindgen_futures::spawn_local;
 
@@ -45,16 +45,39 @@ struct Store {
     ends: Ends,
     /// What keeps the two above current, for as long as the page.
     _watching: Vec<SubscriptionGuard>,
-    /// What the task query selects and the collections opened beside it, bound by the first open
-    /// for as long as the page.
+    /// What the first open asked for, which holds for as long as the page.
+    opened_with: OpenedWith,
+}
+
+/// What the store was opened with: what the task query selects and the collections opened beside
+/// it. The collections are a set, so that a later open naming them in another order is admitted.
+struct OpenedWith {
     task_predicate: String,
-    reads: Vec<Collection>,
+    reads: BTreeSet<Collection>,
+}
+
+impl OpenedWith {
+    fn new(task_predicate: &str, reads: &[Collection]) -> Self {
+        OpenedWith { task_predicate: task_predicate.to_owned(), reads: reads.iter().copied().collect() }
+    }
+
+    /// A later open asking for `asked`: another predicate or other collections are refused, since the
+    /// store cannot give them without opening again, and are never ignored.
+    fn admit(&self, asked: &OpenedWith) -> Result<(), String> {
+        if self.task_predicate != asked.task_predicate {
+            Err(format!("the task query already selects `{}`, not `{}`", self.task_predicate, asked.task_predicate))
+        } else if self.reads != asked.reads {
+            Err(format!("the store already reads {:?}, not {:?}", self.reads, asked.reads))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// A collection the store keeps a standing query on beside the tasks and their relations, which
 /// every page reads. A page names the collections it reads, and the store opens those alone, so
 /// that a page loads, caches and waits for nothing it never shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Collection {
     Scopes,
     Principals,
@@ -77,23 +100,18 @@ pub fn open() -> Result<(), String> {
 }
 
 /// Opens the standing queries: the tasks `task_predicate` selects, their relations, and the
-/// collections `reads` names. The store lives as long as the page, so its first open binds both:
-/// another predicate or other collections are refused, never ignored.
+/// collections `reads` names, in any order. The store lives as long as the page, so its first open
+/// binds both: another predicate or other collections are refused, never ignored ([`OpenedWith`]).
 pub fn open_with(task_predicate: &str, reads: &[Collection]) -> Result<(), String> {
+    let asked = OpenedWith::new(task_predicate, reads);
     if let Some(store) = STORE.get() {
-        return if store.task_predicate != task_predicate {
-            Err(format!("the task query already selects `{}`, not `{task_predicate}`", store.task_predicate))
-        } else if store.reads != reads {
-            Err(format!("the store already reads {:?}, not {reads:?}", store.reads))
-        } else {
-            Ok(())
-        };
+        return store.opened_with.admit(&asked);
     }
     let ctx = ctx();
     let refused =
         |what: &'static str| move |e: ankurah::error::RetrievalError| format!("the {what} query was refused: {e}");
     // The query of each collection `reads` names, and none for the others.
-    let named = |collection| reads.contains(&collection);
+    let named = |collection| asked.reads.contains(&collection);
     // `created > 0` rather than `>= 0`: a live query on `>= 0` never fires (Ankurah 0.9.3).
     let tasks = ctx.query::<TaskView>(task_predicate).map_err(refused("tasks"))?;
     let relations = ctx.query::<RelationView>("created > 0").map_err(refused("relations"))?;
@@ -132,8 +150,7 @@ pub fn open_with(task_predicate: &str, reads: &[Collection]) -> Result<(), Strin
         arrivals,
         ends,
         _watching: watching,
-        task_predicate: task_predicate.to_owned(),
-        reads: reads.to_vec(),
+        opened_with: asked,
     };
     STORE.set(SendWrapper::new(store)).ok();
     spawn_local(record_the_daemons_answer());
@@ -710,6 +727,33 @@ mod tests {
             read()
         });
         (memo, runs)
+    }
+
+    #[test]
+    fn a_later_open_naming_the_same_collections_in_another_order_is_admitted() {
+        use Collection::{Messages, Principals, Scopes};
+        let opened = OpenedWith::new("created > 0", &[Scopes, Principals, Messages]);
+        assert_eq!(opened.admit(&OpenedWith::new("created > 0", &[Messages, Scopes, Principals])), Ok(()));
+        assert_eq!(opened.admit(&OpenedWith::new("created > 0", &[Scopes, Principals, Messages])), Ok(()));
+    }
+
+    #[test]
+    fn a_later_open_naming_other_collections_or_another_predicate_is_refused() {
+        use Collection::{Anchors, Messages, Principals, Scopes};
+        let opened = OpenedWith::new("created > 0", &[Scopes, Principals, Messages]);
+        assert_eq!(
+            opened.admit(&OpenedWith::new("created > 0", &[Principals, Scopes])),
+            Err("the store already reads {Scopes, Principals, Messages}, not {Scopes, Principals}".to_owned()),
+            "one fewer"
+        );
+        assert!(
+            opened.admit(&OpenedWith::new("created > 0", &[Messages, Anchors, Scopes, Principals])).is_err(),
+            "one more"
+        );
+        assert!(
+            opened.admit(&OpenedWith::new("status = 'open'", &[Scopes, Principals, Messages])).is_err(),
+            "another predicate"
+        );
     }
 
     #[test]
