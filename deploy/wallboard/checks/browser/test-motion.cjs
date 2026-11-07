@@ -257,7 +257,7 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
     for (const width of [3840, 1920, 736, 320]) {
       await page.setViewportSize({ width, height: width === 3840 ? 2160 : 1080 });
       const bounds = await page.evaluate(() => {
-        const banner = document.querySelector('.wallboard-replay'), graph = document.querySelector('.wallboard-graph');
+        const banner = document.querySelector('.wallboard-status'), graph = document.querySelector('.wallboard-graph');
         return { bottom: banner.getBoundingClientRect().bottom, top: graph.getBoundingClientRect().top,
           overflow: document.documentElement.scrollWidth > innerWidth,
           tag: parseFloat(getComputedStyle(document.querySelector('.wallboard-mode-tag')).fontSize),
@@ -409,8 +409,10 @@ const { startFixtureServer, launchChromium, pauseClock, closeServer } = require(
         rejected:r.diagnostics.issues.configuration.count,connected:r.connected};
     });
     assert.deepEqual(configured,{sameHistory:true,sameNode:true,theme:'porcelain-coral',replayTimer:false,rejected:2,connected:true});
+    // The status row is there to remove, so that its absence after disposal is the runtime's doing.
+    assert.equal(await nativePage.locator('.wallboard-status').count(),1);
     await nativePage.evaluate(()=>fixture.runtime.dispose());
-    assert.equal(await nativePage.locator('.wallboard-replay').count(),0);
+    assert.equal(await nativePage.locator('.wallboard-status').count(),0);
     assert.deepEqual(nativeErrors,[]);
     await nativePage.close();
     console.log('PASS malformed updates preserve the last graph and transport health, with their reason; a new valid frame recovers silently; settings apply atomically without replacing cards/history; disposal removes status UI');
