@@ -11,26 +11,35 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from urllib.parse import urlsplit
 import uuid
 from settings import validate_settings
 
 
-def endpoint(value, *, loopback=False):
-    host = ipaddress.ip_address(value["host"])
+def given(value, name, where=""):
+    """The field `name` of `value`, or a refusal naming it: the launcher has no default for it."""
+    if type(value) is not dict or name not in value:
+        raise ValueError(f"{where}{name} is missing; the launcher has no default for it (README.md, Configuring)")
+    return value[name]
+
+
+def endpoint(settings, name, *, loopback=False):
+    value = given(settings, name)
+    host = ipaddress.ip_address(given(value, "host", f"{name}."))
     if loopback and not host.is_loopback:
         raise ValueError("The wallboard must listen on a loopback IP address")
-    port = value["port"]
+    port = given(value, "port", f"{name}.")
     if type(port) is not int or not 1024 <= port <= 65535:
         raise ValueError("Ports must be integers from 1024 to 65535")
     return f"[{host}]:{port}" if host.version == 6 else f"{host}:{port}"
 
 
 def configuration(settings, dist):
-    project = str(uuid.UUID(settings["project_id"]))
-    listen = endpoint(settings["listen"], loopback=True)
-    upstream = endpoint(settings["upstream"])
-    origin = urlsplit(settings["daemon_origin"])
+    project = str(uuid.UUID(given(settings, "project_id")))
+    listen = endpoint(settings, "listen", loopback=True)
+    upstream = endpoint(settings, "upstream")
+    origin = urlsplit(given(settings, "daemon_origin"))
     if (origin.scheme != "http" or origin.username or origin.password
             or origin.path not in ("", "/") or origin.query or origin.fragment
             or not origin.hostname or not ipaddress.ip_address(origin.hostname).is_loopback
@@ -86,8 +95,10 @@ def main():
     parser.add_argument("--check", action="store_true", help="Validate generated Caddy config without listening")
     args = parser.parse_args()
     root = args.config.resolve().parent
-    settings = json.loads(args.config.read_text())
-    config = configuration(settings, root / "dist")
+    try:
+        config = configuration(json.loads(args.config.read_text()), root / "dist")
+    except ValueError as refusal:
+        sys.exit(f"{args.config}: {refusal}")
     runtime = root / "runtime"
     runtime.mkdir(exist_ok=True)
     generated = runtime / "caddy.json"

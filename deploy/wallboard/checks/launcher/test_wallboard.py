@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -50,6 +51,28 @@ class ProxyConfiguration(unittest.TestCase):
                 settings = dict(self.settings, **{key: value})
                 with self.assertRaises((ValueError, TypeError)):
                     configuration(settings, self.dist)
+
+    def test_refuses_a_configuration_missing_a_field_it_has_no_default_for_by_name(self):
+        for key in ("project_id", "listen", "upstream", "daemon_origin"):
+            with self.subTest(key=key):
+                settings = {name: value for name, value in self.settings.items() if name != key}
+                with self.assertRaisesRegex(ValueError, rf"^{key} is missing;"):
+                    configuration(settings, self.dist)
+        for key in ("listen", "upstream"):
+            for part in ("host", "port"):
+                with self.subTest(key=key, part=part):
+                    given = {name: value for name, value in self.settings[key].items() if name != part}
+                    with self.assertRaisesRegex(ValueError, rf"^{key}\.{part} is missing;"):
+                        configuration(dict(self.settings, **{key: given}), self.dist)
+
+    def test_the_launcher_stops_on_a_refused_configuration_with_its_sentence_alone(self):
+        settings = {name: value for name, value in self.settings.items() if name != "listen"}
+        config = Path(self.temp.name) / "wallboard.json"
+        config.write_text(json.dumps(settings))
+        run = subprocess.run([sys.executable, str(LAUNCHER / "wallboard.py"), "--config", str(config), "--check"],
+                             capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual(run.stderr, f"{config}: listen is missing; the launcher has no default for it (README.md, Configuring)\n")
 
     def test_display_settings_reach_the_browser_and_preserve_old_configuration(self):
         def public(settings):

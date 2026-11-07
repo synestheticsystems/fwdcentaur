@@ -78,7 +78,7 @@ keep it when you update the wallboard.
 
 | Field | Meaning |
 | --- | --- |
-| `project_id` | The UUID of the project to show, across all its scopes. In one of the project's repositories, `fwd daemon status` prints it as `project`. |
+| `project_id` | Required. The UUID of the project to show, across all its scopes. In one of the project's repositories, `fwd daemon status` prints it as `project`. |
 | `statuses` | The statuses to show, from `proposed`, `open`, `in_progress` and `in_review`; `["in_progress"]` by default. Done, cancelled and rejected tasks are never shown. |
 | `max_rows` | The most cards in one column, from 3 to 16; 8 by default. More cards make more columns, so no task is dropped. |
 | `node_width` | A card's width at 100% text size, from 240 to 640; 360 by default. |
@@ -90,13 +90,14 @@ keep it when you update the wallboard.
 | `replay.interval_seconds` | How often replay runs, from 60 to 3600 seconds; 180 by default. |
 | `sound.enabled` | A short sound for each batch of live changes; `false` by default. Below. |
 | `sound.volume` | Its level from 0 to 100; 30 by default. The machine's and the monitor's own volume apply as well. |
-| `listen.host`, `listen.port` | Where the launcher serves the page; `127.0.0.1:3000` by default. The host must be a loopback address. |
-| `upstream.host`, `upstream.port` | Where the launcher's proxy reaches the daemon: an IP address and a port, normally on loopback, the daemon's own or a tunnel's (below). |
-| `daemon_origin` | The daemon's own address, `http://127.0.0.1:<port>`, as the daemon knows it. The proxy presents it as the Host and Origin of the one connection it passes on, which the daemon checks. |
+| `listen.host`, `listen.port` | Required. Where the launcher serves the page, `127.0.0.1:3000` in the example. The host must be a loopback address. |
+| `upstream.host`, `upstream.port` | Required. Where the launcher's proxy reaches the daemon: an IP address and a port, normally on loopback, the daemon's own or a tunnel's (below). |
+| `daemon_origin` | Required. The daemon's own address, `http://127.0.0.1:<port>`, as the daemon knows it. The proxy presents it as the Host and Origin of the one connection it passes on, which the daemon checks. |
 
 The example's port, 12345, stands in for the daemon's: `fwd daemon status` on the daemon's machine
-prints it as `port`. Unknown keys are ignored, a missing `schema_version` means version 1, and a
-value the contract does not allow stops the launcher with the field it refused.
+prints it as `port`. The launcher has no default for the four required fields, and stops with a
+sentence naming one that is missing. Unknown keys are ignored, a missing `schema_version` means
+version 1, and a value the contract does not allow stops the launcher with the field it refused.
 
 For the day and night palettes, give the display's position; city-level precision is enough. These
 coordinates are Greenwich's:
@@ -118,9 +119,10 @@ from the SunCalc library bundled with the page, with no location or weather serv
 ## Connecting to the daemon
 
 The daemon listens on loopback, on the port it had last time when that port is free and on another
-otherwise, so check `fwd daemon status` after a restart. It runs while anything uses it, and the
-wallboard's connection counts: once the wallboard has joined, the daemon stays up. The wallboard
-never starts it, so start it with `fwd daemon start`, or any `fwd` command, on its machine.
+otherwise. It runs until it is stopped, with `fwd daemon stop` or a signal, and a restart may give
+it another port, so check `fwd daemon status` after one and correct `upstream`, or the tunnel, and
+`daemon_origin`. The wallboard never starts it, so start it with `fwd daemon start`, or any `fwd`
+command, on its machine.
 
 On the same machine as the daemon, `upstream` and `daemon_origin` name the same port:
 `"upstream": {"host": "127.0.0.1", "port": <port>}` and `"daemon_origin": "http://127.0.0.1:<port>"`.

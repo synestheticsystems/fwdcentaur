@@ -7,7 +7,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 bundle="$repo/deploy/wallboard"
 if ! command -v trunk >/dev/null; then
-    echo "trunk is not installed: cargo install trunk --locked" >&2
+    echo "trunk is not installed: cargo install trunk --version 0.21.14 --locked" >&2
     exit 1
 fi
 
