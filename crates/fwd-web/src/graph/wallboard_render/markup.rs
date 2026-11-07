@@ -1,5 +1,6 @@
 //! The SVG of one frame: the cards where the packing put them, with their counts of messages, and the
 //! arrows between them.
+// The Graph page's private item the arrows are drawn with. A rename in graph.rs fails here.
 use super::super::path;
 use super::cards::Cards;
 use crate::{fmt, layout};

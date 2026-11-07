@@ -1,9 +1,7 @@
 //! The tests of what a card says and which tasks are drawn, which build their tasks and edges with
 //! the Graph page's test helpers.
 use super::*;
-use crate::graph::plan;
-use crate::graph::tests::{id, part_of, task, waits};
-use crate::scope_filter::ScopeChoice;
+use crate::graph::tests::{id, part_of, waits};
 
 #[test]
 fn wallboard_priority_has_its_own_lozenge_without_replacing_actual_metadata() {
@@ -46,8 +44,12 @@ fn wallboard_scope_chips_wrap_onto_rows_and_are_escaped() {
     assert!(chips.contains("Design &amp; planning"));
 }
 
+/// A task the selection leaves out brings nothing onto the frame: no card, arrow or line for an open
+/// parent, which the Graph page would draw as a band, nor for a done prerequisite, which it would
+/// draw as a stub. The tasks of every status, and the relations to both, go through the wallboard's
+/// own selection and reading of cards, and what comes out through its packing and markup.
 #[test]
-fn wallboard_excludes_every_other_status_and_never_adds_hidden_parents_or_stubs() {
+fn wallboard_draws_only_the_selected_statuses_and_nothing_of_a_task_it_leaves_out() {
     let selection = crate::wallboard::Settings::default().selection;
     let statuses = [
         TaskStatus::Proposed,
@@ -58,26 +60,38 @@ fn wallboard_excludes_every_other_status_and_never_adds_hidden_parents_or_stubs(
         TaskStatus::Cancelled,
         TaskStatus::Rejected,
     ];
-    let ids: HashSet<_> = statuses
-        .iter()
+    assert!(!wallboard_draws(&selection, None, None), "nor a task whose status cannot be read");
+    let drawn: Vec<_> = statuses
+        .into_iter()
         .enumerate()
-        .filter(|(_, status)| selection.keeps(Some(**status)))
-        .map(|(n, _)| id(n as u8))
+        .filter(|&(_, status)| wallboard_draws(&selection, Some(status), None))
+        .map(|(n, status)| DrawnTask {
+            id: id(n as u8),
+            title: format!("{status:?}"),
+            what: String::new(),
+            status,
+            priority: None,
+            footer: String::new(),
+            footer_rows: 1,
+            waiting: false,
+            revision: 0,
+        })
         .collect();
-    assert_eq!(ids, HashSet::from([id(2)]));
-    assert!(!selection.keeps(None));
-    // An open parent and a done prerequisite are not drawn, even though the ordinary
-    // graph would pull them in as a band label and a dependency stub.
-    let edges = [part_of(2, 1), waits(2, 4)];
-    let edges: Vec<_> = edges.into_iter().filter(|e| wallboard_relation(&ids, Some(e.first), Some(e.then))).collect();
-    let plan = plan(&[task(2, None, false)], &edges, ScopeChoice::All, false, false);
-    assert_eq!(plan.kept, [id(2)]);
-    assert!(plan.stubs.is_empty());
-    assert!(plan.bands.is_empty());
-    assert!(plan.edges.is_empty());
-    assert!(!wallboard_relation(&ids, Some(id(2)), None));
-    assert!(!wallboard_relation(&ids, None, Some(id(2))));
-    assert!(wallboard_relation(&ids, Some(id(2)), Some(id(2))));
+    // The task in progress is part of the open one and waits for the done one.
+    let cards = wallboard_cards(drawn, &[part_of(2, 1), waits(2, 4)], &Presentation::default());
+    assert_eq!(cards.cards.iter().map(|card| card.id).collect::<Vec<_>>(), [id(2)], "the task in progress alone");
+    assert_eq!(cards.cards[0].parent, "", "no line names the parent left out");
+    assert!(cards.arrows.is_empty(), "no arrow comes from the prerequisite left out");
+    let drawing = super::super::Placing::of(&cards).pack();
+    assert_eq!(drawing.boxes.len(), 1, "the packing places the one card kept");
+    assert!(drawing.routes.is_empty() && drawing.bands.is_empty(), "and no arrow or band");
+    let frame = super::super::markup::frame(&cards, &drawing, &HashMap::new());
+    assert_eq!(frame.matches("wallboard-node").count(), 1);
+    assert!(!frame.contains(r#"class="edge"#), "the frame draws no arrow");
+    assert!(!frame.contains("wallboard-parent"), "nor a parent line");
+    for left_out in [id(1), id(4)] {
+        assert!(!frame.contains(&left_out.to_base64()), "nothing on the frame names a task left out");
+    }
 }
 
 #[test]
@@ -163,8 +177,8 @@ fn wallboard_draws_a_selected_task_only_once_it_is_due() {
 #[test]
 fn wallboard_task_waiting_for_one_not_yet_due_reads_as_blocked_with_no_arrow() {
     let (waiting, not_yet_due) = (id(1), id(2));
-    let drawn = HashSet::from([waiting]);
-    assert!(!wallboard_relation(&drawn, Some(waiting), Some(not_yet_due)));
+    assert!(!wallboard_relation(&HashSet::from([waiting]), &waits(1, 2)));
+    assert!(wallboard_relation(&HashSet::from([waiting, not_yet_due]), &waits(1, 2)), "drawn once both its tasks are");
     for status in [TaskStatus::Open, TaskStatus::Proposed] {
         let availability = Availability::of(waiting, None, &[(not_yet_due, Some(status))]);
         assert_eq!(availability.labels(), ["Blocked"]);

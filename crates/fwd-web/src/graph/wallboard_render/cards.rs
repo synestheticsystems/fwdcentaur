@@ -1,10 +1,11 @@
 //! What the wallboard's frame shows of the store: which tasks it draws, and everything each card says
 //! but its count of messages, which the frame's markup reads apart (`super::markup`).
+// The Graph page's private items the cards are read with. A rename in graph.rs fails here.
 use super::super::{also_part_of, implied, Edge};
 use crate::wallboard::{Availability, Dependencies, Presentation, TaskSelection};
 use crate::{clock, fmt, store};
 use ankurah::EntityId;
-use fwd_core::model::{RelationKind, RelationStatus, RelationView, TaskStatus, TaskView};
+use fwd_core::model::{RelationKind, RelationStatus, TaskStatus, TaskView};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
@@ -56,10 +57,25 @@ pub(super) struct Arrow {
     pub(super) proposed: bool,
 }
 
+/// What a card says that its task alone gives, as `read` takes it from the store: all of a `Card`
+/// but the line naming the tasks it is part of, which the relations between the cards drawn give,
+/// and the height that line adds.
+struct DrawnTask {
+    id: EntityId,
+    title: String,
+    what: String,
+    status: TaskStatus,
+    priority: Option<i64>,
+    footer: String,
+    footer_rows: usize,
+    waiting: bool,
+    revision: u64,
+}
+
 /// Reads the frame's cards from the store: the tasks `selection` keeps that are due, their relations
 /// to each other, and their prerequisites' statuses through `prerequisites`, which watches them.
 pub(super) fn read(selection: &TaskSelection, presentation: &Presentation, prerequisites: &mut Dependencies) -> Cards {
-    let (tasks, relations) = wallboard_tasks(selection);
+    let tasks = wallboard_tasks(selection);
     let all_relations = store::relations();
     let statuses = prerequisites.statuses(&tasks, &all_relations);
     let availability: Vec<_> = tasks
@@ -79,16 +95,9 @@ pub(super) fn read(selection: &TaskSelection, presentation: &Presentation, prere
         })
         .collect();
     let scopes = store::scopes();
-    let text_scale = presentation.text_scale_percent as f64 / 100.0;
     let content_width = presentation.node_width as f64;
-    let (width, base_height) = wallboard_card_size(presentation, 0, false);
-    let titles: HashMap<_, _> = tasks.iter().map(|t| (t.id(), t.title().unwrap_or_default())).collect();
-    let all_edges: Vec<_> = relations.iter().filter_map(Edge::of).collect();
-    let mut cards = Vec::with_capacity(tasks.len());
+    let mut drawn = Vec::with_capacity(tasks.len());
     for (task, availability) in tasks.iter().zip(&availability) {
-        let named: Vec<_> =
-            all_edges.iter().copied().filter(|e| e.kind == RelationKind::SubtaskOf && e.first == task.id()).collect();
-        let parent = also_part_of(&named, false, &|id| titles.get(id).cloned().unwrap_or_default());
         let names: Vec<_> = store::scopes_of_task(task.id())
             .iter()
             .map(|id| {
@@ -101,8 +110,8 @@ pub(super) fn read(selection: &TaskSelection, presentation: &Presentation, prere
             metadata.push_str(&format!(" · {}", store::handle_of(assignee)));
         }
         let priority = task.priority().ok().flatten();
-        let (footer, rows) = wallboard_footer(&names, &metadata, priority, content_width, availability);
-        let title = titles[&task.id()].clone();
+        let (footer, footer_rows) = wallboard_footer(&names, &metadata, priority, content_width, availability);
+        let title = task.title().unwrap_or_default();
         let what = task.what().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
         let mut revision = std::hash::DefaultHasher::new();
         // Hash full WHAT and the actual task update stamp, rather than only its visible excerpt, and
@@ -118,40 +127,77 @@ pub(super) fn read(selection: &TaskSelection, presentation: &Presentation, prere
             wallboard_relation_facts(task.id(), store::relations_of(task.id()).iter().filter_map(Edge::of)),
         )
             .hash(&mut revision);
-        cards.push(Card {
+        drawn.push(DrawnTask {
             id: task.id(),
-            height: wallboard_card_size(presentation, rows, !parent.is_empty()).1,
             title,
             what,
             status,
             priority,
-            parent,
             footer,
+            footer_rows,
             waiting: availability.quiet(),
             revision: revision.finish(),
         });
     }
-    let dependencies: Vec<_> = all_edges.iter().copied().filter(|e| e.kind == RelationKind::DependsOn).collect();
-    let implied = implied(&dependencies);
-    let places: HashMap<_, _> = tasks.iter().enumerate().map(|(i, t)| (t.id(), i)).collect();
-    let arrows = dependencies
+    let edges: Vec<_> = all_relations.iter().filter_map(Edge::of).collect();
+    wallboard_cards(drawn, &edges, presentation)
+}
+
+/// The frame's cards, the tasks `drawn` in their order, each with the line naming the tasks it is part
+/// of, and the arrows between them. Of `edges`, every relation the store holds, only those between two
+/// tasks drawn count, so that nothing on the frame names a task it leaves out.
+fn wallboard_cards(drawn: Vec<DrawnTask>, edges: &[Edge], presentation: &Presentation) -> Cards {
+    let ids: HashSet<_> = drawn.iter().map(|task| task.id).collect();
+    let edges: Vec<_> = edges.iter().copied().filter(|e| wallboard_relation(&ids, e)).collect();
+    let titles: HashMap<_, _> = drawn.iter().map(|task| (task.id, task.title.clone())).collect();
+    let places: HashMap<_, _> = drawn.iter().enumerate().map(|(i, task)| (task.id, i)).collect();
+    let (width, base_height) = wallboard_card_size(presentation, 0, false);
+    let cards: Vec<_> = drawn
         .into_iter()
-        .filter(|e| e.proposed || !implied.contains(&(e.first, e.then)))
-        .map(|e| Arrow { first: places[&e.first], then: places[&e.then], proposed: e.proposed })
+        .map(|task| {
+            let named: Vec<_> =
+                edges.iter().copied().filter(|e| e.kind == RelationKind::SubtaskOf && e.first == task.id).collect();
+            let parent = also_part_of(&named, false, &|id| titles[id].clone());
+            Card {
+                id: task.id,
+                height: wallboard_card_size(presentation, task.footer_rows, !parent.is_empty()).1,
+                title: task.title,
+                what: task.what,
+                status: task.status,
+                priority: task.priority,
+                parent,
+                footer: task.footer,
+                waiting: task.waiting,
+                revision: task.revision,
+            }
+        })
         .collect();
     Cards {
         slot_height: cards.iter().map(|card| card.height).fold(base_height, f64::max),
+        arrows: wallboard_arrows(&edges, &places),
         cards,
-        arrows,
         width,
-        content_width,
-        text_scale,
+        content_width: presentation.node_width as f64,
+        text_scale: presentation.text_scale_percent as f64 / 100.0,
         max_rows: presentation.max_rows,
     }
 }
 
-fn wallboard_relation(ids: &HashSet<EntityId>, from: Option<EntityId>, to: Option<EntityId>) -> bool {
-    from.is_some_and(|id| ids.contains(&id)) && to.is_some_and(|id| ids.contains(&id))
+/// The arrows the frame draws for `edges`, the relations between the cards drawn, which `places`
+/// gives the places of: each dependency, less the accepted ones a chain of others already implies.
+fn wallboard_arrows(edges: &[Edge], places: &HashMap<EntityId, usize>) -> Vec<Arrow> {
+    let dependencies: Vec<_> = edges.iter().copied().filter(|e| e.kind == RelationKind::DependsOn).collect();
+    let implied = implied(&dependencies);
+    dependencies
+        .into_iter()
+        .filter(|e| e.proposed || !implied.contains(&(e.first, e.then)))
+        .map(|e| Arrow { first: places[&e.first], then: places[&e.then], proposed: e.proposed })
+        .collect()
+}
+
+/// Whether the frame draws `edge`: only when it draws the tasks at both its ends, `ids`.
+fn wallboard_relation(ids: &HashSet<EntityId>, edge: &Edge) -> bool {
+    ids.contains(&edge.first) && ids.contains(&edge.then)
 }
 
 /// Whether the wallboard draws a task of `status`, given the date it comes due, if it is not due yet
@@ -162,16 +208,13 @@ fn wallboard_draws(selection: &TaskSelection, status: Option<TaskStatus>, comes_
 
 /// Tasks not yet due leave the drawing here, not the task query: the clock finds the dates to come
 /// among the store's tasks, and a date passing changes nothing a live query could hear.
-fn wallboard_tasks(selection: &TaskSelection) -> (Vec<TaskView>, Vec<RelationView>) {
+fn wallboard_tasks(selection: &TaskSelection) -> Vec<TaskView> {
     let mut tasks: Vec<_> = store::tasks()
         .into_iter()
         .filter(|t| wallboard_draws(selection, t.status().ok(), clock::comes_due(t)))
         .collect();
     tasks.sort_by_key(|t| t.id());
-    let ids: HashSet<_> = tasks.iter().map(|t| t.id()).collect();
-    let relations =
-        store::relations().into_iter().filter(|r| wallboard_relation(&ids, r.from_id().ok(), r.to_id().ok())).collect();
-    (tasks, relations)
+    tasks
 }
 
 /// What the other task of a relation is to a card.

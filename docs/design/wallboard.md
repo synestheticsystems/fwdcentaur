@@ -42,7 +42,8 @@ how to build, configure, connect and run it, and what to do when something is wr
   `wallboard-sound.mjs` the audio, `wallboard-theme.mjs` the palettes and the solar timer, and
   `wallboard-diagnostics.mjs` the diagnostics; the runtime disposes of all of them. The runtime lays
   out with the renderer's own packing, which Rust hands it, when cards that are leaving still need
-  their places and when it fits the graph to the screen. SunCalc (`suncalc.mjs`, BSD-2-Clause,
+  their places and when it fits the graph to the screen; Rust refuses a request no frame it drew
+  could give, and the runtime reports that as the graph's failure (`layout_request.rs`). SunCalc (`suncalc.mjs`, BSD-2-Clause,
   `SUNCALC.md`) computes sunrise and sunset.
 - **The build**, `scripts/build-wallboard.sh`, writes two modules the runtime imports,
   `wallboard-contract.mjs` (the settings contract) and `wallboard-build.mjs` (what this build is),
@@ -63,8 +64,9 @@ how to build, configure, connect and run it, and what to do when something is wr
 ### What the renderer and the packing take from the core
 
 The renderer (`graph/wallboard_render.rs`) and the packing (`layout/wallboard_layout.rs`) are child
-modules of `graph.rs` and `layout.rs`, so they use private items there. Each imports them in one
-`use super::{…}` list, so renaming one in the core fails to compile there:
+modules of `graph.rs` and `layout.rs`, so they use private items there. The packing imports them in
+one `use super::{…}` list, and the renderer in one in each of its modules that reads them, `cards.rs`
+and `markup.rs`, so renaming one in the core fails to compile there:
 
 - From `graph.rs`: `Edge` (its fields `first`, `then`, `kind` and `proposed`, and `Edge::of`),
   `also_part_of`, `implied` and `path`.
@@ -75,8 +77,8 @@ modules of `graph.rs` and `layout.rs`, so they use private items there. Each imp
   `GX`; and the public `Layout`, `Task` and `Drawing`.
 
 A field or method cannot be named in a `use`, so a rename of one fails where the wallboard uses it.
-Their tests are child modules too, and use the Graph page's test helpers `id`, `task`, `waits` and
-`part_of` and its `plan`, and the layout's test helpers `open`, `task` and `crossings_drawn`.
+Their tests are child modules too, and use the Graph page's test helpers `id`, `waits` and `part_of`,
+and the layout's test helpers `open`, `task` and `crossings_drawn`.
 Everything else the wallboard uses is crate-public: `store`'s standing queries and lookups, with
 `open_with` and `Collection`; `session`'s project, client and context, with `wallboard_node` and
 `wallboard_context`; `fmt`'s labels; and `clock`'s `keep_time` and `comes_due`.

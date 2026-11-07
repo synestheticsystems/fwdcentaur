@@ -30,7 +30,9 @@ let layout = input => {
 const snapshot = (tasks, edges = []) => {
   const scale = (settings.text_scale_percent || 100) / 100;
   const width = settings.node_width * scale, height = 149 * scale;
-  const placed = JSON.parse(layout(JSON.stringify({ ...settings, nodes: tasks.map(task => ({...task,height})), edges, node_width: width })));
+  // The request the runtime makes of each card it reads back from a frame (`arrange`).
+  const nodes = tasks.map(task => ({ id: task.id, title: task.title, priority: task.priority ?? 2, status: task.status || 'open', height }));
+  const placed = JSON.parse(layout(JSON.stringify({ nodes, edges, max_rows: settings.max_rows, node_width: width })));
   const svg = ['<svg xmlns="http://www.w3.org/2000/svg" class="dag wallboard-dag" viewBox="0 0 '+placed.width+' '+placed.height+'"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>'];
   for (let i=0;i<edges.length;i++) {
     const [[x,y],[bx,by]]=placed.routes[i], m=(x+bx)/2;

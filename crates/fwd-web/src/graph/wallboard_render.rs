@@ -9,12 +9,12 @@ use crate::{fmt, layout, session, store};
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::EntityId;
 use cards::Cards;
-use fwd_core::model::TaskStatus;
 use leptos::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 mod cards;
+mod layout_request;
 mod markup;
 
 /// The wallboard draws only the selected active statuses, and of those only the tasks that are due.
@@ -72,7 +72,8 @@ pub fn WallboardGraph(presentation: RwSignal<Presentation>, selection: TaskSelec
         };
         if !mounted.unwrap_or(false) {
             let layout =
-                wasm_bindgen::closure::Closure::<dyn Fn(String) -> String>::new(wallboard_layout_json).into_js_value();
+                wasm_bindgen::closure::Closure::<dyn Fn(String) -> String>::new(layout_request::wallboard_layout_json)
+                    .into_js_value();
             wallboard_mount(element.as_ref(), &settings, &layout);
         }
         wallboard_update(element.as_ref(), &svg, loaded, connected, &settings);
@@ -204,70 +205,8 @@ extern "C" {
     fn performance_now() -> f64;
 }
 
-/// The same layout also places a temporary union containing cards leaving the filter. Keeping
-/// them in the layout until their countdown ends prevents another card moving underneath one.
-/// Production hands this function to the runtime through `mount`. It is also a public WASM export
-/// so that the synthetic WASM browser check and the profiler can drive the production layout
-/// without booting the Rust display or connecting to a daemon.
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub fn wallboard_layout_json(input: String) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&input) else {
-        return "null".into();
-    };
-    let Some(nodes) = value["nodes"].as_array() else {
-        return "null".into();
-    };
-    let tasks: Vec<_> = nodes
-        .iter()
-        .map(|node| layout::Task {
-            id: node["id"].as_str().unwrap_or_default().into(),
-            title: node["title"].as_str().unwrap_or_default().into(),
-            priority: node["priority"].as_i64(),
-            status: fmt::status_rank(
-                node["status"].as_str().and_then(|s| s.parse().ok()).unwrap_or(TaskStatus::Proposed),
-            ),
-            band: None,
-        })
-        .collect();
-    let index: HashMap<_, _> = tasks.iter().enumerate().map(|(i, t)| (t.id.as_str(), i)).collect();
-    let pairs: Vec<_> = value["edges"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|edge| Some((*index.get(edge["from"].as_str()?)?, *index.get(edge["to"].as_str()?)?)))
-        .collect();
-    let width = value["node_width"].as_f64().filter(|n| (192.0..=1024.0).contains(n)).unwrap_or(360.0);
-    let rows = value["max_rows"].as_u64().filter(|n| (3..=16).contains(n)).unwrap_or(8) as usize;
-    let height = nodes.iter().filter_map(|node| node["height"].as_f64()).reduce(f64::max).unwrap_or(149.0);
-    let mut drawing = layout::Layout::wallboard(&tasks, &pairs, rows, width, height);
-    let mut selected_rows = rows;
-    if let (Some(viewport_width), Some(viewport_height)) = (
-        value["viewport_width"].as_f64().filter(|n| n.is_finite() && *n > 0.0),
-        value["viewport_height"].as_f64().filter(|n| n.is_finite() && *n > 0.0),
-    ) {
-        let fit = |drawing: &layout::Drawing| (viewport_width / drawing.width).min(viewport_height / drawing.height);
-        // Keep the familiar arrangement on ties. Only reflow when cards become visibly larger.
-        for cap in (3..rows.min(tasks.len())).rev() {
-            let candidate = layout::Layout::wallboard(&tasks, &pairs, cap, width, height);
-            if fit(&candidate) > fit(&drawing) * 1.01 {
-                drawing = candidate;
-                selected_rows = cap;
-            }
-        }
-    }
-    wallboard_card_ports(
-        &mut drawing,
-        &pairs,
-        &nodes.iter().map(|node| node["height"].as_f64().unwrap_or(height)).collect::<Vec<_>>(),
-        height,
-    );
-    serde_json::json!({"width": drawing.width, "height": drawing.height, "rows": selected_rows,
-        "boxes": tasks.iter().zip(&drawing.boxes).map(|(task, (x,y))|
-            serde_json::json!({"id": task.id, "x": x, "y": y})).collect::<Vec<_>>(),
-        "routes": drawing.routes})
-    .to_string()
-}
-
+/// Moves each arrow's ends from the middle of its cards' places, each the height of the tallest card,
+/// to the middle of the cards themselves.
 fn wallboard_card_ports(drawing: &mut layout::Drawing, pairs: &[(usize, usize)], heights: &[f64], slot_height: f64) {
     for (route, &(a, b)) in drawing.routes.iter_mut().zip(pairs) {
         if let Some(first) = route.first_mut() {
