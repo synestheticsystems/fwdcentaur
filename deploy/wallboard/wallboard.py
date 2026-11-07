@@ -31,16 +31,32 @@ def endpoint(settings, name, *, loopback=False):
         raise ValueError("The wallboard must listen on a loopback IP address")
     port = given(value, "port", f"{name}.")
     if type(port) is not int or not 1024 <= port <= 65535:
-        raise ValueError("Ports must be integers from 1024 to 65535")
+        raise ValueError(f"{name}.port must be an integer from 1024 to 65535")
     return f"[{host}]:{port}" if host.version == 6 else f"{host}:{port}"
 
 
+def project_uuid(settings):
+    """The UUID of the project to show. A project_id that is not one, as a string, is refused by name."""
+    value = given(settings, "project_id")
+    # uuid.UUID refuses a malformed string with ValueError, but a value of another type with errors
+    # the launcher does not catch, so the type is checked first.
+    if type(value) is str:
+        try:
+            return str(uuid.UUID(value))
+        except ValueError:
+            pass
+    raise ValueError("project_id must be the project's UUID, as a string")
+
+
 def configuration(settings, dist):
-    project = str(uuid.UUID(given(settings, "project_id")))
+    project = project_uuid(settings)
     listen = endpoint(settings, "listen", loopback=True)
     upstream = endpoint(settings, "upstream")
-    origin = urlsplit(given(settings, "daemon_origin"))
-    if (origin.scheme != "http" or origin.username or origin.password
+    daemon = given(settings, "daemon_origin")
+    # urlsplit raises errors the launcher does not catch for a value that is not a string, so the
+    # type is checked first.
+    origin = urlsplit(daemon) if type(daemon) is str else None
+    if (origin is None or origin.scheme != "http" or origin.username or origin.password
             or origin.path not in ("", "/") or origin.query or origin.fragment
             or not origin.hostname or not ipaddress.ip_address(origin.hostname).is_loopback
             or not origin.port):

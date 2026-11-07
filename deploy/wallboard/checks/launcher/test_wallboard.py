@@ -46,11 +46,26 @@ class ProxyConfiguration(unittest.TestCase):
                            ("upstream", {"host": "127.0.0.1", "port": "12345"}),
                            ("project_id", "bad/project"),
                            ("daemon_origin", "http://192.0.2.2:12345"),
-                           ("daemon_origin", "http://127.0.0.1:12345/stop")]:
+                           ("daemon_origin", "http://127.0.0.1:12345/stop"),
+                           ("daemon_origin", 123)]:
             with self.subTest(key=key, value=value):
                 settings = dict(self.settings, **{key: value})
-                with self.assertRaises((ValueError, TypeError)):
+                with self.assertRaises(ValueError):
                     configuration(settings, self.dist)
+
+    def test_refuses_a_port_it_cannot_use_by_its_field(self):
+        for key in ("listen", "upstream"):
+            for port in ("3000", 3000.0, True, None, 1023, 65536):
+                with self.subTest(key=key, port=port):
+                    settings = dict(self.settings, **{key: dict(self.settings[key], port=port)})
+                    with self.assertRaisesRegex(ValueError, rf"^{key}\.port must be an integer from 1024 to 65535$"):
+                        configuration(settings, self.dist)
+
+    def test_refuses_a_project_id_that_is_not_a_uuid_string_by_name(self):
+        for value in (123, None, True, ["11111111-1111-4111-8111-111111111111"], {}, "bad/project"):
+            with self.subTest(project_id=value):
+                with self.assertRaisesRegex(ValueError, r"^project_id must be the project's UUID, as a string$"):
+                    configuration(dict(self.settings, project_id=value), self.dist)
 
     def test_refuses_a_configuration_missing_a_field_it_has_no_default_for_by_name(self):
         for key in ("project_id", "listen", "upstream", "daemon_origin"):
@@ -66,13 +81,18 @@ class ProxyConfiguration(unittest.TestCase):
                         configuration(dict(self.settings, **{key: given}), self.dist)
 
     def test_the_launcher_stops_on_a_refused_configuration_with_its_sentence_alone(self):
-        settings = {name: value for name, value in self.settings.items() if name != "listen"}
+        missing = {name: value for name, value in self.settings.items() if name != "listen"}
         config = Path(self.temp.name) / "wallboard.json"
-        config.write_text(json.dumps(settings))
-        run = subprocess.run([sys.executable, str(LAUNCHER / "wallboard.py"), "--config", str(config), "--check"],
-                             capture_output=True, text=True)
-        self.assertEqual(run.returncode, 1)
-        self.assertEqual(run.stderr, f"{config}: listen is missing; the launcher has no default for it (README.md, Configuring)\n")
+        for settings, sentence in [(missing, "listen is missing; the launcher has no default for it (README.md, Configuring)"),
+                                   (dict(self.settings, project_id=123), "project_id must be the project's UUID, as a string"),
+                                   (dict(self.settings, daemon_origin=123),
+                                    "daemon_origin must be the unchanged daemon's http://loopback-IP:port")]:
+            with self.subTest(sentence=sentence):
+                config.write_text(json.dumps(settings))
+                run = subprocess.run([sys.executable, str(LAUNCHER / "wallboard.py"), "--config", str(config), "--check"],
+                                     capture_output=True, text=True)
+                self.assertEqual(run.returncode, 1)
+                self.assertEqual(run.stderr, f"{config}: {sentence}\n")
 
     def test_display_settings_reach_the_browser_and_preserve_old_configuration(self):
         def public(settings):
