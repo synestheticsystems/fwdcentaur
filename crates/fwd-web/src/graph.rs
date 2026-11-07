@@ -285,7 +285,6 @@ pub fn GraphPage(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoic
 // The wallboard's renderer draws with this page's own edges, implied dependencies, parent lines and
 // paths, so it is a child of this module, built only with the wallboard feature.
 #[cfg(feature = "wallboard")]
-#[path = "wallboard_render.rs"]
 mod wallboard_render;
 #[cfg(feature = "wallboard")]
 pub(crate) use wallboard_render::WallboardGraph;
@@ -1079,12 +1078,12 @@ fn remember_order(order: Order) {
 mod tests {
     use super::*;
 
-    // The wallboard renderer's tests build their tasks and edges with these four as well.
+    // The wallboard renderer's tests build their edges with `id`, `waits` and `part_of` as well.
     pub(super) fn id(n: u8) -> EntityId {
         EntityId::from_bytes([n; 32])
     }
 
-    pub(super) fn task(n: u8, scope: Option<u8>, closed: bool) -> TaskFacts {
+    fn task(n: u8, scope: Option<u8>, closed: bool) -> TaskFacts {
         TaskFacts { id: id(n), closed, not_yet_due: false, scopes: scope.map(id).into_iter().collect() }
     }
 

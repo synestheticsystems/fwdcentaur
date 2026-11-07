@@ -15,7 +15,7 @@ publish = false
 # The wallboard (docs/design/wallboard.md): the kiosk display of one project's graph, built from
 # wallboard.html by scripts/build-wallboard.sh in place of the app. The page the daemon embeds is
 # built without it.
-wallboard = []
+wallboard = ["dep:serde", "dep:unicode-width"]
 
 [dependencies]
 fwd-core = { path = "../fwd-core", default-features = false, features = ["wasm"] }
@@ -41,6 +41,12 @@ web-sys = { version = "0.3", features = [
     "DomRect", "MouseEvent", "PointerEvent", "UiEvent", "FocusEvent", "MediaQueryList", "CssStyleDeclaration",
 ] }
 send_wrapper = "0.6"
+# The wallboard reads its runtime's layout requests as typed values, so that one no frame could give
+# is refused.
+serde = { version = "1", features = ["derive"], optional = true }
+# The wallboard reckons the columns a character takes by its East Asian Width; the CJK tables, which
+# count ambiguous characters wide, it never reads.
+unicode-width = { version = "0.2", default-features = false, optional = true }
 serde_json = "1"
 anyhow = "1"
 tracing = "0.1"

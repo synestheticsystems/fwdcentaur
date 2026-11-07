@@ -17,8 +17,8 @@ __pycache__/
 # What scripts/build-wallboard.sh writes, and a display's own configuration and the files its
 # launcher writes beside it (deploy/wallboard/README.md)
 crates/fwd-web/wallboard-dist
-crates/fwd-web/src/wallboard-build.mjs
-crates/fwd-web/src/wallboard-contract.mjs
+crates/fwd-web/src/wallboard/wallboard-build.mjs
+crates/fwd-web/src/wallboard/wallboard-contract.mjs
 deploy/wallboard/dist
 deploy/wallboard/build-info.json
 deploy/wallboard/LICENSE

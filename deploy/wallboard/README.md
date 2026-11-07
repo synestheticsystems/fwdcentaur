@@ -3,8 +3,9 @@
 The wallboard shows one project's task graph on a dedicated monitor, all day, with no one at the
 keyboard: the work in the statuses you choose, what waits on what, and what changed recently. This
 directory holds what runs beside the display: the launcher (`wallboard.py`), its settings contract,
-an example configuration, an example systemd unit, the sound cues and the tests. The browser page
-itself is the web crate built with its `wallboard` feature (`crates/fwd-web`).
+an example configuration, an example systemd unit and the sound cues, with the wallboard's checks in
+`checks/`. The browser page itself is the web crate built with its `wallboard` feature
+(`crates/fwd-web`).
 
 The page is an ephemeral Ankurah browser node, like the web UI the daemon serves. It reads one
 project from a daemon that already runs, through a proxy the launcher configures, and writes
@@ -27,7 +28,7 @@ To build, on any machine with a checkout of this repository:
   `TRUNK_OFFLINE` unset, or it cannot use them.
 
 To run the checks as well: Node 22 or newer, with npm. The browser checks use Playwright 1.62.1, as
-`package-lock.json` locks it, and the Chromium build that Playwright version pins.
+`checks/package-lock.json` locks it, and the Chromium build that Playwright version pins.
 
 To run the wallboard, on the machine attached to the display:
 
@@ -50,10 +51,15 @@ bash scripts/build-wallboard.sh
 ```
 
 It builds `crates/fwd-web` with the `wallboard` feature, from `crates/fwd-web/wallboard.html`, and
-assembles the bundle here: `dist/` (the page, its WebAssembly, its JavaScript modules and the
-sounds), `build-info.json` (the commit it was built from and a hash of everything it was built
-from) and `LICENSE`, beside the launcher. It builds neither the daemon nor the page the daemon
-embeds (`scripts/build-web.sh`).
+assembles the bundle here: `dist/` (the page, its WebAssembly, its JavaScript modules, the sounds,
+and `NOTICE.txt`, which names who made the bundle, where its source is, and the licenses of what
+others made in it, with their texts), `build-info.json` (the commit it was built from and a hash of
+everything it was built from) and `LICENSE`, beside the launcher. It builds locked, never updating
+the lockfile, and builds neither the daemon nor the page the daemon embeds (`scripts/build-web.sh`).
+`WALLBOARD_REMAP_PATHS=1` builds as an official build does: it keeps the paths of your home,
+Cargo's and the checkout out of the WebAssembly, which a bundle built for others to run should not
+name, and fails if any is left. It refuses `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, which Cargo
+would take in place of the remapping.
 
 To check it, with synthetic data only and never a daemon:
 
@@ -77,8 +83,7 @@ keep it when you update the wallboard.
 
 | Field | Meaning |
 | --- | --- |
-| `project_id` | The UUID of the project to show, across all its scopes. In one of the project's repositories, `fwd daemon status` prints it as `project`. |
-| `project_name` | A label for the configuration; it does not choose the project. |
+| `project_id` | Required. The UUID of the project to show, across all its scopes. In one of the project's repositories, `fwd daemon status` prints it as `project`. |
 | `statuses` | The statuses to show, from `proposed`, `open`, `in_progress` and `in_review`; `["in_progress"]` by default. Done, cancelled and rejected tasks are never shown. |
 | `max_rows` | The most cards in one column, from 3 to 16; 8 by default. More cards make more columns, so no task is dropped. |
 | `node_width` | A card's width at 100% text size, from 240 to 640; 360 by default. |
@@ -90,13 +95,14 @@ keep it when you update the wallboard.
 | `replay.interval_seconds` | How often replay runs, from 60 to 3600 seconds; 180 by default. |
 | `sound.enabled` | A short sound for each batch of live changes; `false` by default. Below. |
 | `sound.volume` | Its level from 0 to 100; 30 by default. The machine's and the monitor's own volume apply as well. |
-| `listen.host`, `listen.port` | Where the launcher serves the page; `127.0.0.1:3000` by default. The host must be a loopback address. |
-| `upstream.host`, `upstream.port` | Where the launcher's proxy reaches the daemon: an IP address and a port, normally on loopback, the daemon's own or a tunnel's (below). |
-| `daemon_origin` | The daemon's own address, `http://127.0.0.1:<port>`, as the daemon knows it. The proxy presents it as the Host and Origin of the one connection it passes on, which the daemon checks. |
+| `listen.host`, `listen.port` | Required. Where the launcher serves the page, `127.0.0.1:3000` in the example. The host must be a loopback address. |
+| `upstream.host`, `upstream.port` | Required. Where the launcher's proxy reaches the daemon: an IP address and a port, normally on loopback, the daemon's own or a tunnel's (below). |
+| `daemon_origin` | Required. The daemon's own address, `http://127.0.0.1:<port>`, as the daemon knows it. The proxy presents it as the Host and Origin of the one connection it passes on, which the daemon checks. |
 
 The example's port, 12345, stands in for the daemon's: `fwd daemon status` on the daemon's machine
-prints it as `port`. Unknown keys are ignored, a missing `schema_version` means version 1, and a
-value the contract does not allow stops the launcher with the field it refused.
+prints it as `port`. The launcher has no default for the four required fields, and stops with a
+sentence naming one that is missing. Unknown keys are ignored, a missing `schema_version` means
+version 1, and a value the contract does not allow stops the launcher with the field it refused.
 
 For the day and night palettes, give the display's position; city-level precision is enough. These
 coordinates are Greenwich's:
@@ -118,9 +124,10 @@ from the SunCalc library bundled with the page, with no location or weather serv
 ## Connecting to the daemon
 
 The daemon listens on loopback, on the port it had last time when that port is free and on another
-otherwise, so check `fwd daemon status` after a restart. It runs while anything uses it, and the
-wallboard's connection counts: once the wallboard has joined, the daemon stays up. The wallboard
-never starts it, so start it with `fwd daemon start`, or any `fwd` command, on its machine.
+otherwise. It runs until it is stopped, with `fwd daemon stop` or a signal, and a restart may give
+it another port, so check `fwd daemon status` after one and correct `upstream`, or the tunnel, and
+`daemon_origin`. The wallboard never starts it, so start it with `fwd daemon start`, or any `fwd`
+command, on its machine.
 
 On the same machine as the daemon, `upstream` and `daemon_origin` name the same port:
 `"upstream": {"host": "127.0.0.1", "port": <port>}` and `"daemon_origin": "http://127.0.0.1:<port>"`.
@@ -163,24 +170,25 @@ chromium --kiosk --autoplay-policy=no-user-gesture-required http://127.0.0.1:300
 ```
 
 To run the launcher as a service, copy `dist/` and the files `wallboard.py`, `settings.py`,
-`wallboard-contract.json`, `build-info.json`, `wallboard-app.service`, `README.md` and `LICENSE`
-to `/srv/wallboard/current`, with your `wallboard.json`, owned by the user who runs the display,
-and install `wallboard-app.service` as a user unit there:
+`wallboard-contract.json`, `build-info.json`, `wallboard-launcher.service`, `README.md` and
+`LICENSE` to `/srv/wallboard/current`, with your `wallboard.json`, owned by the user who runs the
+display, and install `wallboard-launcher.service` as a user unit there:
 
 ```sh
 cd /srv/wallboard/current
 python3 wallboard.py --check
 mkdir -p ~/.config/systemd/user
-cp wallboard-app.service ~/.config/systemd/user/
+cp wallboard-launcher.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now wallboard-app.service
+systemctl --user enable --now wallboard-launcher.service
 loginctl enable-linger "$USER"   # so that it starts at boot, before anyone logs in
 ```
 
 To update, build again and copy the whole `dist/` tree and the files `wallboard.py`, `settings.py`,
 `wallboard-contract.json`, `build-info.json`, `README.md` and `LICENSE` over the installed ones,
-keeping `wallboard.json`. Then restart `wallboard-app.service`, which serves only the files it found
-when it started, and reload the page. A configuration change needs the same restart and reload.
+keeping `wallboard.json`. Then restart `wallboard-launcher.service`, which serves only the files it
+found when it started, and reload the page. A configuration change needs the same restart and
+reload.
 
 ## When something is wrong
 
@@ -189,8 +197,8 @@ when it started, and reload the page. A configuration change needs the same rest
   `daemon_origin` name its current port, and that the tunnel is up when there is one. The page
   joins on its own once the daemon answers.
 - **The page does not load.** The launcher is not running, or refused its configuration:
-  `python3 wallboard.py --check` says why, and `journalctl --user -u wallboard-app.service` shows the
-  service's log.
+  `python3 wallboard.py --check` says why, and `journalctl --user -u wallboard-launcher.service`
+  shows the service's log.
 - **OFFLINE, Last view.** The connection dropped after the wallboard had joined. It keeps the same
   page, node and last view and retries, at intervals growing from half a second to ten seconds; no
   reload is needed. A browser restarted while the daemon is out of reach waits for it: the page

@@ -220,20 +220,22 @@ pub async fn boot() -> Result<(), String> {
 }
 
 /// The wallboard's node: one ephemeral browser node for the page's whole life, on the project the
-/// wallboard's configuration names. Its connector starts even while no daemon answers, since the
-/// connector retries. Unlike `boot`, it asks no `/health`, lists no projects, acts as no principal,
-/// sets no deadline for joining and never reloads for a new daemon build. Its IndexedDB database is
-/// a cache for this page load, not a durable node's store.
+/// wallboard's configuration names by its id. Its connector starts even while no daemon answers,
+/// since the connector retries. Unlike `boot`, it asks no `/health`, lists no projects, acts as no
+/// principal, sets no deadline for joining and never reloads for a new daemon build. Its IndexedDB
+/// database is a cache for this page load, not a durable node's store.
 #[cfg(feature = "wallboard")]
-pub async fn wallboard_node(project: Project) -> Result<(), String> {
-    let storage = IndexedDBStorageEngine::open(&fresh_database(&project.id).await)
+pub async fn wallboard_node(project_id: &str) -> Result<(), String> {
+    let storage = IndexedDBStorageEngine::open(&fresh_database(project_id).await)
         .await
         .map_err(|e| format!("The browser could not open its graph cache: {e}"))?;
     let node = Node::new(Arc::new(storage), PermissiveAgent::new());
-    let client = WebsocketClient::new(node.clone(), &ws_url(None, &project.id))
+    let client = WebsocketClient::new(node.clone(), &ws_url(None, project_id))
         .map_err(|e| format!("The graph connection could not start: {e}"))?;
     NODE.set(node).map_err(|_| "The wallboard node already started")?;
     CLIENT.set(SendWrapper::new(client)).map_err(|_| "The wallboard connection already started")?;
+    // The wallboard lists no projects, so it knows the project by no name, and shows none.
+    let project = Project { id: project_id.into(), name: String::new(), error: None };
     PROJECT.set(project).map_err(|_| "The wallboard project already opened")?;
     CurrentObserver::set(ReactiveGraphObserver::new());
     Ok(())

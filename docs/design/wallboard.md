@@ -28,51 +28,72 @@ how to build, configure, connect and run it, and what to do when something is wr
   Origin to the daemon's own (`daemon.md`, the Host and Origin checks). Everything else answers 404.
   The page reaches the daemon only through it, on loopback, directly or through an SSH tunnel.
 - **Rust** draws: `wallboard.rs` fetches the configuration and mounts the display, and works out each
-  card's availability from the prerequisites it watches; `wallboard_settings.rs` holds the typed
-  settings; the renderer, `wallboard_render.rs`, and the packing, `wallboard_layout.rs`, are child
-  modules of `graph.rs` and `layout.rs`, so that they draw with the Graph page's own code. The
-  renderer gives the runtime each frame as SVG markup, with the settings revision it was drawn under.
-- **JavaScript** presents: `wallboard-runtime.mjs` owns the live and replay state, the timers, the
-  observers and the DOM. `wallboard-history.mjs` owns the witnessed history and the reading of
-  snapshots, `wallboard-sound.mjs` the audio, `wallboard-theme.mjs` the palettes and the solar timer,
-  and `wallboard-diagnostics.mjs` the diagnostics; the runtime disposes of all of them. The runtime
-  lays out with the renderer's own packing, which Rust hands it, when cards that are leaving still
-  need their places and when it fits the graph to the screen. SunCalc (`suncalc.mjs`, BSD-2-Clause,
-  `SUNCALC.md`) computes sunrise and sunset.
+  card's availability from the prerequisites it watches; its child `wallboard/settings.rs` holds the
+  typed settings; the renderer, `graph/wallboard_render.rs`, and the packing,
+  `layout/wallboard_layout.rs`, are child modules of `graph.rs` and `layout.rs`, so that they draw
+  with the Graph page's own code. The renderer gives the runtime each frame as SVG markup, with the
+  settings revision it was drawn under. It draws in three stages, each run again only when what it
+  reads changes: the cards, read from the store; their packing, which reads only their order, the
+  arrows between them, their sizes and the row cap; and the frame's SVG, the only stage that reads
+  the counts of messages, so that a new message never packs the cards again.
+- **JavaScript** presents, from `crates/fwd-web/src/wallboard/` beside the stylesheet:
+  `wallboard-runtime.mjs` owns the live and replay state, the timers, the observers and the DOM.
+  `wallboard-history.mjs` owns the witnessed history and the reading of snapshots,
+  `wallboard-sound.mjs` the audio, `wallboard-theme.mjs` the palettes and the solar timer, and
+  `wallboard-diagnostics.mjs` the diagnostics; the runtime disposes of all of them. The runtime lays
+  out with the renderer's own packing, which Rust hands it, when cards that are leaving still need
+  their places and when it fits the graph to the screen; Rust refuses a request no frame it drew
+  could give, and the runtime reports that as the graph's failure (`layout_request.rs`). SunCalc
+  (`suncalc.mjs`, BSD-2-Clause, `SUNCALC.md`) computes sunrise and sunset.
 - **The build**, `scripts/build-wallboard.sh`, writes two modules the runtime imports,
   `wallboard-contract.mjs` (the settings contract) and `wallboard-build.mjs` (what this build is),
   and the bundle's `build-info.json`: the commit it was built from and `content_sha256`, a hash of
   every file the bundle is built from, committed or not, so that any change to them makes another
   build (`scripts/wallboard_identity.py`). Those files are `crates/fwd-core` and `crates/fwd-web`;
-  the root `Cargo.toml`, whose workspace settings and dependencies `fwd-core` inherits;
-  `deploy/wallboard`; the build script and `wallboard_identity.py` themselves; and
-  `.cargo/config.toml`, `rust-toolchain.toml` and `LICENSE`. Its test checks that they hold every
-  manifest and the lockfile Cargo reads for the build, as `cargo metadata` names them, and that a
-  dependency feature `fwd-core` inherits from the root manifest changes the hash. The build never
-  builds or replaces the daemon or the page the daemon embeds, and it builds in a target directory
-  of its own, `crates/fwd-web/target/wallboard`: trunk copies every module it finds in its target
-  directory into the page it builds, so a shared one would carry the wallboard's modules into the
-  daemon's page.
+  the root `Cargo.toml`, whose workspace settings and dependencies `fwd-core` inherits; the settings
+  contract and the sounds in `deploy/wallboard`; the build script, `wallboard_identity.py` and
+  `wallboard_notices.py`; and `.cargo/config.toml`, `rust-toolchain.toml` and `LICENSE`. The
+  launcher and the checks beside the bundle are not among them, so changing either makes no new
+  build. Its tests check that they hold every manifest and the lockfile Cargo reads for the build,
+  as `cargo metadata` names them, that a dependency feature `fwd-core` inherits from the root
+  manifest changes the hash, and that editing a check or the launcher does not. The build runs
+  locked, so it reads the lockfile it hashed as it was hashed. It never builds or replaces the
+  daemon or the page the daemon embeds, and it builds in a target directory of its own,
+  `crates/fwd-web/target/wallboard`: trunk copies every module it finds in its target directory into
+  the page it builds, so a shared one would carry the wallboard's modules into the daemon's page,
+  and the build empties wasm-bindgen's output there first, which keeps the modules of earlier
+  builds. The bundle says what it contains in `dist/NOTICE.txt` (`scripts/wallboard_notices.py`):
+  fwd's copyright and license and where its source is, then SunCalc and every crate compiled into
+  its WebAssembly, with the license texts each ships. A crate whose package ships none is taken
+  under Apache-2.0 when its license offers that; otherwise the notice carries its MIT text, kept in
+  `crates/fwd-web/licenses` as taken from its repository at the version locked (SPDX's for erased,
+  whose repository holds none), and it refuses to be written while a crate has no text. An official build sets
+  `WALLBOARD_REMAP_PATHS=1`, which remaps the builder's home, Cargo home and checkout in the paths
+  rustc writes into the WebAssembly's panic messages, where they would otherwise name the builder's
+  directories. Such a build refuses `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, which Cargo would take
+  in place of the remapping and of `.cargo/config.toml`'s flags, and fails if the WebAssembly still
+  names any of those directories; continuous integration builds so.
 
 ### What the renderer and the packing take from the core
 
-The renderer (`wallboard_render.rs`) and the packing (`wallboard_layout.rs`) are child modules of
-`graph.rs` and `layout.rs`, so they use private items there. Each imports them in one `use super::{…}`
-list, so renaming one in the core fails to compile there:
+The renderer (`graph/wallboard_render.rs`) and the packing (`layout/wallboard_layout.rs`) are child
+modules of `graph.rs` and `layout.rs`, so they use private items there. The packing imports them in
+one `use super::{…}` list, and the renderer in one in each of its modules that reads them, `cards.rs`
+and `markup.rs`, so renaming one in the core fails to compile there:
 
 - From `graph.rs`: `Edge` (its fields `first`, `then`, `kind` and `proposed`, and `Edge::of`),
   `also_part_of`, `implied` and `path`.
-- From `layout.rs`: `Group` (its fields `task`, `before`, `after`, `chains`, `task_height` and `gap`,
-  and its methods `new`, `columns_by_tie`, `order_auto`, `needs`, `pulled`, `place`, `places` and
-  `crossings`); `Placed` and `Line`, built field by field; `urgency`, `numbered`, `without_loops`,
-  `columns_of`, `groups_of` and `spread_ends_with`; the constants `PAD`, `W` and `GX`; and the
-  public `Layout`, `Task` and `Drawing`.
+- From `layout.rs`: `Group` (its fields `task`, `before`, `after`, `chains`, `task_height` and
+  `row_gap`, and its methods `new`, `columns_by_tie`, `order_auto`, `needs`, `pulled`, `place`,
+  `places` and `crossings`); `Placed` and `Line`, built field by field; `urgency`, `numbered`,
+  `without_loops`, `columns_of`, `groups_of` and `spread_ends_with`; the constants `PAD`, `W` and
+  `GX`; and the public `Layout`, `Task` and `Drawing`.
 
 A field or method cannot be named in a `use`, so a rename of one fails where the wallboard uses it.
-Their tests are child modules too, and use the Graph page's test helpers `id`, `task`, `waits` and
-`part_of` and its `plan`, and the layout's test helpers `open`, `task` and `crossings_drawn`.
+Their tests are child modules too, and use the Graph page's test helpers `id`, `waits` and `part_of`,
+and the layout's test helpers `open`, `task` and `crossings_drawn`.
 Everything else the wallboard uses is crate-public: `store`'s standing queries and lookups, with
-`open_with_predicate`; `session`'s project, client and context, with `wallboard_node` and
+`open_with` and `Collection`; `session`'s project, client and context, with `wallboard_node` and
 `wallboard_context`; `fmt`'s labels; and `clock`'s `keep_time` and `comes_due`.
 
 ## Configuration
@@ -80,9 +101,9 @@ Everything else the wallboard uses is crate-public: `store`'s standing queries a
 `deploy/wallboard/wallboard-contract.json` is the settings contract: the types, defaults, enums and
 limits of every setting. It is a small format of its own, not JSON Schema. The build turns it into a
 JavaScript module; Python and Rust read the JSON. All three run the cases in
-`deploy/wallboard/settings-cases.json`, each named for its scenario. Known settings are checked
-strictly; unknown keys are ignored, a retired replay setting among them, so that the host can keep
-its own keys beside the settings. A missing `schema_version` means version 1, and another version is
+`deploy/wallboard/checks/settings-cases.json`, each named for its scenario. Known settings are checked
+strictly; unknown keys are ignored, so that the launcher can keep its own keys beside the
+settings. A missing `schema_version` means version 1, and another version is
 refused. `theme_schedule: null` means a palette chosen by hand, and an enabled schedule needs both
 coordinates.
 
@@ -120,15 +141,35 @@ shorter, wider arrangements and keeps one only when it makes the cards visibly l
 familiar one on a near tie; a resize lays out again with the same code, through a debounced
 observer, and records no change.
 
+Rust cannot measure the fonts the display draws with, so it wraps and shortens a card's text by
+columns: a character takes the columns Unicode's East Asian Width gives it, as the `unicode-width`
+crate reads it, one for most and two for a wide or fullwidth one, such as CJK and most emoji, which
+fonts draw about a full em wide (`graph/wallboard_render/columns.rs`). The pictographs from U+1F300
+to U+1F5FF take two, though Unicode calls some of them, such as 🌡, Neutral, since Chromium draws
+them as pictures two columns wide; and the emoji presentation selector takes one, so that a
+one-column symbol it makes a picture, such as the ⚠ of ⚠️, takes two with it. Measured in Chromium in Arial and
+Helvetica, whose metrics the fonts Raspberry Pi OS draws for them share, lower-case text runs about
+a tenth narrower than its columns, wide characters fit in two columns each, and capitals run a tenth
+to a fifth wider. So each card's text is clipped to the card: what runs past it, as a title in
+capitals can, never shows outside it.
+
 A card faded to half its opacity is blocked by an unfinished accepted prerequisite or held, and says
 which, Blocked or On hold, with its status and priority unchanged. A cancelled or rejected
 prerequisite reads Check dependency, and one that cannot be read Dependency unknown. Availability
 comes from exact-ID queries of the prerequisites of the cards shown, which close when no card needs
-them, so the display never loads the backlog of finished tasks; a proposed dependency blocks nothing.
+them, so the only finished tasks the display loads are those prerequisites; a proposed dependency
+blocks nothing.
+
+Beside its tasks the display reads the project's relations, scopes, principals and messages whole,
+for its arrows, scope chips, assignees and counts, and caches them for the page's life. It opens no
+highlights or decisions, which it never shows, and its readiness waits for no query it did not open
+(`store::Collection`).
 
 A status row above the graph says CONNECTING until the first graph, then LIVE, SYNCING while it
 catches up, OFFLINE with the last view while the connection is down, STALE when a frame could not be
 drawn or settings were refused, and during replay the age and the counts of the changes it plays.
+Replay never covers the others (Replay, below), and while it plays, the connection's own indicator
+shows in the corner.
 
 ### Live changes
 
@@ -156,17 +197,32 @@ with four seconds between cues; a cue that cannot play in time is dropped, never
 late. Replay, loading, a hidden page and reconnect catch-up stay silent, audio rests between cues,
 and a failure of audio never stops the graph.
 
+Every duration here, a cue's, the wave's, the movement's, a replay step's and the four seconds
+between sounds, runs on the page's monotonic clock, so that a correction of the wall clock, which a
+Raspberry Pi with no clock of its own receives from the network after it starts, neither stretches a
+cue nor cuts it short. The wall clock stamps the history and dates replay ages and the theme's
+schedule.
+
 ### Replay
 
 Every `replay.interval_seconds`, the wallboard replays the newest changes it witnessed: snapshots it
 saved itself, stamped when it saw them, in this browser's local storage. It is not an Ankurah history:
 task timestamps cannot rebuild an old WHAT, priority or status. The history keeps at most 120 batches
 and 2 MiB, with no age limit, so a quiet display can replay days back and a busy one only minutes.
-Changes seen within 30 seconds of each other, by one build, make one group. Replay plays at most five
+It keeps its entries in the order the display saw them. A wall clock stepped back leaves those seen
+before the step stamped ahead of now: they move back together, never dropped, keeping their order
+and spacing and so the groups they make, the newest of them more than 30 seconds before the first
+entry seen after the step, or before now, so that no group spans the step. Changes seen within 30
+seconds of each other, by one build, make one group. Replay plays at most five
 groups, oldest first, for four seconds each, and stops within 23 seconds, back at the current graph;
 groups with no net change are skipped, and a fresh live change ends it at once. In replay a departing
 card fades over three seconds, with no hold first, and arrival highlights finish in three seconds,
 so that each step settles before the next.
+
+Replay starts only from a live view the status row calls LIVE: connected, loaded and settled, with no
+failure standing and its own cues ended. An outage, a catch-up and a STALE view keep their status in
+view for as long as they last, however many intervals pass, and a disconnect, a refused revision or
+a frame that cannot be read ends a replay already playing.
 
 A history belongs to one project, set of statuses, card width, row limit and text size; a change to
 any of them starts a new one, and the history saved for any other is removed at that origin. Saved
@@ -269,9 +325,11 @@ clock.
 | `latest.baselineEnded` | The latest end of a quiet wait: at a cold start, after a reconnect, or after a frame the runtime held back while connected. On an armed display, new content is not on screen yet at this mark. |
 | `latest.catchUpApplied` | The latest time an armed display applied what a quiet wait held back, after its batch wait and wave; at once if nothing differed, or when a frame of new card shapes replaced it first. Cards may still be moving, and a failed draw does not count. A cold start does not set it: `milestones.armed` presents the first graph. |
 
-`timings.rustRender` counts Rust's recomputations of the drawing and totals their time;
-`timings.render` is the DOM update, `snapshot` the reading of SVG, `layout` the fitting and the layout
-of departures, and `persistence` the saving of history.
+Rust draws a frame in three stages, each timed apart: `timings.rustCards` counts its readings of the
+cards from the store, `timings.rustPacking` its packings of them, and `timings.rustMarkup` its
+writings of the frame's SVG, each with their total time. `timings.render` is the DOM update,
+`snapshot` the reading of SVG, `layout` the fitting and the layout of departures, and `persistence`
+the saving of history.
 
 ### Measuring a cold start and a reconnect
 
@@ -314,20 +372,20 @@ These times do not establish Ankurah's convergence. `store::standing_loaded` lat
 daemon has first answered every standing query, and stays true for the page's life, so a reconnect
 has no signal that the answers are complete. A reconnect's stages are the connection coming back and
 a deliberate quiet wait, and cannot separate Ankurah's catch-up from that wait; they name no
-bottleneck. Compare the `timings.rustRender` and `timings.render` totals with the stage they fall
+bottleneck. Compare the totals of Rust's three timings and `timings.render` with the stage they fall
 in: on a cold start, the stage that dominates is the one to work on, not the layer busy last. For a
 representative update or an idle interval, sample before and after and subtract.
 
 ### Profiling the presentation with synthetic data
 
-`deploy/wallboard/profile-browser.cjs` measures the presentation only: the production WASM layout and
+`deploy/wallboard/checks/browser/profile.cjs` measures the presentation only: the production WASM layout and
 runtime, drawing a synthetic graph at 3840×2160 with no Ankurah connection. It reports the cold start
 of the presentation, the reconnect's quiet wait, the main thread's idle use and the timing totals,
 and its `kind` says that it leaves out Ankurah's synchronization. After `scripts/build-wallboard.sh`
 and the check script's `npm ci`:
 
 ```sh
-PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/profile-browser.cjs
+PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/checks/browser/profile.cjs
 ```
 
 It launches its own browser; `TEST_CDP` attaches it to a separately started test browser instead,
@@ -339,27 +397,37 @@ machine, not a claim about another.
 
 ## Checks
 
+The checks live in `deploy/wallboard/checks/`, apart from the bundle and from what its build identity
+hashes: `launcher/` holds the launcher's and the settings contract's Python tests, `unit/` the
+runtime's unit tests, `browser/` the browser checks with their fixture page and server and the
+profiler, and `scratch-daemon/` the scratch-daemon test's harness, with its unit test beside it.
+`settings-cases.json` holds the cases the contract's three readers share, and the two opt-in
+integration tests sit beside these directories.
+
 `scripts/check-wallboard.py` runs every check that needs no daemon, with synthetic data only. It
 installs the locked Playwright (`--install-browser` adds its pinned Chromium), runs the web crate's
 native tests with the `wallboard` feature, which cover the renderer, packing, settings and
 availability, and without it; clippy for wasm32 with and without the feature; the crate's rustfmt
-check; the launcher's and the settings contract's Python tests; the build identity's tests
-(`scripts/test_wallboard_identity.py`); the build; the runtime's unit tests in Node (diagnostics,
+check; the launcher's and the settings contract's Python tests; the tests of the build's identity,
+notice and refusals (`scripts/test_wallboard_identity.py`, `scripts/test_wallboard_notices.py`,
+`scripts/test_wallboard_build.py`); the build; the runtime's unit tests in Node (diagnostics,
 history and change detection, settings, themes and the scratch test's isolation); and the browser
 checks, each against the production runtime, most of them on a virtual clock: motion and replay,
-membership changes, settings revisions, screen fitting, diagnostics, sound, and the production WASM
-layout driving the runtime. Continuous integration runs the same checks, the Rust and Python ones in
-its `rust` job and the rest in its `wallboard` job.
+when replay may start, the wall clock stepping during cues, membership changes, settings revisions,
+screen fitting, diagnostics, sound, and the production WASM layout driving the runtime. Continuous
+integration runs the same checks, the Rust and Python ones in its `rust` job and the rest in its
+`wallboard` job.
 
 Two integration tests stay opt-in, since each needs what the suite never touches.
 
-`deploy/wallboard/test-browser.cjs` reads a live project through a daemon that already runs. It needs
-Caddy, the locked Playwright that the check script installs, and the configuration of an existing
-project with tasks in the statuses it shows:
+`deploy/wallboard/checks/test-live-daemon.cjs` reads a live project through a daemon that already
+runs. It needs Caddy, the locked Playwright that the check script installs, and the configuration of
+an existing project with tasks in the statuses it shows:
 
 ```sh
 WALLBOARD_CONFIG=/path/to/wallboard.json CADDY=/path/to/caddy \
-  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/test-browser.cjs
+  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright \
+  node deploy/wallboard/checks/test-live-daemon.cjs
 ```
 
 It runs the launcher on a free port with a relay of its own in front of the configured daemon,
@@ -368,28 +436,34 @@ through the outage, the reconnect with the same node and its subscriptions sent 
 controls, the statuses shown, the fit to the screen in both orientations and the proxy's refusals. It
 never starts, stops, configures or writes to the daemon.
 
-`deploy/wallboard/test-scratch-daemon.cjs` drives the built bundle against a daemon it starts itself,
-in real time and with real writes. It covers the Rust wiring the synthetic checks cannot reach: the
-renderer asking the clock about a task's date, the clock starting only once the store has opened, and
-a card's revision stating its task's relations. It takes about twelve minutes:
+`deploy/wallboard/checks/test-scratch-daemon.cjs` drives the built bundle against a daemon it starts
+itself, in real time and with real writes. It covers the Rust wiring the synthetic checks cannot
+reach: the renderer asking the clock about a task's date, the clock starting only once the store has
+opened, a card's revision stating its task's relations, the store opening no collection the display
+does not show, which its browser cache records, a new message drawn with no new packing, which the
+drawing's timings record, and the real renderer's card text kept inside its card. It takes about
+thirteen minutes:
 
 ```sh
 bash scripts/build-wallboard.sh
 bash scripts/build-web.sh && cargo build -p fwd   # the daemon serves the page the first scenario opens
 SCRATCH_DAEMON=target/debug/fwd SCRATCH_CLIENT=target/debug/fwd \
-  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright node deploy/wallboard/test-scratch-daemon.cjs
+  PLAYWRIGHT_BROWSERS_PATH=target/wallboard/ms-playwright \
+  node deploy/wallboard/checks/test-scratch-daemon.cjs
 ```
 
 `SCRATCH_CLIENT` is `fwd` built from this checkout, which writes the not-before dates.
 `SCRATCH_DAEMON` is the `fwd` to run as the daemon: this checkout's too, or the build a display's
 daemon runs, to check the wallboard against it. The test also needs `python3`, `git` and `sqlite3`.
 `SCRATCH_SCENARIOS` chooses a comma-separated subset of the scenarios in
-`deploy/wallboard/scratch/scenarios/`, each of which opens its own project and page: `first-contact`
-(a cold start with no daemon answering past one clock check, the clock starting only after the store
-opens, and the field's first registration), `dates` (the first load, a real date passing with no
-write, setting and clearing a date), `reconnect` (dates during an outage), `page-clock` (a hidden
-page, a corrected clock), `membership` (a chain and a parent coming and going) and `relations` (a real
-dependency change, batched with an unrelated arrival and with an unrelated departure).
+`deploy/wallboard/checks/scratch-daemon/scenarios/`, each of which opens its own project and page:
+`first-contact` (a cold start with no daemon answering past one clock check, the clock starting only
+after the store opens, and the field's first registration), `dates` (the first load, a real date
+passing with no write, setting and clearing a date), `reconnect` (dates during an outage),
+`page-clock` (a hidden page, a corrected clock), `membership` (a chain and a parent coming and
+going), `relations` (a real dependency change, batched with an unrelated arrival and with an
+unrelated departure) and `card-text` (a title of wide characters, one of capitals and a long
+excerpt, against the real renderer's wrapping and clipping).
 
 It cannot reach a daemon it did not start. Before anything starts, it removes every inherited
 `FWD_*`, `CLAUDE*` and `CODEX_*` variable from its own environment, which everything it starts
@@ -414,4 +488,5 @@ A card's revision means something only within one build, since what it hashes ca
 compares live frames only with frames it received itself, and its first frame is a quiet start, so
 an upgrade cues nothing. Replay compares saved snapshots with each other. Each history entry records
 the build that wrote it, and a replay group holds entries of one build, so no group spans an
-upgrade. A saved frame in which only arrows changed replays as "Observed change", naming no card.
+upgrade; a saved entry that records no build is unusable, and dropped. A saved frame in which only
+arrows changed replays as "Observed change", naming no card.

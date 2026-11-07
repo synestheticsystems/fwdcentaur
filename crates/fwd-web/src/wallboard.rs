@@ -12,9 +12,13 @@ use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-#[path = "wallboard_settings.rs"]
 mod settings;
 pub use settings::{Presentation, Settings, TaskSelection};
+
+/// What the wallboard reads beside its tasks and their relations: the scopes, the assignees' handles
+/// and the counts of messages its cards show. It shows no anchors or decisions, so it opens none.
+const READS: [store::Collection; 3] =
+    [store::Collection::Scopes, store::Collection::Principals, store::Collection::Messages];
 
 /// Watches only prerequisites of visible tasks, never the completed-task backlog.
 /// Keeping a query until its last dependent leaves also follows a completed task being reopened.
@@ -122,9 +126,10 @@ impl Availability {
     }
 }
 
-/// The project and settings that the wallboard's own server generates from its wallboard.json.
-/// Fetching them never reaches the daemon, so a cold start gets this far while no daemon answers.
-async fn project() -> Result<(session::Project, Settings), String> {
+/// Loads the project's id and the settings that the wallboard's own server generates from its
+/// wallboard.json. Loading them never reaches the daemon, so a cold start gets this far while no
+/// daemon answers.
+async fn load_configuration() -> Result<(String, Settings), String> {
     let window = web_sys::window().ok_or("No browser window")?;
     let response = JsFuture::from(window.fetch_with_str("/wallboard-config.json"))
         .await
@@ -142,23 +147,16 @@ async fn project() -> Result<(session::Project, Settings), String> {
     let configuration: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("Invalid wallboard configuration: {e}"))?;
     let id = configuration["project_id"].as_str().filter(|id| !id.is_empty()).ok_or("Missing project_id")?;
-    Ok((
-        session::Project {
-            id: id.into(),
-            name: configuration["project_name"].as_str().unwrap_or("Graph").into(),
-            error: None,
-        },
-        Settings::parse(&configuration)?,
-    ))
+    Ok((id.into(), Settings::parse(&configuration)?))
 }
 
-#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard-theme.mjs")]
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard/wallboard-theme.mjs")]
 extern "C" {
     #[wasm_bindgen(js_name = configureTheme)]
     fn configure_theme(settings: &str);
 }
 
-#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard-diagnostics.mjs")]
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/wallboard/wallboard-diagnostics.mjs")]
 extern "C" {
     #[wasm_bindgen(js_name = markBoot)]
     fn mark_boot(stage: &str);
@@ -173,9 +171,9 @@ pub fn Wallboard() -> impl IntoView {
     let presentation = RwSignal::new(Presentation::default());
     spawn_local(async move {
         mark_boot("mounted");
-        let (project, settings) = loop {
-            match project().await {
-                Ok(project) => break project,
+        let (project_id, settings) = loop {
+            match load_configuration().await {
+                Ok(configuration) => break configuration,
                 Err(why) => {
                     error.set(Some(why));
                     session::sleep_ms(3_000).await;
@@ -186,14 +184,14 @@ pub fn Wallboard() -> impl IntoView {
         configure_theme(&settings.json().to_string());
         presentation.set(settings.presentation);
         error.set(None);
-        if let Err(why) = session::wallboard_node(project).await {
+        if let Err(why) = session::wallboard_node(&project_id).await {
             error.set(Some(why));
             return;
         }
         mark_boot("node");
         started.set(true);
         let predicate = settings.selection.predicate();
-        if let Err(why) = session::wallboard_context().await.and_then(|_| store::open_with_predicate(&predicate)) {
+        if let Err(why) = session::wallboard_context().await.and_then(|_| store::open_with(&predicate, &READS)) {
             error.set(Some(why));
             return;
         }
