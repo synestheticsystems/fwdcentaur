@@ -35,7 +35,7 @@ fi
 
 # Before trunk runs, the two modules the runtime imports that the build writes: the settings contract
 # as JavaScript, and what this build is (scripts/wallboard_identity.py), which build-info.json records
-# for the bundle too.
+# for the bundle once the page is built.
 python3 - "$bundle/wallboard-contract.json" "$repo/crates/fwd-web/src/wallboard/wallboard-contract.mjs" <<'PY'
 import json
 from pathlib import Path
@@ -45,7 +45,7 @@ contract = json.loads(Path(sys.argv[1]).read_text())
 Path(sys.argv[2]).write_text('// Generated from deploy/wallboard/wallboard-contract.json by scripts/build-wallboard.sh.\n'
                              f'export const contract = {json.dumps(contract)};\n')
 PY
-python3 "$repo/scripts/wallboard_identity.py" "$repo"
+identity="$(python3 "$repo/scripts/wallboard_identity.py" identify "$repo")"
 
 cd "$repo/crates/fwd-web"
 # A target directory of its own: trunk keeps wasm-bindgen's output in the target directory and copies
@@ -69,6 +69,9 @@ if [ "${WALLBOARD_REMAP_PATHS:-}" = 1 ]; then
         esac
     done
 fi
+# The old identity goes with the old dist, so that a build that fails from here on leaves no
+# build-info.json rather than an earlier build's.
+rm -f "$bundle/build-info.json"
 rm -rf "$bundle/dist"
 cp -R wallboard-dist "$bundle/dist"
 cp -R "$bundle/sounds" "$bundle/dist/"
@@ -80,4 +83,6 @@ done
 cp "$repo/LICENSE" "$bundle/LICENSE"
 # Who made the bundle, where its source is, and the licenses of what others made in it.
 python3 "$repo/scripts/wallboard_notices.py" "$repo" "$bundle/dist/NOTICE.txt"
+# Last, the identity, once the page is built and in place, and only for a dist that carries it.
+python3 "$repo/scripts/wallboard_identity.py" record "$bundle" "$identity"
 printf 'built the wallboard bundle in %s\n' "$bundle"
