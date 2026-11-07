@@ -16,6 +16,7 @@ const SCENARIOS = {
   'page-clock': require('./scratch-daemon/scenarios/page-clock.cjs'),
   membership: require('./scratch-daemon/scenarios/membership.cjs'),
   relations: require('./scratch-daemon/scenarios/relations.cjs'),
+  'card-text': require('./scratch-daemon/scenarios/card-text.cjs'),
 };
 
 (async () => {

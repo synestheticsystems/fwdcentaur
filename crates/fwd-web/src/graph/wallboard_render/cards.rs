@@ -2,6 +2,7 @@
 //! but its count of messages, which the frame's markup reads apart (`super::markup`).
 // The Graph page's private items the cards are read with. A rename in graph.rs fails here.
 use super::super::{also_part_of, implied, Edge};
+use super::columns;
 use crate::wallboard::{Availability, Dependencies, Presentation, TaskSelection};
 use crate::{clock, fmt, store};
 use ankurah::EntityId;
@@ -266,8 +267,8 @@ fn wallboard_footer(
         .map(|name| (*name, "wallboard-availability"))
         .chain(names.iter().map(|name| (name.as_str(), "wallboard-scope")));
     for (name, class) in chips {
-        let label = fmt::truncate(name, ((right - 30.0) / 7.6).floor() as usize);
-        let chip_width = (label.chars().count() as f64 * 7.6 + 18.0).min(right - 12.0);
+        let label = columns::truncate(name, ((right - 30.0) / 7.6).floor() as usize);
+        let chip_width = (columns::width(&label) as f64 * 7.6 + 18.0).min(right - 12.0);
         if x > 12.0 && x + chip_width > right {
             row += 1;
             x = 12.0;
@@ -277,8 +278,8 @@ fn wallboard_footer(
         x += chip_width + 10.0;
     }
     if !metadata.is_empty() {
-        let label = fmt::truncate(metadata, ((right - 12.0) / 7.4).floor() as usize);
-        if x > 12.0 && x + label.chars().count() as f64 * 7.4 > right {
+        let label = columns::truncate(metadata, ((right - 12.0) / 7.4).floor() as usize);
+        if x > 12.0 && x + columns::width(&label) as f64 * 7.4 > right {
             row += 1;
             x = 12.0;
         }

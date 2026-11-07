@@ -30,6 +30,13 @@ fn wallboard_cards_grow_with_footer_rows_and_a_parent_line_and_scale_with_text()
 }
 
 #[test]
+fn a_scope_chip_of_wide_characters_is_reckoned_two_columns_a_character() {
+    let chip = |name: &str| wallboard_footer(&[name.into()], "", None, 360.0, &Availability::default()).0;
+    assert!(chip("設計と計画").contains(r#"<rect width="94""#), "ten columns at 7.6 pixels, and 18 of padding");
+    assert!(chip("Plans").contains(r#"<rect width="56""#), "five columns");
+}
+
+#[test]
 fn wallboard_scope_chips_wrap_onto_rows_and_are_escaped() {
     let (chips, rows) = wallboard_footer(
         &["Design & planning".into(), "<scope>".into(), "A third longer scope".into()],

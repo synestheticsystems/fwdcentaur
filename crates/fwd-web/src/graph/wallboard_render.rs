@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod cards;
+mod columns;
 mod layout_request;
 mod markup;
 

@@ -128,6 +128,18 @@ shorter, wider arrangements and keeps one only when it makes the cards visibly l
 familiar one on a near tie; a resize lays out again with the same code, through a debounced
 observer, and records no change.
 
+Rust cannot measure the fonts the display draws with, so it wraps and shortens a card's text by
+columns: a character takes the columns Unicode's East Asian Width gives it, as the `unicode-width`
+crate reads it, one for most and two for a wide or fullwidth one, such as CJK and most emoji, which
+fonts draw about a full em wide (`graph/wallboard_render/columns.rs`). The pictographs from U+1F300
+to U+1F5FF take two, though Unicode calls some of them, such as 🌡, Neutral, since Chromium draws
+them as pictures two columns wide; and the emoji presentation selector takes one, so that a
+one-column symbol it makes a picture, such as the ⚠ of ⚠️, takes two with it. Measured in Chromium in Arial and
+Helvetica, whose metrics the fonts Raspberry Pi OS draws for them share, lower-case text runs about
+a tenth narrower than its columns, wide characters fit in two columns each, and capitals run a tenth
+to a fifth wider. So each card's text is clipped to the card: what runs past it, as a title in
+capitals can, never shows outside it.
+
 A card faded to half its opacity is blocked by an unfinished accepted prerequisite or held, and says
 which, Blocked or On hold, with its status and priority unchanged. A cancelled or rejected
 prerequisite reads Check dependency, and one that cannot be read Dependency unknown. Availability
@@ -414,8 +426,9 @@ never starts, stops, configures or writes to the daemon.
 itself, in real time and with real writes. It covers the Rust wiring the synthetic checks cannot
 reach: the renderer asking the clock about a task's date, the clock starting only once the store has
 opened, a card's revision stating its task's relations, the store opening no collection the display
-does not show, which its browser cache records, and a new message drawn with no new packing, which
-the drawing's timings record. It takes about twelve minutes:
+does not show, which its browser cache records, a new message drawn with no new packing, which the
+drawing's timings record, and the real renderer's card text kept inside its card. It takes about
+thirteen minutes:
 
 ```sh
 bash scripts/build-wallboard.sh
@@ -429,12 +442,14 @@ SCRATCH_DAEMON=target/debug/fwd SCRATCH_CLIENT=target/debug/fwd \
 `SCRATCH_DAEMON` is the `fwd` to run as the daemon: this checkout's too, or the build a display's
 daemon runs, to check the wallboard against it. The test also needs `python3`, `git` and `sqlite3`.
 `SCRATCH_SCENARIOS` chooses a comma-separated subset of the scenarios in
-`deploy/wallboard/checks/scratch-daemon/scenarios/`, each of which opens its own project and page: `first-contact`
-(a cold start with no daemon answering past one clock check, the clock starting only after the store
-opens, and the field's first registration), `dates` (the first load, a real date passing with no
-write, setting and clearing a date), `reconnect` (dates during an outage), `page-clock` (a hidden
-page, a corrected clock), `membership` (a chain and a parent coming and going) and `relations` (a real
-dependency change, batched with an unrelated arrival and with an unrelated departure).
+`deploy/wallboard/checks/scratch-daemon/scenarios/`, each of which opens its own project and page:
+`first-contact` (a cold start with no daemon answering past one clock check, the clock starting only
+after the store opens, and the field's first registration), `dates` (the first load, a real date
+passing with no write, setting and clearing a date), `reconnect` (dates during an outage),
+`page-clock` (a hidden page, a corrected clock), `membership` (a chain and a parent coming and
+going), `relations` (a real dependency change, batched with an unrelated arrival and with an
+unrelated departure) and `card-text` (a title of wide characters, one of capitals and a long
+excerpt, against the real renderer's wrapping and clipping).
 
 It cannot reach a daemon it did not start. Before anything starts, it removes every inherited
 `FWD_*`, `CLAUDE*` and `CODEX_*` variable from its own environment, which everything it starts

@@ -69,6 +69,7 @@ function openDaemon(root, binaries, report) {
       return {
         id, daemonBuild,
         task: (title, ...flags) => json(daemonBuild(['task', 'create', title, '--what', `What ${title.toLowerCase()} is`, ...flags])).id,
+        taskWithWhat: (title, what) => json(daemonBuild(['task', 'create', title, '--what', what])).id,
         show: task => json(client(['task', 'show', task])),
         start: task => daemonBuild(['task', 'start', task]),
         rename: (task, title) => daemonBuild(['task', 'amend', task, '--title', title]),
