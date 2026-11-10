@@ -57,12 +57,17 @@ how to build, configure, connect and run it, and what to do when something is wr
   build. Its tests check that they hold every manifest and the lockfile Cargo reads for the build,
   as `cargo metadata` names them, that a dependency feature `fwd-core` inherits from the root
   manifest changes the hash, and that editing a check or the launcher does not. The build runs
-  locked, so it reads the lockfile it hashed as it was hashed. It never builds or replaces the
-  daemon or the page the daemon embeds, and it builds in a target directory of its own,
-  `crates/fwd-web/target/wallboard`: trunk copies every module it finds in its target directory into
-  the page it builds, so a shared one would carry the wallboard's modules into the daemon's page,
-  and the build empties wasm-bindgen's output there first, which keeps the modules of earlier
-  builds. The bundle says what it contains in `dist/NOTICE.txt` (`scripts/wallboard_notices.py`):
+  locked, so it reads the lockfile it hashed as it was hashed. It writes `wallboard-build.mjs`
+  before trunk runs and `build-info.json` last, once the page is built and in `dist/`, and refuses
+  to write it for a `dist/` that carries no copy of the module or a copy other than the one this
+  build wrote; it removes the old `build-info.json` before it replaces `dist/`. So a build that
+  fails leaves the bundle it found or a `dist/` with no `build-info.json`, never a page under
+  another build's identity. It never builds or replaces the daemon or the page the daemon embeds,
+  and it builds in a target directory of its own, `crates/fwd-web/target/wallboard`: trunk copies
+  every module it finds in its target directory into the page it builds, so a shared one would carry
+  the wallboard's modules into the daemon's page, and the build empties wasm-bindgen's output there
+  first, which keeps the modules of earlier builds. The bundle says what it contains in
+  `dist/NOTICE.txt` (`scripts/wallboard_notices.py`):
   fwd's copyright and license and where its source is, then SunCalc and every crate compiled into
   its WebAssembly, with the license texts each ships. A crate whose package ships none is taken
   under Apache-2.0 when its license offers that; otherwise the notice carries its MIT text, kept in

@@ -54,8 +54,11 @@ It builds `crates/fwd-web` with the `wallboard` feature, from `crates/fwd-web/wa
 assembles the bundle here: `dist/` (the page, its WebAssembly, its JavaScript modules, the sounds,
 and `NOTICE.txt`, which names who made the bundle, where its source is, and the licenses of what
 others made in it, with their texts), `build-info.json` (the commit it was built from and a hash of
-everything it was built from) and `LICENSE`, beside the launcher. It builds locked, never updating
-the lockfile, and builds neither the daemon nor the page the daemon embeds (`scripts/build-web.sh`).
+everything it was built from) and `LICENSE`, beside the launcher. It writes `build-info.json` last,
+and only for a `dist/` that carries the identity it records, so a build that fails leaves the bundle
+it found or a `dist/` with no `build-info.json`, never a page under another build's identity. It
+builds locked, never updating the lockfile, and builds neither the daemon nor the page the daemon
+embeds (`scripts/build-web.sh`).
 `WALLBOARD_REMAP_PATHS=1` builds as an official build does: it keeps the paths of your home,
 Cargo's and the checkout out of the WebAssembly, which a bundle built for others to run should not
 name, and fails if any is left. It refuses `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, which Cargo

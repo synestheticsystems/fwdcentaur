@@ -21,6 +21,7 @@ crates/fwd-web/src/wallboard/wallboard-build.mjs
 crates/fwd-web/src/wallboard/wallboard-contract.mjs
 deploy/wallboard/dist
 deploy/wallboard/build-info.json
+deploy/wallboard/.build-info.json.partial
 deploy/wallboard/LICENSE
 deploy/wallboard/wallboard.json
 deploy/wallboard/runtime

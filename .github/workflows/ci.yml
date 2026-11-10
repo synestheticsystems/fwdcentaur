@@ -37,7 +37,7 @@ jobs:
       - run: cargo test --manifest-path crates/fwd-web/Cargo.toml
       - run: cargo test --manifest-path crates/fwd-web/Cargo.toml --features wallboard
       - run: python3 -m unittest discover -s deploy/wallboard/checks/launcher -p 'test_*.py' -v   # the wallboard's launcher and its settings contract
-      - run: python3 -m unittest discover -s scripts -p 'test_wallboard_*.py' -v   # the wallboard build's identity covers what Cargo reads for it, its notice what it compiles in, and an official build refuses the flags that would undo its remapping
+      - run: python3 -m unittest discover -s scripts -p 'test_wallboard_*.py' -v   # the wallboard build's identity covers what Cargo reads for it and names only a dist built under it, its notice what it compiles in, and an official build refuses the flags that would undo its remapping
       - run: bash scripts/build-web.sh   # the web UI into crates/fwd-web/dist; the next build embeds it
       - run: cargo build --workspace
       - run: bash scripts/smoke-roles.sh   # the fixed roles through the CLI against a scratch workspace; checks the served UI
