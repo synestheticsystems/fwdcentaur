@@ -147,14 +147,19 @@ impl Paths {
 
     /// The store `project` had of its own, when one is still in the data directory: until the
     /// daemon kept every project in one store, each project's records were in its own database,
-    /// `projects/<id>/project.sqlite`, and before 2026-09-25 in `workspaces/<id>/`. Its records
-    /// reach the one store only through the move, so the daemon hosts no project that still has
-    /// one, and never shows the project empty over records it cannot see.
+    /// `projects/<id>/project.sqlite`, and before 2026-09-25 in `workspaces/<id>/`; a daemon that
+    /// stopped while it moved the second layout to the first left `projects/<id>/workspace.sqlite`.
+    /// Its records reach the one store only through the move, so the daemon hosts no project that
+    /// still has one, and never shows the project empty over records it cannot see.
     pub fn unmoved_store(&self, project: &NamedProject) -> Option<PathBuf> {
-        let id = project.id.to_string();
-        [self.storage_dir(project).join("project.sqlite"), self.data_dir.join("workspaces").join(id)]
-            .into_iter()
-            .find(|path| path.exists())
+        let folder = self.storage_dir(project);
+        [
+            folder.join("project.sqlite"),
+            folder.join("workspace.sqlite"),
+            self.data_dir.join("workspaces").join(project.id.to_string()),
+        ]
+        .into_iter()
+        .find(|path| path.exists())
     }
 }
 

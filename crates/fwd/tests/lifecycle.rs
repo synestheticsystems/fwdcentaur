@@ -200,32 +200,45 @@ async fn a_port_file_naming_another_daemons_port_is_not_trusted() -> Result<()> 
 }
 
 /// A project whose records are still in a store of its own, from before the daemon kept every
-/// project in one, is refused, naming that store, and the daemon hosts the others; once the store
-/// has moved away, the project opens on request.
+/// project in one, is refused, naming that store, and the daemon hosts the others: a store in the
+/// last layout, `project.sqlite`, and one a daemon left halfway through moving the layout before
+/// it, `workspace.sqlite` in the project's folder. Once the store has moved away, the project opens
+/// on request.
 #[tokio::test]
 async fn a_project_whose_records_are_still_in_a_store_of_its_own_is_refused_and_the_others_are_hosted() -> Result<()> {
     let (dir, paths, unmoved) = setup()?;
+    let interrupted = new_project(&paths, &dir.path().join("interrupted"), "interrupted")?;
     let other = new_project(&paths, &dir.path().join("other"), "other")?;
-    let own_store = paths.storage_dir(&unmoved).join("project.sqlite");
-    std::fs::create_dir_all(paths.storage_dir(&unmoved))?;
-    std::fs::write(&own_store, b"")?;
+    let own_store = |project: &NamedProject, file: &str| -> Result<PathBuf> {
+        std::fs::create_dir_all(paths.storage_dir(project))?;
+        let store = paths.storage_dir(project).join(file);
+        std::fs::write(&store, b"")?;
+        Ok(store)
+    };
+    let stores = [
+        (&unmoved, own_store(&unmoved, "project.sqlite")?),
+        (&interrupted, own_store(&interrupted, "workspace.sqlite")?),
+    ];
 
     let client = daemon::ensure_daemon(&paths, &other, spawn()).await?;
     let running = daemon::status(&paths).await?.expect("the daemon answers");
     let error_of =
         |id| running.projects.iter().find(|p| p.id == id).expect("every indexed project is listed").error.clone();
-    let error = error_of(unmoved.id).expect("the project is not hosted");
-    assert!(error.contains(&own_store.display().to_string()), "the refusal names the store: {error}");
     assert_eq!(error_of(other.id), None, "the other project is hosted");
-    let refused = daemon::ensure_daemon(&paths, &unmoved, spawn()).await.err().expect("the project is refused");
-    assert!(format!("{refused:#}").contains("still in a store of its own"), "{refused:#}");
+    for (project, store) in &stores {
+        let error = error_of(project.id).expect("the project is not hosted");
+        assert!(error.contains(&store.display().to_string()), "the refusal names the store: {error}");
+        let refused = daemon::ensure_daemon(&paths, project, spawn()).await.err().expect("the project is refused");
+        assert!(format!("{refused:#}").contains("still in a store of its own"), "{refused:#}");
+    }
 
-    std::fs::remove_file(&own_store)?;
-    daemon::host(&client.pf, &unmoved).await?;
-    let reached = daemon::ensure_daemon(&paths, &unmoved, spawn()).await?;
-    assert_eq!(reached.pf.instance_id, client.pf.instance_id);
+    for (project, store) in &stores {
+        std::fs::remove_file(store)?;
+        daemon::host(&client.pf, project).await?;
+        let reached = daemon::ensure_daemon(&paths, project, spawn()).await?;
+        assert_eq!(reached.pf.instance_id, client.pf.instance_id);
+    }
 
-    drop(reached);
     drop(client);
     assert!(daemon::stop(&paths).await?);
     Ok(())

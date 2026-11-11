@@ -305,10 +305,10 @@ fn a_resolution_that_cannot_write_the_index_names_projects_toml_and_why() -> Res
 }
 
 /// A store a project had of its own, from before the daemon kept every project in one, is found in
-/// either layout it had, so that the daemon hosts no such project; a project whose local files
-/// alone are in its folder has none.
+/// either layout it had, or halfway from one to the other, so that the daemon hosts no such
+/// project; a project whose local files alone are in its folder has none.
 #[test]
-fn a_store_a_project_had_of_its_own_is_found_in_either_layout() -> Result<()> {
+fn a_store_a_project_had_of_its_own_is_found_in_any_layout_it_had() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let paths = paths(dir.path());
     let moved = NamedProject { id: uuid::Uuid::new_v4(), name: "moved".into() };
@@ -321,6 +321,15 @@ fn a_store_a_project_had_of_its_own_is_found_in_either_layout() -> Result<()> {
     std::fs::create_dir_all(paths.storage_dir(&kept))?;
     std::fs::write(paths.storage_dir(&kept).join("project.sqlite"), b"db")?;
     assert_eq!(paths.unmoved_store(&kept), Some(paths.storage_dir(&kept).join("project.sqlite")));
+
+    let interrupted = NamedProject { id: uuid::Uuid::new_v4(), name: "interrupted".into() };
+    std::fs::create_dir_all(paths.storage_dir(&interrupted))?;
+    std::fs::write(paths.storage_dir(&interrupted).join("workspace.sqlite"), b"db")?;
+    assert_eq!(
+        paths.unmoved_store(&interrupted),
+        Some(paths.storage_dir(&interrupted).join("workspace.sqlite")),
+        "a move from the first layout to the second that stopped before the database took its new name"
+    );
 
     let older = NamedProject { id: uuid::Uuid::new_v4(), name: "older".into() };
     let workspace = paths.data_dir.join("workspaces").join(older.id.to_string());
