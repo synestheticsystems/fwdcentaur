@@ -231,6 +231,28 @@ async fn a_project_whose_records_are_still_in_a_store_of_its_own_is_refused_and_
     Ok(())
 }
 
+/// A data folder whose every project still has its records in a store of its own, as the
+/// per-project build left it, is refused at the daemon's start, and the daemon makes no store of
+/// its own there: the folder stays as that build and fwd-store-merge expect it.
+#[tokio::test]
+async fn a_folder_whose_every_project_has_a_store_of_its_own_is_refused_and_left_as_it_was() -> Result<()> {
+    let (_dir, paths, unmoved) = setup()?;
+    std::fs::create_dir_all(paths.storage_dir(&unmoved))?;
+    std::fs::write(paths.storage_dir(&unmoved).join("project.sqlite"), b"")?;
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fwd"))
+        .args(["daemon", "serve", "--runtime-dir"])
+        .arg(&paths.runtime_dir)
+        .arg("--data-dir")
+        .arg(&paths.data_dir)
+        .output()?;
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "the daemon refuses to start");
+    assert!(said.contains("still in a store of its own"), "{said}");
+    assert!(!paths.store_path().exists(), "no store of the daemon's is made");
+    Ok(())
+}
+
 #[tokio::test]
 async fn one_daemon_hosts_every_project_and_each_is_reachable() -> Result<()> {
     let (dir, paths, first) = setup()?;

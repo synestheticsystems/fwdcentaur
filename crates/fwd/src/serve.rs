@@ -29,7 +29,7 @@ use ankurah::policy::DEFAULT_CONTEXT;
 use ankurah::{Context as NodeContext, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use ankurah_websocket_server::WebsocketServer;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{ConnectInfo, Path as RoutePath, Request, State};
 use axum::handler::Handler;
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
@@ -253,9 +253,28 @@ struct Unmoved {
     store: PathBuf,
 }
 
-/// What brings a project's own store into the daemon's one store, for the refusal above to name.
-const MOVE_THEM: &str =
-    "it opens once they are moved into the daemon's store, which the build that wrote them must do first";
+/// Refuses to start over a data folder whose every project still has its records in a store of its
+/// own and which has no store of the daemon's yet: the store the daemon would make there could host
+/// none of them, and the folder is left as the per-project build wrote it, for that build or for
+/// fwd-store-merge.
+fn refuse_a_folder_not_moved(paths: &Paths, index: &Index) -> Result<()> {
+    if paths.store_path().exists() || index.projects.is_empty() {
+        return Ok(());
+    }
+    let unmoved: Vec<PathBuf> =
+        index.projects.iter().filter_map(|entry| paths.unmoved_store(&NamedProject::from(entry))).collect();
+    if unmoved.len() < index.projects.len() {
+        return Ok(());
+    }
+    bail!(
+        "every project's records are still in a store of its own ({}), and this build of fwd does not read those; {MOVE_THEM}",
+        unmoved.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// What brings a project's own store into the daemon's one store, for the refusals here to name.
+const MOVE_THEM: &str = "it opens once fwd-store-merge has moved every project's store into the daemon's one store \
+    (crates/fwd-store-merge/README.md says how to switch a machine over)";
 
 /// The checkouts of a project seen on this machine: local-only, persisted beside the database so
 /// it survives a restart, refreshed from git when a client reports.
@@ -284,6 +303,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     };
     let config = DaemonConfig::load(&paths)?;
     let index = Index::load(&paths)?;
+    refuse_a_folder_not_moved(&paths, &index)?;
 
     // The daemon's dev-runner entry, first cleared of what a crashed daemon for this data directory
     // left. Only under the lifetime lock: without it, those files could be a running daemon's.
