@@ -157,7 +157,12 @@ pub(crate) fn task(title: &str, by: &str, context: serde_json::Value) -> Vec<(&'
     ]
 }
 
-fn message(content: &str, by: &str, reply_to: Option<&str>, context: serde_json::Value) -> Vec<(&'static str, V)> {
+pub(crate) fn message(
+    content: &str,
+    by: &str,
+    reply_to: Option<&str>,
+    context: serde_json::Value,
+) -> Vec<(&'static str, V)> {
     let mut fields = vec![
         ("author", id(by)),
         ("created", V::Int(7)),
@@ -183,6 +188,15 @@ fn relation(kind: &str, from: &str, to: &str, by: &str) -> Vec<(&'static str, V)
         ("created", V::Int(8)),
         ("via", V::Json(json!({"actor_id": by}))),
     ]
+}
+
+/// Writes the folder's one project into a store beside the folder, and gives that store and the
+/// project's old one.
+pub(crate) async fn merged(folder: &OldFolder, uuid: Uuid) -> (PathBuf, PathBuf) {
+    let old = folder.data.join(format!("projects/{uuid}/project.sqlite"));
+    let new = folder.data.with_file_name("store.sqlite");
+    write(&new, &[Moving { uuid, name: "alpha".into(), old: OldStore::read(&old).unwrap() }]).await.unwrap();
+    (new, old)
 }
 
 /// The id the record that had `old` has in the merged store, through its former ids.

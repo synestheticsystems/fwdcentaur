@@ -15,9 +15,9 @@ use fwd_core::project_graph::{ProjectGraph, ProjectTransaction};
 use crate::old_store::{Record, Stored};
 
 /// The nine models, in the order their records are made: each after the models its required
-/// references name, so that only the references listed in [`patch`] can name a record not made
-/// yet. Principals come before scopes, which name their maker, so a triage agent's `serves` waits
-/// for its scopes; decisions come before messages, which comment on them, so a decision's
+/// references name, so that only a [`Patchable`] field, which [`patch`] sets, can name a record not
+/// made yet. Principals come before scopes, which name their maker, so a triage agent's `serves`
+/// waits for its scopes; decisions come before messages, which comment on them, so a decision's
 /// `closed_reason_message` waits for its message.
 pub const MODELS: [&str; 9] =
     ["Principal", "Repo", "Scope", "Task", "CodeAnchor", "Decision", "Message", "Relation", "Notification"];
@@ -192,14 +192,62 @@ pub struct Dangling {
     pub field: &'static str,
 }
 
-/// Reads one record's fields, re-pointing its ids, noting the references to records not made yet,
-/// which [`patch`] sets once they are, and the ids that name nothing.
+/// A field that can name a record made after its own, which [`patch`] sets once every record is
+/// made: every JSON field, since any string in one that is the whole id of a record of the project
+/// names that record's new id, whatever its model; and each reference to a model made no earlier
+/// than its own. Reading such a field takes its variant, and only such a field can wait, so every
+/// field that waits is one [`patch`] sets.
+#[derive(Debug, Clone, Copy)]
+pub enum Patchable {
+    PrincipalSucceededBy,
+    PrincipalServes,
+    RepoRemoteUrls,
+    ScopeContext,
+    TaskLabels,
+    TaskContext,
+    CodeAnchorPieces,
+    DecisionClosedReasonMessage,
+    MessageReplyTo,
+    MessageThread,
+    MessageContext,
+    RelationFromId,
+    RelationToId,
+    RelationVia,
+    NotificationTarget,
+    NotificationOriginator,
+}
+
+impl Patchable {
+    /// The field's name, as the old stores name its property.
+    pub fn name(self) -> &'static str {
+        use Patchable::*;
+        match self {
+            PrincipalSucceededBy => "succeeded_by",
+            PrincipalServes => "serves",
+            RepoRemoteUrls => "remote_urls",
+            ScopeContext | TaskContext | MessageContext => "context",
+            TaskLabels => "labels",
+            CodeAnchorPieces => "pieces",
+            DecisionClosedReasonMessage => "closed_reason_message",
+            MessageReplyTo => "reply_to",
+            MessageThread => "thread",
+            RelationFromId => "from_id",
+            RelationToId => "to_id",
+            RelationVia => "via",
+            NotificationTarget => "target",
+            NotificationOriginator => "originator",
+        }
+    }
+}
+
+/// Reads one record's fields, re-pointing its ids, noting the fields that name records not made
+/// yet, which [`patch`] sets once they are, and the ids that name nothing.
 pub struct Fields<'a> {
     model: &'static str,
     record: &'a Record,
     ids: &'a Ids,
     placeholder: EntityId,
-    pub waiting: Vec<&'static str>,
+    pub waiting: Vec<Patchable>,
     pub dangling: Vec<Dangling>,
 }
 
@@ -256,15 +304,23 @@ impl<'a> Fields<'a> {
         self.opt_word(field)?.ok_or_else(|| self.refuse(format!("{field}, which every record has, is empty")))
     }
 
-    /// The id a reference holds now: the new id of the record it named, or, for a record not made
-    /// yet, none (the field waits); or the old id unchanged when it names nothing.
-    fn opt_reference(&mut self, field: &'static str) -> Result<Option<Option<EntityId>>, Unrepresentable> {
+    /// The id a reference holds now: the new id of the record it named; for a record not made yet,
+    /// none, when the field is `later` (it waits), and a refusal when it is not; or the old id
+    /// unchanged when it names nothing.
+    fn opt_reference(
+        &mut self,
+        field: &'static str,
+        later: Option<Patchable>,
+    ) -> Result<Option<Option<EntityId>>, Unrepresentable> {
         let Some(old) = self.opt_text(field)? else { return Ok(None) };
         if let Some(new) = self.ids.new_of(&old) {
             return Ok(Some(Some(new)));
         }
         if self.ids.knows(&old) {
-            self.waiting.push(field);
+            let Some(later) = later else {
+                return Err(self.refuse(format!("{field} names a record of a model made after the one it refers to")));
+            };
+            self.waiting.push(later);
             return Ok(Some(None));
         }
         self.dangling.push(Dangling { model: self.model, field });
@@ -273,21 +329,27 @@ impl<'a> Fields<'a> {
             .map_err(|e| self.refuse(format!("{field} holds {old:?}: {e}")))
     }
     fn opt_ref<T>(&mut self, field: &'static str) -> Result<Option<Ref<T>>, Unrepresentable> {
-        Ok(self.opt_reference(field)?.flatten().map(Ref::new))
+        Ok(self.opt_reference(field, None)?.flatten().map(Ref::new))
     }
-    fn id(&mut self, field: &'static str) -> Result<EntityId, Unrepresentable> {
-        match self.opt_reference(field)? {
+    fn opt_ref_later<T>(&mut self, field: Patchable) -> Result<Option<Ref<T>>, Unrepresentable> {
+        Ok(self.opt_reference(field.name(), Some(field))?.flatten().map(Ref::new))
+    }
+    fn id(&mut self, field: &'static str, later: Option<Patchable>) -> Result<EntityId, Unrepresentable> {
+        match self.opt_reference(field, later)? {
             Some(id) => Ok(id.unwrap_or(self.placeholder)),
             None => Err(self.refuse(format!("{field}, which every record has, is empty"))),
         }
     }
+    fn id_later(&mut self, field: Patchable) -> Result<EntityId, Unrepresentable> {
+        self.id(field.name(), Some(field))
+    }
     fn reference<T>(&mut self, field: &'static str) -> Result<Ref<T>, Unrepresentable> {
-        self.id(field).map(Ref::new)
+        self.id(field, None).map(Ref::new)
     }
 
     /// A JSON value with every string that is the id of a record of the project replaced by its
     /// new id; one naming a record not made yet stays until [`patch`] replaces it.
-    fn repointed(&mut self, field: &'static str, value: &serde_json::Value) -> serde_json::Value {
+    fn repointed(&mut self, field: Patchable, value: &serde_json::Value) -> serde_json::Value {
         let mut waits = false;
         let mut dangles = false;
         let value = repoint(value, self.ids, &mut waits, &mut dangles);
@@ -295,22 +357,23 @@ impl<'a> Fields<'a> {
             self.waiting.push(field);
         }
         if dangles {
-            self.dangling.push(Dangling { model: self.model, field });
+            self.dangling.push(Dangling { model: self.model, field: field.name() });
         }
         value
     }
-    fn json(&mut self, field: &'static str) -> Result<Json, Unrepresentable> {
+    fn json(&mut self, later: Patchable) -> Result<Json, Unrepresentable> {
+        let field = later.name();
         match self.record.get(field).clone() {
-            Stored::Json(value) => Ok(Json::new(self.repointed(field, &value))),
+            Stored::Json(value) => Ok(Json::new(self.repointed(later, &value))),
             Stored::Null => Err(self.refuse(format!("{field}, which every record has, is empty"))),
             other => Err(self.refuse(format!("{field} holds {other:?}, not JSON"))),
         }
     }
     /// A JSON value kept as text (`Principal::serves`).
-    fn opt_json_text(&mut self, field: &'static str) -> Result<Option<String>, Unrepresentable> {
-        let Some(text) = self.opt_text(field)? else { return Ok(None) };
+    fn opt_json_text(&mut self, later: Patchable) -> Result<Option<String>, Unrepresentable> {
+        let Some(text) = self.opt_text(later.name())? else { return Ok(None) };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return Ok(Some(text)) };
-        let repointed = self.repointed(field, &value);
+        let repointed = self.repointed(later, &value);
         // Unchanged text stays byte for byte; changed text is written as serde_json writes it,
         // which is how fwd writes it.
         Ok(Some(if repointed == value { text } else { repointed.to_string() }))
@@ -384,14 +447,14 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             active: f.boolean("active")?,
             member: f.opt_bool("member")?,
             subject: f.opt_text("subject")?,
-            succeeded_by: f.opt_ref("succeeded_by")?,
-            serves: f.opt_json_text("serves")?,
+            succeeded_by: f.opt_ref_later(Patchable::PrincipalSucceededBy)?,
+            serves: f.opt_json_text(Patchable::PrincipalServes)?,
             last_active: f.opt_int("last_active")?,
         }),
         "Repo" => Made::Repo(Repo {
             project,
             name: f.text("name")?,
-            remote_urls: f.json("remote_urls")?,
+            remote_urls: f.json(Patchable::RepoRemoteUrls)?,
             default_branch: f.text("default_branch")?,
         }),
         "Scope" => Made::Scope(Scope {
@@ -399,7 +462,7 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             status: f.word("status")?,
             title: f.text("title")?,
             intention: f.text("intention")?,
-            context: f.json("context")?,
+            context: f.json(Patchable::ScopeContext)?,
             started: f.opt_int("started")?,
             ended: f.opt_int("ended")?,
             created_by: f.reference("created_by")?,
@@ -417,8 +480,8 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             hold: f.opt_text("hold")?,
             not_before: f.opt_int("not_before")?,
             priority: f.opt_int("priority")?,
-            labels: f.json("labels")?,
-            context: f.json("context")?,
+            labels: f.json(Patchable::TaskLabels)?,
+            context: f.json(Patchable::TaskContext)?,
             created_by: f.reference("created_by")?,
             created: f.int("created")?,
             updated: f.int("updated")?,
@@ -452,7 +515,7 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
                 anchored_text: f.text("anchored_text")?,
                 context_before: f.text("context_before")?,
                 context_after: f.text("context_after")?,
-                pieces: f.json("pieces")?,
+                pieces: f.json(Patchable::CodeAnchorPieces)?,
                 symbol_path: f.opt_text("symbol_path")?,
                 created_by: f.reference("created_by")?,
                 created: f.int("created")?,
@@ -475,7 +538,7 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             closed_by: f.opt_ref("closed_by")?,
             closed: f.opt_int("closed")?,
             closed_reason: f.opt_text("closed_reason")?,
-            closed_reason_message: f.opt_ref("closed_reason_message")?,
+            closed_reason_message: f.opt_ref_later(Patchable::DecisionClosedReasonMessage)?,
         }),
         "Message" => Made::Message(Message {
             project,
@@ -488,9 +551,9 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             anchor: f.opt_ref("anchor")?,
             scope: f.opt_ref("scope")?,
             decision: f.opt_ref("decision")?,
-            reply_to: f.opt_ref("reply_to")?,
-            thread: f.opt_ref("thread")?,
-            context: f.json("context")?,
+            reply_to: f.opt_ref_later(Patchable::MessageReplyTo)?,
+            thread: f.opt_ref_later(Patchable::MessageThread)?,
+            context: f.json(Patchable::MessageContext)?,
             resolved_by: f.opt_ref("resolved_by")?,
             resolved: f.opt_int("resolved")?,
             edited: f.opt_int("edited")?,
@@ -499,12 +562,12 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
         "Relation" => Made::Relation(Relation {
             project,
             kind: f.word("kind")?,
-            from_id: f.id("from_id")?,
-            to_id: f.id("to_id")?,
+            from_id: f.id_later(Patchable::RelationFromId)?,
+            to_id: f.id_later(Patchable::RelationToId)?,
             status: f.word("status")?,
             created_by: f.reference("created_by")?,
             created: f.int("created")?,
-            via: f.json("via")?,
+            via: f.json(Patchable::RelationVia)?,
             note: f.opt_text("note")?,
             position: f.opt_text("position")?,
             closed_by: f.opt_ref("closed_by")?,
@@ -519,8 +582,8 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             priority: f.word("priority")?,
             created: f.int("created")?,
             updated: f.opt_int("updated")?,
-            target: f.json("target")?,
-            originator: f.json("originator")?,
+            target: f.json(Patchable::NotificationTarget)?,
+            originator: f.json(Patchable::NotificationOriginator)?,
         }),
         other => {
             return Err(Unrepresentable {
@@ -564,57 +627,41 @@ pub async fn patch(
     new: EntityId,
     record: &Record,
     ids: &Ids,
-    field: &'static str,
+    field: Patchable,
 ) -> anyhow::Result<()> {
     let mut f = Fields::new(model, record, ids, new);
-    match (model, field) {
-        ("Principal", "succeeded_by") => {
-            let value = f.opt_ref::<Principal>(field)?;
-            trx.edit(&graph.get::<PrincipalView>(new).await?)?.succeeded_by()?.set(&value)?;
+    macro_rules! set {
+        ($view:ty, $property:ident, $value:expr) => {{
+            let value = $value;
+            trx.edit(&graph.get::<$view>(new).await?)?.$property()?.set(&value)?;
+        }};
+    }
+    use Patchable::*;
+    match field {
+        PrincipalSucceededBy => set!(PrincipalView, succeeded_by, f.opt_ref_later::<Principal>(field)?),
+        PrincipalServes => set!(PrincipalView, serves, f.opt_json_text(field)?),
+        RepoRemoteUrls => set!(RepoView, remote_urls, f.json(field)?),
+        ScopeContext => set!(ScopeView, context, f.json(field)?),
+        TaskLabels => set!(TaskView, labels, f.json(field)?),
+        TaskContext => set!(TaskView, context, f.json(field)?),
+        CodeAnchorPieces => set!(CodeAnchorView, pieces, f.json(field)?),
+        DecisionClosedReasonMessage => {
+            set!(DecisionView, closed_reason_message, f.opt_ref_later::<Message>(field)?)
         }
-        ("Principal", "serves") => {
-            let value = f.opt_json_text(field)?;
-            trx.edit(&graph.get::<PrincipalView>(new).await?)?.serves()?.set(&value)?;
-        }
-        ("Task", "context") => {
-            let value = f.json(field)?;
-            trx.edit(&graph.get::<TaskView>(new).await?)?.context()?.set(&value)?;
-        }
-        ("Decision", "closed_reason_message") => {
-            let value = f.opt_ref::<Message>(field)?;
-            trx.edit(&graph.get::<DecisionView>(new).await?)?.closed_reason_message()?.set(&value)?;
-        }
-        ("Message", "reply_to") => {
-            let value = f.opt_ref::<Message>(field)?;
-            trx.edit(&graph.get::<MessageView>(new).await?)?.reply_to()?.set(&value)?;
-        }
-        ("Message", "thread") => {
-            let value = f.opt_ref::<Message>(field)?;
-            trx.edit(&graph.get::<MessageView>(new).await?)?.thread()?.set(&value)?;
-        }
-        ("Message", "context") => {
-            let value = f.json(field)?;
-            trx.edit(&graph.get::<MessageView>(new).await?)?.context()?.set(&value)?;
-        }
-        ("Relation", "from_id") => {
-            let value = f.id(field)?;
-            trx.edit(&graph.get::<RelationView>(new).await?)?.from_id()?.set(&value)?;
-        }
-        ("Relation", "to_id") => {
-            let value = f.id(field)?;
-            trx.edit(&graph.get::<RelationView>(new).await?)?.to_id()?.set(&value)?;
-        }
-        ("Relation", "via") => {
-            let value = f.json(field)?;
-            trx.edit(&graph.get::<RelationView>(new).await?)?.via()?.set(&value)?;
-        }
-        _ => anyhow::bail!(
-            "{model} {}'s {field} names a record made after it, which this order does not expect",
-            record.id
-        ),
+        MessageReplyTo => set!(MessageView, reply_to, f.opt_ref_later::<Message>(field)?),
+        MessageThread => set!(MessageView, thread, f.opt_ref_later::<Message>(field)?),
+        MessageContext => set!(MessageView, context, f.json(field)?),
+        RelationFromId => set!(RelationView, from_id, f.id_later(field)?),
+        RelationToId => set!(RelationView, to_id, f.id_later(field)?),
+        RelationVia => set!(RelationView, via, f.json(field)?),
+        NotificationTarget => set!(NotificationView, target, f.json(field)?),
+        NotificationOriginator => set!(NotificationView, originator, f.json(field)?),
     }
     if !f.waiting.is_empty() {
-        anyhow::bail!("{model} {}'s {field} still names a record that was not made", record.id);
+        anyhow::bail!("{model} {}'s {} still names a record that was not made", record.id, field.name());
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

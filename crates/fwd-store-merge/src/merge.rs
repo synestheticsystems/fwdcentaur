@@ -18,7 +18,7 @@ use fwd_core::project_graph::ProjectGraph;
 use uuid::Uuid;
 
 use crate::old_store::{OldStore, Record};
-use crate::records::{build, patch, Dangling, Fields, Ids, MODELS};
+use crate::records::{build, patch, Dangling, Fields, Ids, Patchable, MODELS};
 
 /// How many former ids one transaction makes. Their order is never read.
 const FORMER_IDS_PER_TRANSACTION: usize = 500;
@@ -76,7 +76,7 @@ async fn move_project(graph: &ProjectGraph, old: &OldStore) -> Result<Moved> {
     }
     let placeholder = *graph.project();
     let mut done = Moved::default();
-    let mut waiting: Vec<(&'static str, EntityId, &Record, &'static str)> = Vec::new();
+    let mut waiting: Vec<(&'static str, EntityId, &Record, Patchable)> = Vec::new();
     for model in MODELS {
         let records = old.records.get(model).map(Vec::as_slice).unwrap_or_default();
         for record in records {

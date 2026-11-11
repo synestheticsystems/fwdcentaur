@@ -1,23 +1,9 @@
-use std::path::PathBuf;
-
 use rusqlite::Connection;
 use serde_json::json;
-use uuid::Uuid;
 
 use super::judge;
 use crate::fixture::{id, text, OldFolder, V};
-use crate::merge::{write, Moving};
-use crate::old_store::OldStore;
-use crate::tests::{now, principal, task};
-
-/// Writes the folder's one project into a store beside the folder, and gives that store and the
-/// project's old one.
-async fn merged(folder: &OldFolder, uuid: Uuid) -> (PathBuf, PathBuf) {
-    let old = folder.data.join(format!("projects/{uuid}/project.sqlite"));
-    let new = folder.data.with_file_name("store.sqlite");
-    write(&new, &[Moving { uuid, name: "alpha".into(), old: OldStore::read(&old).unwrap() }]).await.unwrap();
-    (new, old)
-}
+use crate::tests::{merged, now, principal, task};
 
 /// `Principal.serves` is JSON kept as text, and the move carries text in it that is not JSON as it
 /// was, so the judge holds that text to its bytes: two different such values are not the same.

@@ -47,9 +47,12 @@ ids that name nothing (carried as they were), and the records `fwd admin migrate
 
 A record is made only once every record its required references name is: the models go Principal,
 Repo, Scope, Task, CodeAnchor, Decision, Message, Relation, Notification. A reference to a record
-made later (a principal's successor or the scopes it serves, a task's parent in its context, a
-decision's closing message, a message's thread and what it replies to, a relation's end on another
-relation) is set in a second pass.
+made later (a principal's successor, a decision's closing message, a message's thread and what it
+replies to, a relation's end on another relation) and a JSON value that names one (the scopes a
+principal serves, a task's parent in its context, any string of any JSON field that is a later
+record's whole id) are set in a second pass. Only those fields can wait for it, and it sets each of
+them; any other reference that names a record made after its own names a record of a model it does
+not refer to, and is refused.
 
 ## What it refuses
 
