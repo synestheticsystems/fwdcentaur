@@ -130,7 +130,7 @@ fn project(folder: &mut OldFolder, name: &str) -> Project {
     Project { uuid, ids }
 }
 
-fn principal(handle: &str, kind: &str, role: Option<&str>) -> Vec<(&'static str, V)> {
+pub(crate) fn principal(handle: &str, kind: &str, role: Option<&str>) -> Vec<(&'static str, V)> {
     let mut fields = vec![
         ("kind", text(kind)),
         ("handle", text(handle)),
@@ -186,7 +186,7 @@ fn relation(kind: &str, from: &str, to: &str, by: &str) -> Vec<(&'static str, V)
 }
 
 /// The id the record that had `old` has in the merged store, through its former ids.
-fn now(db: &Connection, old: &str) -> String {
+pub(crate) fn now(db: &Connection, old: &str) -> String {
     db.query_row("SELECT record FROM formerid WHERE former = ?", [old], |row| row.get(0)).unwrap()
 }
 

@@ -68,7 +68,9 @@ its own catalog, not through the tool's own mapping: for every project and model
 of records; each old id with exactly one former id, naming a record of the same model and project;
 every value as it was, references and JSON ids mapped; every id naming a record of the same
 project, or carried unchanged from an old value that named nothing; and the records made, and
-their rows held, in the order they were.
+their rows held, in the order they were. JSON is compared parsed, whatever its spacing; a `Json`
+field that does not hold JSON is refused, and text in `Principal::serves` that is not JSON, which
+the move carries as it was, must be the same to the byte.
 
 ## Switching a machine over
 

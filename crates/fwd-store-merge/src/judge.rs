@@ -226,6 +226,7 @@ fn compare(
     for (field, value) in new.iter().filter(|(f, _)| f.as_str() != "project") {
         let was = old.get(field).unwrap_or(&Sql::Null);
         let reference = references.contains(&(model.to_owned(), field.clone()));
+        let json = holds_json(model, field);
         let expected = match was {
             Sql::Text(text) if reference => match now_of.get(text) {
                 Some(new_id) => Sql::Text(new_id.clone()),
@@ -254,17 +255,11 @@ fn compare(
                 }
                 Sql::Text(anchor_key(&text_of("repo"), &text_of("path"), &text_of("basis_blob"), lines))
             }
-            Sql::Text(text) if text.starts_with(['{', '[']) && model_json(model, field) => {
-                let old_json: serde_json::Value = serde_json::from_str(text).map_err(|e| at(field, &e.to_string()))?;
-                Sql::Text(mapped_json(&old_json, now_of).to_string())
-            }
             other => other.clone(),
         };
-        let same = match (&expected, value) {
-            (Sql::Text(a), Sql::Text(b)) if model_json(model, field) => {
-                serde_json::from_str::<serde_json::Value>(a).ok() == serde_json::from_str::<serde_json::Value>(b).ok()
-            }
-            (a, b) => a == b,
+        let same = match json {
+            Some(holds) => same_json(holds, &expected, value, now_of).map_err(|what| at(field, what))?,
+            None => expected == *value,
         };
         if !same {
             return Err(at(field, "differs from the old value"));
@@ -273,7 +268,7 @@ fn compare(
         let mut ids = Vec::new();
         match value {
             Sql::Text(text) if reference => ids.push(text.clone()),
-            Sql::Text(text) if model_json(model, field) => {
+            Sql::Text(text) if json.is_some() => {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
                     collect_ids(&json, &mut ids);
                 }
@@ -294,19 +289,44 @@ fn compare(
     Ok(())
 }
 
-/// Whether a model's property holds JSON: its JSON fields, and `serves`, JSON kept as text.
-fn model_json(model: &str, field: &str) -> bool {
-    matches!(
-        (model, field),
+/// How a model's property holds JSON.
+#[derive(Clone, Copy, PartialEq)]
+enum HoldsJson {
+    /// A `Json` field: JSON on both sides, or the store is refused.
+    Json,
+    /// `Principal.serves`, JSON kept as text, which may hold text that is not JSON: the move
+    /// carries that byte for byte.
+    Text,
+}
+
+fn holds_json(model: &str, field: &str) -> Option<HoldsJson> {
+    match (model, field) {
         ("Task", "context" | "labels")
-            | ("Repo", "remote_urls")
-            | ("CodeAnchor", "pieces")
-            | ("Message", "context")
-            | ("Relation", "via")
-            | ("Notification", "target" | "originator")
-            | ("Scope", "context")
-            | ("Principal", "serves")
-    )
+        | ("Repo", "remote_urls")
+        | ("CodeAnchor", "pieces")
+        | ("Message", "context")
+        | ("Relation", "via")
+        | ("Notification", "target" | "originator")
+        | ("Scope", "context") => Some(HoldsJson::Json),
+        ("Principal", "serves") => Some(HoldsJson::Text),
+        _ => None,
+    }
+}
+
+/// Whether a JSON property's new value is its old one with every id of a record of the project
+/// mapped. JSON is compared parsed, whatever its spacing, so that the writer's serialization does
+/// not count; text that is not JSON, which only `Principal.serves` may hold, is compared byte for
+/// byte, since the move carries it as it was.
+fn same_json(holds: HoldsJson, old: &Sql, new: &Sql, now_of: &HashMap<String, String>) -> Result<bool, &'static str> {
+    let parse = |value: &Sql| match value {
+        Sql::Text(text) => Some(serde_json::from_str::<serde_json::Value>(text)),
+        _ => None,
+    };
+    match (parse(old), parse(new)) {
+        (Some(Ok(old)), Some(Ok(new))) => Ok(mapped_json(&old, now_of) == new),
+        (Some(Err(_)), _) | (_, Some(Err(_))) if holds == HoldsJson::Json => Err("is not JSON"),
+        _ => Ok(old == new),
+    }
 }
 
 fn mapped_json(value: &serde_json::Value, now_of: &HashMap<String, String>) -> serde_json::Value {
@@ -328,3 +348,6 @@ fn collect_ids(value: &serde_json::Value, out: &mut Vec<String>) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests;
