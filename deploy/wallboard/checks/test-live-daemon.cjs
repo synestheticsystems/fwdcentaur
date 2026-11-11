@@ -150,10 +150,10 @@ const statusWithHeaders = (url, headers) => new Promise((resolve, reject) => {
     console.log(`PASS live graph: ${count} matching cards, ${columns.size} columns, rows ${[...columns.values()]}, text within widened cards, no controls`);
 
     // The proxy itself enforces the narrow HTTP/WS surface and rejects other web origins.
-    for (const route of ['/health', '/projects', '/mcp', '/stop', '/webview/register', '/p/other/ws']) {
+    for (const route of ['/health', '/projects', '/mcp', '/stop', '/webview/register', '/p/other/one-store/ws']) {
       assert.equal((await fetch(url + route)).status, 404, route);
     }
-    const socketPath = `/p/${config.project_id}/ws`;
+    const socketPath = `/p/${config.project_id}/one-store/ws`;
     assert.equal((await fetch(url + socketPath, { method: 'POST' })).status, 404);
     assert.equal(await statusWithHeaders(url + socketPath, { Origin: 'http://other.example', Upgrade: 'websocket' }), 404);
     assert.equal(await statusWithHeaders(url + '/wallboard-config.json', { Host: 'other.example' }), 404);

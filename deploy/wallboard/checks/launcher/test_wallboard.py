@@ -31,7 +31,7 @@ class ProxyConfiguration(unittest.TestCase):
         public = json.loads(routes[0]["handle"][0]["body"])
         self.assertEqual(public["project_id"], self.settings["project_id"])
         proxy = routes[1]
-        self.assertEqual(proxy["match"], [{"host": ["127.0.0.1"], "method": ["GET"], "path": [f"/p/{public['project_id']}/ws"],
+        self.assertEqual(proxy["match"], [{"host": ["127.0.0.1"], "method": ["GET"], "path": [f"/p/{public['project_id']}/one-store/ws"],
                                          "header": {"Origin": ["http://127.0.0.1:3000"], "Upgrade": ["websocket"]}}])
         self.assertEqual(proxy["handle"][0]["upstreams"], [{"dial": "127.0.0.1:54321"}])
         headers = proxy["handle"][0]["headers"]["request"]["set"]

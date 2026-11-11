@@ -11,8 +11,10 @@
 //! path: every read and write of a graph goes through Ankurah, the MCP endpoint's through the
 //! project's graph over the daemon's own durable node, by the same operations the CLI's commands
 //! run. Every project's socket joins the one node, and its path names the project its client
-//! works in; nothing at the socket keeps a client to that project yet, which Ankurah's policy
-//! hooks are to do (docs/design/daemon.md, "Keeping projects apart").
+//! works in (`fwd_core::daemon_socket`); nothing at the socket keeps a client to that project yet,
+//! which Ankurah's policy hooks are to do (docs/design/daemon.md, "Keeping projects apart"). A
+//! client built for the daemons that kept a store per project, whose reads name no project, is
+//! refused at the path those daemons served their sockets at.
 //!
 //! Who may talk to it: the daemon listens on loopback unless the person chose the LAN
 //! (`daemon.toml`). Every request must carry one of the daemon's own `Host` names and, when a
@@ -37,6 +39,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, routing::post, Json, Router};
 use fwd_core::daemon::{try_lock, write_port_file, Bind, CheckoutRecord, DaemonConfig, HostedProject, PortFile};
+use fwd_core::daemon_socket;
 use fwd_core::project::{self, Index, NamedProject, Paths};
 use fwd_core::project_graph::ProjectGraph;
 use include_dir::{include_dir, Dir};
@@ -384,9 +387,10 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/projects", get(projects_list).merge(post(projects_open).route_layer(control())))
-        // A project's Ankurah socket. Ankurah's connectors take a base URL and append `/ws`, so
-        // the project is named in the path before it.
-        .route("/p/{project}/ws", get(project_socket))
+        // A project's Ankurah socket, at the base path every client builds with the project's id
+        // (here the route's capture in its place) and the `/ws` Ankurah's connectors append.
+        .route(&format!("{}/ws", daemon_socket::base_path("{project}")), get(project_socket))
+        .route(PER_PROJECT_SOCKET, get(refuse_older_client))
         .route("/p/{project}/checkouts", get(checkouts_list).post(checkouts_report).route_layer(control()))
         .route("/webview-origins", post(admit_webview).route_layer(control()))
         .route("/stop", post(stop).route_layer(control()))
@@ -746,6 +750,26 @@ async fn project_socket(
     }
 }
 
+/// The path at which the daemons that kept a store per project served each project's socket, and
+/// at which a client built for them still asks for it.
+const PER_PROJECT_SOCKET: &str = "/p/{project}/ws";
+
+/// What such a client is told, whatever project it names.
+const OLDER_CLIENT_REFUSAL: &str =
+    "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's.\n";
+
+/// Refuses a client built for the daemons that kept a store per project, which would read every
+/// project's records here (`fwd_core::daemon_socket` says how). `410 Gone`, since that socket is
+/// gone from this path for good, unlike the socket's `404` for a project the daemon does not host.
+/// No status stops those clients sooner, since none of them reads it: a command's Ankurah client
+/// fails its first attempt on any answer but `101` and the command ends with it, a `fwd watch`
+/// that was running keeps trying, at most every 30 s, until its ten-minute outage limit ends it,
+/// and a page's browser hides the answer from it while its connector tries again, at most every
+/// 10 s.
+async fn refuse_older_client() -> Response {
+    (StatusCode::GONE, OLDER_CLIENT_REFUSAL).into_response()
+}
+
 /// The project's registry, minus checkouts whose directory is gone (a deleted worktree simply
 /// stops being listed; nothing in the graph referred to it).
 async fn checkouts_list(State(state): State<AppState>, RoutePath(path): RoutePath<ProjectPath>) -> Response {
@@ -1097,7 +1121,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let app = app(state(dir.path(), Bind::Loopback).await, THIS_MACHINE);
         let upgrade = |origin: Option<&str>| {
-            let request = request(Method::GET, &format!("/p/{}/ws", Uuid::nil()), HERE)
+            let request = request(Method::GET, &format!("{}/ws", daemon_socket::base_path(Uuid::nil())), HERE)
                 .header(header::CONNECTION, "Upgrade")
                 .header(header::UPGRADE, "websocket")
                 .header(header::SEC_WEBSOCKET_VERSION, "13")
@@ -1116,6 +1140,72 @@ mod tests {
         assert_eq!(send(&app, upgrade(Some("vscode-webview://abc"))).await.status(), StatusCode::NOT_FOUND);
         assert_eq!(send(&app, upgrade(None)).await.status(), StatusCode::NOT_FOUND);
         assert_eq!(send(&app, upgrade(Some("vscode-webview://other"))).await.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// One socket upgrade to `path`, sent as Ankurah's clients send it over a real connection to
+    /// the listener on `port`, so that an upgrade can succeed: the answer's status line, and its
+    /// body (none when the socket opened).
+    async fn upgrade_over_tcp(port: u16, path: &str) -> (String, String) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let connection = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("a connection");
+        let mut answer = BufReader::new(connection);
+        let head = format!(
+            "GET {path} HTTP/1.1\r\nHost: {HERE}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        answer.get_mut().write_all(head.as_bytes()).await.expect("the request is sent");
+        let mut status = String::new();
+        answer.read_line(&mut status).await.expect("a status line");
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            answer.read_line(&mut line).await.expect("a header");
+            match line.split_once(':') {
+                _ if line == "\r\n" => break,
+                Some((name, value)) if name.eq_ignore_ascii_case("content-length") => {
+                    length = value.trim().parse().expect("a length");
+                }
+                _ => {}
+            }
+        }
+        let mut body = vec![0; length];
+        answer.read_exact(&mut body).await.expect("the body");
+        (status.trim_end().to_string(), String::from_utf8(body).expect("a text body"))
+    }
+
+    /// A client built for the daemons that kept a store per project asks for its socket where
+    /// those daemons served it, and is refused with `410 Gone` and the sentence saying why,
+    /// whatever project it names, so that it never reads the one store; a client of this build
+    /// asks where `fwd_core::daemon_socket` says, and its socket opens.
+    #[tokio::test]
+    async fn an_older_client_is_refused_at_the_per_project_socket_and_this_builds_socket_opens() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let state = state(dir.path(), Bind::Loopback).await;
+        let project = NamedProject { id: Uuid::new_v4(), name: "test".into() };
+        let hosted = host_project(&state.paths, &state.node, &project).await.expect("the project is hosted");
+        state.projects.write().expect("projects lock").insert(project.id, Slot::Open(Arc::new(hosted)));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("a listener");
+        let port = listener.local_addr().expect("the listener's address").port();
+        // The peer's address as `serve` gives it, which Ankurah's upgrade reads from the request
+        // itself, where `MockConnectInfo` puts nothing.
+        let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        for named in [project.id, Uuid::nil()] {
+            assert_eq!(
+                upgrade_over_tcp(port, &format!("/p/{named}/ws")).await,
+                (
+                    "HTTP/1.1 410 Gone".to_string(),
+                    "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's.\n"
+                        .to_string()
+                )
+            );
+        }
+        assert_eq!(
+            upgrade_over_tcp(port, &format!("{}/ws", daemon_socket::base_path(project.id))).await,
+            ("HTTP/1.1 101 Switching Protocols".to_string(), String::new())
+        );
+        server.abort();
     }
 
     #[tokio::test]

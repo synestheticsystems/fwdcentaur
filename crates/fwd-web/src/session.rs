@@ -22,6 +22,7 @@ use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_signals::{CurrentObserver, ReactiveGraphObserver};
 use ankurah_storage_indexeddb_wasm::IndexedDBStorageEngine;
 use ankurah_websocket_client_wasm::WebsocketClient;
+use fwd_core::daemon_socket;
 use fwd_core::model::PrincipalView;
 use fwd_core::naming;
 use fwd_core::ops;
@@ -476,20 +477,21 @@ async fn sweep_unused(w: &web_sys::Window, prefix: &str, keep: &str) {
     }
 }
 
-/// The project's socket, `/p/<project>/ws` (the connector appends the last segment): at the
-/// daemon `?daemon=` named, else on the page's own origin, since the daemon serves both the page
-/// and the sockets. A trunk dev server proxies `/p/` to the daemon, so the page's own origin
-/// holds there too.
+/// The project's socket, at the base path `fwd_core::daemon_socket` names (the connector appends
+/// `/ws`): at the daemon `?daemon=` named, else on the page's own origin, since the daemon serves
+/// both the page and the sockets. A trunk dev server proxies `/p/` to the daemon, so the page's own
+/// origin holds there too.
 fn ws_url(daemon: Option<&str>, project: &str) -> String {
+    let path = daemon_socket::base_path(project);
     if let Some(address) = daemon {
         // `daemon_address` admits `http://` addresses only.
-        return format!("ws://{}/p/{project}", address.trim_start_matches("http://"));
+        return format!("ws://{}{path}", address.trim_start_matches("http://"));
     }
     let location = window().expect("no window").location();
     let host = location.host().unwrap_or_else(|_| "127.0.0.1".into());
     let protocol = location.protocol().unwrap_or_else(|_| "http:".into());
     let scheme = if protocol == "https:" { "wss" } else { "ws" };
-    format!("{scheme}://{host}/p/{project}")
+    format!("{scheme}://{host}{path}")
 }
 
 /// Waits, at most `JOIN_TIMEOUT_MS`, for the node to join the daemon's system over the socket,

@@ -19,6 +19,7 @@ pub mod backup;
 mod calendar;
 #[cfg(feature = "native")]
 pub mod daemon;
+pub mod daemon_socket;
 pub mod decision_log;
 pub mod dormancy;
 pub mod file_mention;

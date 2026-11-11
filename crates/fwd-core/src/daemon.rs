@@ -20,6 +20,7 @@
 //! command exits, so such a command ends with [`Lost`] whenever its socket closed while it ran
 //! ([`Client::while_writing`]).
 
+use crate::daemon_socket;
 use crate::project::{Checkout, NamedProject, Paths};
 use crate::project_graph::ProjectGraph;
 use ankurah::signals::{Subscribe, SubscriptionGuard};
@@ -353,9 +354,9 @@ impl Client {
 
 /// The base URL a client hands Ankurah's connector for one project's socket (the connector
 /// appends `/ws` itself). Every project's socket reaches the daemon's one node; the path names the
-/// project the client works in.
+/// project the client works in ([`daemon_socket`]).
 pub fn socket_base(pf: &PortFile, project: Uuid) -> String {
-    format!("ws://127.0.0.1:{}/p/{project}", pf.port)
+    format!("ws://127.0.0.1:{}{}", pf.port, daemon_socket::base_path(project))
 }
 
 /// The ephemeral node's store: SQLite in memory, whose database lives only as long as the one
