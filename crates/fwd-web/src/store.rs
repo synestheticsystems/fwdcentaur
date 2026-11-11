@@ -15,6 +15,7 @@ use ankurah::changes::{ChangeSet, ItemChange};
 use ankurah::signals::{Get as AnkurahGet, Subscribe, SubscriptionGuard};
 use ankurah::{EntityId, LiveQuery, View};
 use fwd_core::dormancy;
+use fwd_core::former_ids::FormerIds;
 use fwd_core::model::*;
 use fwd_core::naming::{self, Named, Work};
 use fwd_core::rules::{self, Readiness, TaskSnapshot};
@@ -38,6 +39,7 @@ struct Store {
     messages: Option<LiveQuery<MessageView>>,
     anchors: Option<LiveQuery<CodeAnchorView>>,
     decisions: Option<LiveQuery<DecisionView>>,
+    former_ids: Option<LiveQuery<FormerIdView>>,
     /// Whether the daemon has answered every standing query above (`standing_loaded`).
     answered: ArcRwSignal<bool>,
     /// The readers of each entity looked up by its id in the queries above.
@@ -105,12 +107,21 @@ pub enum Collection {
     Messages,
     Anchors,
     Decisions,
+    /// The ids the project's records had before they were renumbered, which a route, a typed name
+    /// and a text written before then may name (`fwd_core::former_ids`).
+    FormerIds,
 }
 
 impl Collection {
     /// Every collection: the app's pages read them all between them.
-    pub const ALL: [Collection; 5] =
-        [Collection::Scopes, Collection::Principals, Collection::Messages, Collection::Anchors, Collection::Decisions];
+    pub const ALL: [Collection; 6] = [
+        Collection::Scopes,
+        Collection::Principals,
+        Collection::Messages,
+        Collection::Anchors,
+        Collection::Decisions,
+        Collection::FormerIds,
+    ];
 }
 
 static STORE: OnceLock<SendWrapper<Store>> = OnceLock::new();
@@ -155,6 +166,9 @@ pub fn open_with(tasks: Tasks, reads: &[Collection]) -> Result<(), String> {
     let decisions = named(Collection::Decisions)
         .then(|| graph.query_all::<DecisionView>().map_err(refused("decisions")))
         .transpose()?;
+    let former_ids = named(Collection::FormerIds)
+        .then(|| graph.query_all::<FormerIdView>().map_err(refused("former ids")))
+        .transpose()?;
     // Watched from before any of them answers, so that every arrival is heard.
     let (arrivals, ends) = (Arrivals::default(), Ends::default());
     let mut watching = vec![arrivals.watch(&tasks), arrivals.watch(&relations), ends.watch(&relations)];
@@ -171,6 +185,7 @@ pub fn open_with(tasks: Tasks, reads: &[Collection]) -> Result<(), String> {
         messages,
         anchors,
         decisions,
+        former_ids,
         answered: ArcRwSignal::new(false),
         arrivals,
         ends,
@@ -214,6 +229,18 @@ pub fn decisions() -> Vec<DecisionView> {
     found
 }
 
+/// The project's former ids, each with the record it names now, copied whole: read inside a
+/// closure, which then runs again when one arrives.
+pub fn former_ids() -> FormerIds {
+    FormerIds::from_views(&opened(&store().former_ids, Collection::FormerIds).get())
+}
+
+/// The record `id` names now: the one it was renumbered to when it is a former id, and itself
+/// otherwise.
+pub fn current(id: EntityId) -> EntityId {
+    former_ids().named(&id.to_base64()).unwrap_or(id)
+}
+
 /// Whether the daemon has answered every standing query, so that an empty result means none
 /// rather than not yet, and a choice made once from them, such as the card the Inbox or the
 /// Questions page selects first or the scope the Graph and Decisions pages open on, is made from
@@ -253,6 +280,9 @@ async fn record_the_daemons_answer() {
     }
     if let Some(decisions) = &store.decisions {
         answers.push(("decisions", decisions.wait_durable_answered().await));
+    }
+    if let Some(former_ids) = &store.former_ids {
+        answers.push(("former ids", former_ids.wait_durable_answered().await));
     }
     for (what, answer) in answers {
         if let Err(e) = answer {

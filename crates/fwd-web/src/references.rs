@@ -76,14 +76,15 @@ pub fn resolve<I>(text: &str, id: impl Fn(&str) -> Option<I>, handle: impl Fn(&s
 }
 
 /// What `text` draws as, from the page's standing queries: any id that reads as one is its
-/// entity's, held or not, and a handle is the principal's who has it, while no other principal of
-/// the project has it too (`fwd_core::naming::by_name`).
+/// entity's, held or not, an id an entity had before it was renumbered being that entity's
+/// (`store::current`), and a handle is the principal's who has it, while no other principal of the
+/// project has it too (`fwd_core::naming::by_name`).
 fn resolved(text: &str) -> Vec<Drawn<EntityId>> {
     let handle = |name: &str| match fwd_core::naming::by_name(&store::principals(), name, None).as_slice() {
         [one] => Some(one.id()),
         _ => None,
     };
-    resolve(text, |inner| inner.parse::<EntityId>().ok(), handle)
+    resolve(text, |inner| inner.parse::<EntityId>().ok().map(store::current), handle)
 }
 
 /// A message's text with each reference drawn as the lozenge of what it names. Each lozenge

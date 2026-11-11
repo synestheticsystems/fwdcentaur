@@ -27,6 +27,7 @@ use crate::scope_filter::ScopeChoice;
 use crate::session::{self, graph};
 use crate::{fmt, keys, labels, modes, panel, references, store};
 use ankurah::EntityId;
+use fwd_core::former_ids::FormerIds;
 use fwd_core::ops::{self, CreateTask, Kind};
 use fwd_core::rules;
 use leptos::prelude::*;
@@ -81,12 +82,13 @@ pub struct Filled {
     pub motivated_by: Picked,
 }
 
-/// What the pickers can name, from the page's standing queries: each entity with its kind, and
-/// each decision's number.
+/// What the pickers can name, from the page's standing queries: each entity with its kind, each
+/// decision's number, and the ids entities had before they were renumbered.
 #[derive(Clone, Debug, Default)]
 pub struct Known {
     pub entities: Vec<(EntityId, Kind)>,
     pub numbers: Vec<(EntityId, i64)>,
+    pub former_ids: FormerIds,
 }
 
 /// The entity a name typed into a picker stands for, by the rule a command line runs
@@ -99,7 +101,8 @@ pub fn resolve(text: &str, slot: Slot, known: &Known) -> Result<EntityId, String
         Some(n) => known.numbers.iter().filter(|(_, number)| *number == n).map(|(id, _)| *id).collect(),
         None => Vec::new(),
     };
-    let id = ops::name_to_id(text, slot.kinds, &numbered, &known.entities).map_err(|e| e.to_string())?;
+    let id =
+        ops::name_to_id(text, slot.kinds, &numbered, &known.entities, &known.former_ids).map_err(|e| e.to_string())?;
     if known.entities.iter().any(|(held, kind)| *held == id && slot.kinds.contains(kind)) {
         Ok(id)
     } else {
@@ -164,7 +167,7 @@ fn known() -> Known {
     entities.extend(store::messages().iter().map(|m| (m.id(), Kind::Message)));
     entities.extend(decisions.iter().map(|d| (d.id(), Kind::Decision)));
     let numbers = decisions.iter().filter_map(|d| Some((d.id(), d.number().ok()?))).collect();
-    Known { entities, numbers }
+    Known { entities, numbers, former_ids: store::former_ids() }
 }
 
 /// How many messages a picker's list offers, the newest; the start of any message's id names it.
@@ -587,6 +590,7 @@ mod tests {
                 (decision, Kind::Decision),
             ],
             numbers: vec![(decision, 7)],
+            former_ids: FormerIds::default(),
         };
         (known, [a, b, c, message, decision])
     }

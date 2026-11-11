@@ -40,6 +40,21 @@ pub fn App() -> impl IntoView {
     // The scope the Questions, Tasks, Decisions and Graph pages list by, one choice for the four,
     // which each of their routes carries: none until the page has picked the one it opens on.
     let scope = scope_filter::follow(route.clone());
+    // A route naming an id a record had before it was renumbered, from a bookmark or a note, is
+    // put in place of by the route naming the record now, once the daemon has answered the
+    // standing queries that say which ids are former ones.
+    Effect::new({
+        let route = route.clone();
+        move |_| {
+            let here = route.get();
+            if store::standing_loaded() {
+                let now = untrack(|| here.with_ids(store::current));
+                if now != here {
+                    route::replace(now);
+                }
+            }
+        }
+    });
     // Whether the Tasks page's panel holds the form for a new task.
     let new_task = Memo::new({
         let route = route.clone();

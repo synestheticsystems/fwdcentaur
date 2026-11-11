@@ -5,6 +5,7 @@
 //! (`rules::can_edit_message`), and only a task's creator and its assignee take a step off its
 //! checklist (`rules::can_remove_step`).
 
+use crate::former_ids::FormerIds;
 use crate::model::*;
 use crate::naming;
 use crate::project_graph::{ProjectGraph, ProjectTransaction};
@@ -3622,8 +3623,8 @@ async fn resolve_reference(graph: &ProjectGraph, written: &crate::references::Wr
         },
         Written::Bracketed(inner) if inner.is_empty() => bail!("the brackets are empty"),
         Written::Bracketed(inner) => match inner.parse::<EntityId>() {
-            Ok(id) => match kind_of(graph, id).await {
-                Some(_) => Ok(id),
+            Ok(id) => match current_record(graph, id).await {
+                Some((record, _)) => Ok(record),
                 None => bail!("nothing in this project has that id"),
             },
             Err(_) => resolve_id(graph, inner, MENTIONABLE).await,
@@ -3655,12 +3656,23 @@ pub async fn kind_of(graph: &ProjectGraph, id: EntityId) -> Option<Kind> {
     None
 }
 
+/// The record `id` names in the project, with its kind: the record itself, or, for an id it had
+/// before it was renumbered, which a text written before then stores (`former_ids`), the record it
+/// is now. None when `id` names nothing here.
+pub async fn current_record(graph: &ProjectGraph, id: EntityId) -> Option<(EntityId, Kind)> {
+    if let Some(kind) = kind_of(graph, id).await {
+        return Some((id, kind));
+    }
+    let record = FormerIds::named_in(graph, &id.to_base64()).await.ok()??;
+    Some((record, kind_of(graph, record).await?))
+}
+
 /// What something is and a name to show for it, as a reference or a step reads: a person as
 /// `@handle`, a task and a scope by title, a decision as `D12 (title)`, code as `path:lines` and a
-/// whole file as its path, a message by its first words, a relation by its kind. None when `id`
-/// names nothing here.
+/// whole file as its path, a message by its first words, a relation by its kind. An id the record
+/// had before it was renumbered names the record as its id does. None when `id` names nothing here.
 pub async fn describe(graph: &ProjectGraph, id: EntityId) -> Option<(Kind, String)> {
-    let kind = kind_of(graph, id).await?;
+    let (id, kind) = current_record(graph, id).await?;
     let name = match kind {
         Kind::Task => graph.get::<TaskView>(id).await.ok()?.title().ok()?,
         Kind::Decision => {
@@ -3702,7 +3714,8 @@ pub async fn describe_named(graph: &ProjectGraph, named: &Named) -> Option<(Kind
     let (kind, name) = describe(graph, named.id).await?;
     match &named.version {
         Some(version) if kind == Kind::Anchor => {
-            let a = graph.get::<CodeAnchorView>(named.id).await.ok()?;
+            let (anchor, _) = current_record(graph, named.id).await?;
+            let a = graph.get::<CodeAnchorView>(anchor).await.ok()?;
             Some((kind, crate::anchor_name::AnchorName::file_at(&a.path().ok()?, version).text()))
         }
         _ => Some((kind, name)),
@@ -3711,13 +3724,19 @@ pub async fn describe_named(graph: &ProjectGraph, named: &Named) -> Option<(Kind
 
 /// One reference of a stored text for a reader who holds only the text: as [`reference_json`]
 /// gives the thing it names, named as [`describe_named`] names it, with the version a file mention
-/// names as the text stores it (`version`: `worktree`, `index` or a commit's id).
+/// names as the text stores it (`version`: `worktree`, `index` or a commit's id). A text written
+/// before its records were renumbered names a former id, which `former_id` gives beside the id of
+/// the record it names now.
 pub async fn named_json(graph: &ProjectGraph, named: &Named) -> Value {
     let (kind, name) = match describe_named(graph, named).await {
         Some((kind, name)) => (kind.name(), name),
         None => ("unknown", named.id.to_base64()),
     };
-    let mut v = json!({"id": named.id.to_base64(), "kind": kind, "name": name});
+    let current = current_record(graph, named.id).await.map_or(named.id, |(record, _)| record);
+    let mut v = json!({"id": current.to_base64(), "kind": kind, "name": name});
+    if current != named.id {
+        v["former_id"] = json!(named.id.to_base64());
+    }
     if let Some(version) = &named.version {
         v["version"] = json!(version.as_str());
     }
@@ -4626,13 +4645,20 @@ pub const ANY: &[Kind] = &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scop
 pub const MIN_PREFIX: usize = 6;
 
 /// An entity named on a command line: its full id; `D<number>` for a decision; or a prefix of at
-/// least six characters of the id of exactly one entity among `kinds`. A full id is taken as it
-/// is (the command then says whether it can use it); a prefix that matches several entities is
-/// refused with each of them listed, and one that matches none is refused plainly. `D<number>` is
-/// read as a decision's number first. With five digits or more it is also long enough to be the
-/// start of an id, and it is tried as one when no decision has that number; while one has, it
-/// names that decision, which a command that takes no decision refuses.
+/// least six characters of the id of exactly one entity among `kinds`. An id the entity had before
+/// it was renumbered (`former_ids`) counts as its id, whole or as a prefix, beside its current one.
+/// A full id is taken as it is (the command then says whether it can use it), or for a former id
+/// as the entity it names now; a prefix that matches several entities is refused with each of them
+/// listed, and one that matches none is refused plainly. `D<number>` is read as a decision's number
+/// first. With five digits or more it is also long enough to be the start of an id, and it is
+/// tried as one when no decision has that number; while one has, it names that decision, which a
+/// command that takes no decision refuses.
 pub async fn resolve_id(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result<EntityId> {
+    if may_start_an_id(s) {
+        if let Some(record) = FormerIds::named_in(graph, s).await? {
+            return Ok(record);
+        }
+    }
     if let Ok(id) = s.parse::<EntityId>() {
         return Ok(id);
     }
@@ -4640,22 +4666,33 @@ pub async fn resolve_id(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result
         Some(n) => decisions(graph).await?.iter().filter(|d| d.number().ok() == Some(n)).map(|d| d.id()).collect(),
         None => Vec::new(),
     };
-    // The entities of `kinds`, read only when the name can start an id and no decision's number
-    // took it.
+    // The entities of `kinds`, and the former ids, read only when the name can start an id and no
+    // decision's number took it.
     let mut found = Vec::new();
+    let mut former = FormerIds::default();
     if numbered.is_empty() && may_start_an_id(s) {
         for kind in kinds {
             found.extend(kind.ids(graph).await?.into_iter().map(|id| (id, *kind)));
         }
+        former = FormerIds::of(graph).await?;
     }
-    name_to_id(s, kinds, &numbered, &found)
+    name_to_id(s, kinds, &numbered, &found, &former)
 }
 
 /// The entity a name stands for by [`resolve_id`]'s rule, among entities already in hand, as the
 /// page's pickers hold them: `numbered` has the decisions with the number a `D<number>` name
-/// gives, and `found` each entity the name may start the id of, with its kind (one of a kind not
-/// in `kinds` is passed over).
-pub fn name_to_id(s: &str, kinds: &[Kind], numbered: &[EntityId], found: &[(EntityId, Kind)]) -> Result<EntityId> {
+/// gives, `found` each entity the name may start the id of, with its kind (one of a kind not in
+/// `kinds` is passed over), and `former` the project's former ids.
+pub fn name_to_id(
+    s: &str,
+    kinds: &[Kind],
+    numbered: &[EntityId],
+    found: &[(EntityId, Kind)],
+    former: &FormerIds,
+) -> Result<EntityId> {
+    if let Some(record) = former.named(s) {
+        return Ok(record);
+    }
     if let Ok(id) = s.parse::<EntityId>() {
         return Ok(id);
     }
@@ -4677,16 +4714,29 @@ pub fn name_to_id(s: &str, kinds: &[Kind], numbered: &[EntityId], found: &[(Enti
     if !may_start_an_id(s) {
         bail!("`{s}` is not an entity id: give the whole id, its first {MIN_PREFIX} characters or more, or D<number> for a decision");
     }
-    let matches: Vec<(EntityId, Kind)> =
-        found.iter().copied().filter(|(id, kind)| kinds.contains(kind) && id.to_base64().starts_with(s)).collect();
+    // Each entity whose id, or one of whose former ids, starts with `s`, once, with the former id
+    // that matched when its own id did not.
+    let mut matches: Vec<(EntityId, Kind, Option<&str>)> = found
+        .iter()
+        .filter(|(id, kind)| kinds.contains(kind) && id.to_base64().starts_with(s))
+        .map(|(id, kind)| (*id, *kind, None))
+        .collect();
+    for (cited, record) in former.starting(s) {
+        let Some((_, kind)) = found.iter().find(|(id, kind)| *id == record && kinds.contains(kind)) else { continue };
+        if !matches.iter().any(|(id, _, _)| *id == record) {
+            matches.push((record, *kind, Some(cited)));
+        }
+    }
     match matches.as_slice() {
-        [(id, _)] => Ok(*id),
+        [(id, _, _)] => Ok(*id),
         [] => bail!("no {} has an id starting with `{s}`", wanted()),
         several => {
+            let start = |id: &str| id.chars().take(s.len() + 4).collect::<String>();
             let listed: Vec<String> = several
                 .iter()
-                .map(|(id, kind)| {
-                    format!("{} {}", kind.name(), id.to_base64().chars().take(s.len() + 4).collect::<String>())
+                .map(|(id, kind, cited)| match cited {
+                    None => format!("{} {}", kind.name(), start(&id.to_base64())),
+                    Some(cited) => format!("{} {} (formerly {})", kind.name(), start(&id.to_base64()), start(cited)),
                 })
                 .collect();
             bail!("`{s}` starts the ids of {} entities ({}); give more of the id", several.len(), listed.join(", "))

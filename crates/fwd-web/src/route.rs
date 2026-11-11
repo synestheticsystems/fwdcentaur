@@ -130,6 +130,30 @@ impl Route {
         route
     }
 
+    /// The same route with each id it names put through `current`: what a route written before
+    /// the project's records were renumbered, a bookmark or a link in a note, names now
+    /// (`store::current`, which the shell redirects such a route by).
+    pub fn with_ids(&self, current: impl Fn(EntityId) -> EntityId) -> Route {
+        let one = |id: &Option<EntityId>| id.map(&current);
+        let scope = |choice: &Option<ScopeChoice>| match choice {
+            Some(ScopeChoice::Scope(id)) => Some(ScopeChoice::Scope(current(*id))),
+            other => *other,
+        };
+        match self {
+            Route::Inbox { whose } => Route::Inbox { whose: whose.clone() },
+            Route::Questions { question, whose, scope: s } => {
+                Route::Questions { question: one(question), whose: whose.clone(), scope: scope(s) }
+            }
+            Route::Tasks { task, scope: s } => Route::Tasks { task: one(task), scope: scope(s) },
+            Route::NewTask { scope: s } => Route::NewTask { scope: scope(s) },
+            Route::Decisions { decision, scope: s } => Route::Decisions { decision: one(decision), scope: scope(s) },
+            Route::Graph { task, scope: s } => Route::Graph { task: one(task), scope: scope(s) },
+            Route::Scopes(Some(ScopePanel::Edit(id))) => Route::Scopes(Some(ScopePanel::Edit(current(*id)))),
+            Route::Scopes(panel) => Route::Scopes(*panel),
+            Route::Anchor(id) => Route::Anchor(current(*id)),
+        }
+    }
+
     /// Whether this route is `before` with a scope choice put in where `before` named none: the
     /// page filling in its choice, which leaves the page where it was.
     pub fn fills_in(&self, before: &Route) -> bool {
@@ -280,6 +304,22 @@ mod tests {
     use super::ScopePanel;
     use crate::scope_filter::ScopeChoice;
     use ankurah::EntityId;
+
+    #[test]
+    fn a_route_naming_a_former_id_names_the_record_it_was_renumbered_to() {
+        let (former, record, other) =
+            (EntityId::from_bytes([1; 32]), EntityId::from_bytes([2; 32]), EntityId::from_bytes([3; 32]));
+        let current = |id: EntityId| if id == former { record } else { id };
+        let scope = |id| Some(ScopeChoice::Scope(id));
+        assert_eq!(
+            Tasks { task: Some(former), scope: scope(former) }.with_ids(current),
+            Tasks { task: Some(record), scope: scope(record) }
+        );
+        assert_eq!(Anchor(former).with_ids(current), Anchor(record));
+        assert_eq!(Scopes(Some(ScopePanel::Edit(former))).with_ids(current), Scopes(Some(ScopePanel::Edit(record))));
+        let untouched = Questions { question: Some(other), whose: Some("claude".into()), scope: scope(other) };
+        assert_eq!(untouched.with_ids(current), untouched, "a route naming current ids is left as it is");
+    }
 
     #[test]
     fn every_route_reads_back_as_it_was_written() {

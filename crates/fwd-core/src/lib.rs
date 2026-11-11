@@ -22,6 +22,7 @@ pub mod daemon;
 pub mod decision_log;
 pub mod dormancy;
 pub mod file_mention;
+pub mod former_ids;
 pub mod guidance;
 pub mod labels;
 pub mod model;
