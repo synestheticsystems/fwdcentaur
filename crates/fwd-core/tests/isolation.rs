@@ -9,7 +9,7 @@ use ankurah::changes::ChangeSet;
 use ankurah::error::RetrievalError;
 use ankurah::property::{Json, Ref};
 use ankurah::signals::{Get, Subscribe};
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, LiveQuery, Node, PermissiveAgent, View};
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, LiveQuery, Node, PermissiveAgent, View};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::model::*;
@@ -22,14 +22,21 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-/// Two projects in one store in memory, each by its graph.
-async fn two_projects() -> Result<(ProjectGraph, ProjectGraph)> {
+/// Two projects in one store in memory, each by its graph, and the node's context, through which a
+/// test writes what no graph would.
+async fn two_projects_and_the_node() -> Result<(Context, ProjectGraph, ProjectGraph)> {
     let storage = SqliteStorageEngine::open_in_memory().await?;
     let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
     node.system.create().await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
-    let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
+    let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;
+    Ok((ctx, alpha, beta))
+}
+
+/// Two projects in one store in memory, each by its graph.
+async fn two_projects() -> Result<(ProjectGraph, ProjectGraph)> {
+    let (_, alpha, beta) = two_projects_and_the_node().await?;
     Ok((alpha, beta))
 }
 
@@ -428,5 +435,51 @@ async fn routing_in_one_project_tells_its_own_principals_and_no_one_in_the_other
     assert!(!made.is_empty());
     assert_eq!(every_id(&beta).await?, before, "nothing of beta's was made or touched");
     assert_eq!(ops::inbox(&beta, b.alice, false).await?.len(), 1, "beta's implementer has her own question alone");
+    Ok(())
+}
+
+/// A record moved to the other project, here by a raw write of its `project`, which stands in for
+/// the move fwd is to make later, leaves every standing query and every view of the project it left
+/// and appears in those of the project it joined: a task, and a comment on it, moved together.
+#[tokio::test]
+async fn a_record_moved_to_the_other_project_leaves_the_first_and_appears_in_the_second() -> Result<()> {
+    let (ctx, alpha, beta) = two_projects_and_the_node().await?;
+    let a = populate(&alpha).await?;
+    let b = populate(&beta).await?;
+    let task = ops::create_task(&alpha, a.daniel, CreateTask { title: "Move me".into(), ..Default::default() }).await?;
+    let on_task = MessageContext { task_id: Some(task), ..Default::default() };
+    let comment = ops::post_message(&alpha, a.daniel, "and me with it", Priority::Next, on_task).await?;
+    let mut mine = Standing::open(&alpha, a.daniel, a.cap).await?;
+    let mut theirs = Standing::open(&beta, b.daniel, b.cap).await?;
+    mine.named("tasks").heard.until(task).await;
+    mine.named("messages").heard.until(comment).await;
+    mine.named("a reader's messages").heard.until(comment).await;
+
+    let trx = ctx.begin();
+    let moving: TaskView = ctx.get(task).await?;
+    moving.edit(&trx)?.project()?.set(&beta.project())?;
+    let moving: MessageView = ctx.get(comment).await?;
+    moving.edit(&trx)?.project()?.set(&beta.project())?;
+    trx.commit().await?;
+    theirs.named("tasks").heard.until(task).await;
+    theirs.named("messages").heard.until(comment).await;
+    // Once alpha's queries have a task made after the move, they have heard of the move or never
+    // will.
+    let marker = ops::create_task(&alpha, a.daniel, CreateTask { title: "Stay".into(), ..Default::default() }).await?;
+    mine.named("tasks").heard.until(marker).await;
+
+    for opened in &mine.0 {
+        let held = (opened.holds)();
+        assert!(!held.contains(&task) && !held.contains(&comment), "alpha's {} still holds what moved", opened.name);
+    }
+    assert!(alpha.get::<TaskView>(task).await.is_err() && alpha.get::<MessageView>(comment).await.is_err());
+    assert_eq!(ops::kind_of(&alpha, task).await, None);
+    assert!(ops::messages_about(&alpha, "task", task).await?.is_empty());
+    assert!(ops::resolve_id(&alpha, &task.to_base64()[..8], ops::ANY).await.is_err());
+    let theirs_now = |name: &str| (theirs.0.iter().find(|o| o.name == name).expect("a query").holds)();
+    assert!(theirs_now("tasks").contains(&task) && theirs_now("messages").contains(&comment));
+    assert_eq!(beta.get::<TaskView>(task).await?.title()?, "Move me");
+    assert_eq!(ids_of(&ops::messages_about(&beta, "task", task).await?), vec![comment]);
+    assert_eq!(ops::resolve_id(&beta, &task.to_base64()[..8], ops::ANY).await?, task);
     Ok(())
 }

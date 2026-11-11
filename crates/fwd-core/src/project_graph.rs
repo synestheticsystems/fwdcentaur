@@ -5,7 +5,9 @@
 //! a [`ProjectGraph`], which is bound to one project: it adds the project to every fetch and every
 //! live query, finds a record by its id only when the record is that project's, and refuses to make
 //! or edit a record of another project. The Ankurah context it wraps never leaves this module, so
-//! an operation that left the project out would not compile.
+//! an operation that left the project out would not compile. A record's project is read each time
+//! and never remembered, so a record moved to another project (an operation of its own, which
+//! nothing performs yet) leaves this graph's reads and live queries and joins the other's.
 
 use crate::model::*;
 use ankurah::ankql::ast::{ComparisonOperator, Expr, Parsed, PathExpr, Predicate, Selection};

@@ -5,9 +5,10 @@
 //!
 //! A daemon keeps every project it hosts in one node and one store (docs/DECISIONS.md, D135), so
 //! every record of the nine models a project's work is made of names its [`Project`] in a
-//! `project` field, set when the record is made and never changed. That field, not the store a
-//! record sits in, is what keeps one project's records apart from another's (D38), and the
-//! project's graph (`crate::project_graph`) adds it to every read and every creation.
+//! `project` field, set when the record is made; only moving the record to another project, which
+//! nothing does yet, changes it. That field, not the store a record sits in, is what keeps one
+//! project's records apart from another's (D38), and the project's graph (`crate::project_graph`)
+//! adds it to every read and every creation.
 //!
 //! Enumerations (`string_enum_property!`) are stored as their snake_case names (`"in_progress"`), so predicates read
 //! `status = 'in_progress'` and unknown values survive as strings. Identity is the Ankurah
@@ -118,7 +119,8 @@ string_enum_property!(AgentRole);
 /// and its inbox there, so a person or an agent in two projects is two principals with one handle.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Principal {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     #[active_type(LWW)]
     pub kind: PrincipalKind,
@@ -197,7 +199,8 @@ pub struct Principal {
 /// A registered repository, keyed by its upstream (`remote_urls`). Anchors reference it so a project can span several repositories.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     #[active_type(LWW)]
     pub name: String,
@@ -238,7 +241,8 @@ string_enum_property!(TaskStatus);
 /// work happens is a `worked_in` relation to a scope; readiness is derived, never stored.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     #[active_type(LWW)]
     pub title: String,
@@ -374,7 +378,8 @@ string_enum_property!(RelationStatus);
 /// An edge is an entity with two named endpoints and full provenance. Binary only in v1.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Relation {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     #[active_type(LWW)]
     pub kind: RelationKind,
@@ -471,7 +476,8 @@ impl Piece {
 /// computed on demand and cached outside the graph (`sidecar`). See docs/design/anchoring.md.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct CodeAnchor {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     pub repo: Ref<Repo>,
     /// Repo-relative, at the anchored version.
@@ -607,7 +613,8 @@ string_enum_property!(MessageStatus);
 /// (`ops::edit_message`), which changes nothing else about it but saying when and by whom.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     pub author: Ref<Principal>,
     pub created: i64,
@@ -724,7 +731,8 @@ string_enum_property!(NotificationStatus);
 /// of steps and comments reaches its recipient once (docs/design/agents-and-inbox.md, rule 10).
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     pub recipient: Ref<Principal>,
     #[active_type(LWW)]
@@ -775,7 +783,8 @@ string_enum_property!(ScopeStatus);
 /// `fwd admin migrate` can clear them.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Scope {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     #[active_type(LWW)]
     pub status: ScopeStatus,
@@ -860,7 +869,8 @@ string_enum_property!(DecisionStatus);
 /// reject, supersede, repeal), each recording its reason as a comment on the decision.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     /// The project's counter, shown as `D<number>`: the next after the highest in its project,
     /// assigned at creation. Two clients creating at once can draw the same number; v1 is single-user.
@@ -925,7 +935,8 @@ pub struct Decision {
 /// renumbers records writes these.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct FormerId {
-    /// The project the record belongs to, set when it is made and never changed.
+    /// The project the record belongs to, set when it is made; only a move to another project
+    /// changes it.
     pub project: Ref<Project>,
     /// The earlier id as people wrote it: its base64 text, which a cited prefix is matched against.
     pub former: String,
