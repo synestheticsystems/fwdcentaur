@@ -19,7 +19,8 @@ how to build, configure, connect and run it, and what to do when something is wr
   its own. `crates/fwd-web` built with its `wallboard` feature, from `crates/fwd-web/wallboard.html`,
   mounts the wallboard in place of the app. It starts one node for the page's whole life on the
   project its configuration names (`session.rs`, `wallboard_node`), whose connector retries while no
-  daemon answers, and waits for it to join with no deadline (`wallboard_context`). It asks for no
+  daemon answers, waits for it to join with no deadline, and opens that project's graph, which every
+  query of the wallboard goes through (`wallboard_graph`). It asks for no
   `/health`, lists no projects, acts as no principal and never reloads for a new daemon build.
 - **The launcher**, `deploy/wallboard/wallboard.py`, beside the display, turns one configuration file,
   `wallboard.json`, into a Caddy configuration and replaces itself with Caddy. Caddy serves the page

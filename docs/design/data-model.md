@@ -4,7 +4,7 @@ Draft for discussion, 2026-09-24; revised the same day after Daniel's answers to
 
 ## Conventions
 
-- **Project**: the task graph and its database, a UUID and a name; a set of repositories identified by their upstream remotes, never by a clone or a worktree (R, 2026-09-25). One durable node per project; every model below lives in it. Checkouts (clones and worktrees) are local, dynamic and never in the graph.
+- **Project**: a task graph, a UUID and a name; a set of repositories identified by their upstream remotes, never by a clone or a worktree (R, 2026-09-25). The daemon keeps every project in one durable node and one store (`../DECISIONS.md`, D135), where each project has a `Project` record and every record of the nine models below names its project in a `project` field, set when the record is made and never changed. That field, not the store, keeps one project's records apart from another's (D38): every read and write goes through a project's graph, which adds it (`daemon.md`, "Keeping projects apart"). Checkouts (clones and worktrees) are local, dynamic and never in the graph.
 - **Identity**: every entity has an Ankurah `EntityId` (ULID, shown as its base64 string), and in v1 that full id is the identifier everywhere: CLI arguments, JSON output, `context` maps, notification refs (Daniel, Q3: sequential numbers are the most human-friendly and the least Ankurah-friendly; use the full id for now). The `T72`, `M15`, `S3`, `N120`, `C40` forms in these docs are placeholders for readability, not a feature. Human-friendly short ids are filed as a later task (T18: options are unique base64 prefixes like git short SHAs, which need no coordination, or project-sequential numbers, which need a single numberer). Since 2026-09-26 two narrow steps have been taken, both with the decision records: the CLI takes the first six characters or more of an id when they begin the id of exactly one entity the command could use (the first option, for the command line only), and a decision carries its project's number, cited as `D<number>` (the second option, for decisions only, numbered from the decisions themselves rather than by a numbering service).
 - **Timestamps** are i64 milliseconds since epoch, wall clock, informational only; Ankurah's causal ordering decides merges.
 - **Enumerations** are Rust enums stored as strings (the simplikeys `impl_wrapper_type!` plus `Property` pattern); unknown values are preserved, displayed as-is, and treated as "unknown" by rules.
@@ -14,6 +14,20 @@ Draft for discussion, 2026-09-24; revised the same day after Daniel's answers to
 - **Local-only data** (working directory, worktree path, agent session ids, socket paths, pids) is not stored in Ankurah. The daemon keeps it in its own SQLite table keyed by scope id and serves it to local clients. (U: whether Ankurah should grow local-only collections.)
 
 ## Entities
+
+### Project
+
+One project of the daemon's node, made by the daemon as it first hosts the project, from this machine's index.
+
+```rust
+#[derive(Model)]
+pub struct Project {
+    pub uuid: String,                 // the project's public name, which never changes: the UUID the index, every repository's .fwd/project.toml and the page's addresses carry
+    pub name: String,                 // as the index names it (fwd project rename)
+}
+```
+
+Every record of the nine models below begins with `pub project: Ref<Project>`, which the listings leave out. It is fwd's own plain model: who belongs to a project is said by its principals, each of which is someone's part in one project, and a person in two projects is two principals.
 
 ### Principal
 
@@ -36,7 +50,7 @@ pub struct Principal {
 }
 ```
 
-Principals live in each project's graph, so every project has its own: a person or an agent that works in two projects is two principals with one handle. An agent selects its role from a fixed set as it names itself (`fwd principal add <name> --role lead|triage|implementer|reviewer`) and may change it later (`fwd principal role <name> <role>`); a person holds none, and no role is ever read from a handle (`agents-and-inbox.md`, "Roles"). A triage agent serves scopes, and a project has, among its principals that are not retired, at most one triage agent per scope and one endorsed to serve it whole (`../DECISIONS.md`, D122), and a lead per session or worktree that coordinates its work (D119): a second triage agent for a scope, or for the whole project, is refused, naming the principal that serves it, and so is a second lead bound to an agent of one Claude Code session, naming that session's lead (`ops::add_principal`, `ops::set_role`, `ops::serve`, and the succession and binding operations), a retired one brought back serving what it served, or holding lead, included. `serves` records what a triage agent serves: the scopes it took (with `--scope`, from its checkout, or with `fwd principal scope add`) and whether it is endorsed to serve the whole project (`--project-wide`, `fwd principal scope project-wide`), which suits only a small project with small scopes (`agents-and-inbox.md`, "What a triage agent serves"). It is JSON text in a string because the Model derive of the pinned Ankurah gives every field a getter for the page's wasm build and an optional `Json` has none, while a field added after principals were written must be optional; succession moves it with the role; another role clears it. A triage agent from before 2026-09-30 records none, and serves nothing until its lead binds or endorses it. An agent principal with no role, which a build before 2026-09-29 could leave and `fwd admin migrate` leaves when two principals held the old role, reads as before, and its next write is refused until it selects one. Until 2026-09-29 the roles were `Implementer` and `Supervisor`, the second taken by any handle starting with `supervisor`; `fwd admin migrate` gives the role triage to the principal that held `supervisor` and wrote most recently, keeping its handle, and clears the role from any other that held it (`cli.md`, "Maintenance").
+A principal is someone's part in one project, and names that project, so every project has its own: a person or an agent that works in two projects is two principals with one handle, and every lookup of a principal by handle or by session is made in one project. An agent selects its role from a fixed set as it names itself (`fwd principal add <name> --role lead|triage|implementer|reviewer`) and may change it later (`fwd principal role <name> <role>`); a person holds none, and no role is ever read from a handle (`agents-and-inbox.md`, "Roles"). A triage agent serves scopes, and a project has, among its principals that are not retired, at most one triage agent per scope and one endorsed to serve it whole (`../DECISIONS.md`, D122), and a lead per session or worktree that coordinates its work (D119): a second triage agent for a scope, or for the whole project, is refused, naming the principal that serves it, and so is a second lead bound to an agent of one Claude Code session, naming that session's lead (`ops::add_principal`, `ops::set_role`, `ops::serve`, and the succession and binding operations), a retired one brought back serving what it served, or holding lead, included. `serves` records what a triage agent serves: the scopes it took (with `--scope`, from its checkout, or with `fwd principal scope add`) and whether it is endorsed to serve the whole project (`--project-wide`, `fwd principal scope project-wide`), which suits only a small project with small scopes (`agents-and-inbox.md`, "What a triage agent serves"). It is JSON text in a string because the Model derive of the pinned Ankurah gives every field a getter for the page's wasm build and an optional `Json` has none, while a field added after principals were written must be optional; succession moves it with the role; another role clears it. A triage agent from before 2026-09-30 records none, and serves nothing until its lead binds or endorses it. An agent principal with no role, which a build before 2026-09-29 could leave and `fwd admin migrate` leaves when two principals held the old role, reads as before, and its next write is refused until it selects one. Until 2026-09-29 the roles were `Implementer` and `Supervisor`, the second taken by any handle starting with `supervisor`; `fwd admin migrate` gives the role triage to the principal that held `supervisor` and wrote most recently, keeping its handle, and clears the role from any other that held it (`cli.md`, "Maintenance").
 
 `handle` is the principal's name, a convenience label that several principals may share, within a project as across projects; a principal's identity is its id, which every reference to it stores (`../DECISIONS.md`, D107 and D110). A typed name is resolved within the project, and a name that two or more principals of the project share is refused with them listed, never guessed (`agents-and-inbox.md`, "A principal's name"). An agent changes its own with `fwd principal rename <name>`, which keeps its id and so everything that refers to it; a person's is the handle `fwd init` recorded.
 
@@ -358,6 +372,21 @@ Nothing else moves: a rejected, superseded or repealed decision stays so, and a 
 
 **The log.** `fwd decision export` renders every decision as markdown in the style `docs/DECISIONS.md` was written in by hand, headed by a comment saying it is a rendering: the rulings that govern the whole project first, under "Project-wide", then each scope's under the scope's name, the scopes by name, so that whoever works in one scope reads the project's rulings and that scope's; within each, in force, proposed, then rejected, superseded and repealed, each by number (a status with no ruling is left out); each entry `- **D<n>: title** (area, governs <scope>, day, decided by …): the ruling`, a project-wide one naming no scope, with its context, consequences and links. `scripts/import-decisions.py` turned the hand-written file into records once; from then on the file is that rendering.
 
+### FormerId
+
+An id a record had before it was renumbered, kept so that what people cited for months still finds the record. Moving the projects' separate stores into the daemon's one store gives every record a new id, and a later change of Ankurah's stored format may give it another, so one record can have several former ids, one record each.
+
+```rust
+#[derive(Model)]
+pub struct FormerId {
+    pub project: Ref<Project>,
+    pub former: String,               // the earlier id as people wrote it, its base64 text, which a cited prefix is matched against
+    pub record: EntityId,             // the record it names now, of any model above but Project; re-pointed when the record is renumbered again
+}
+```
+
+Every place that takes an id accepts a former id, whole or as a prefix, beside current ids (`crates/fwd-core/src/former_ids.rs`): the command line's id resolver, the reference parser, and the page's picker, router and lozenges. A prefix that names two records is refused with both listed, saying which matched through a former id. A text written before the renumbering keeps the former id as it was typed and reads as naming the record; its JSON gives the record's id and, as `former_id`, the id it stores. Only the move that renumbers records writes these.
+
 ## Rules (implemented once, in fwd-core)
 
 **Readiness** of a task is three-valued, following Manifold: `ready`, `not_ready`, `unknown`.
@@ -393,7 +422,7 @@ Nothing else moves: a rejected, superseded or repealed decision stays so, and a 
 
 ## What v1 does not model
 
-Of time, one date on a task is modelled (Task, `not_before`); due dates, estimates and recurrence are not. Nor are multi-target relations (RefSet), components on one entity, cross-project references, and per-field permissions. Each has a place to grow without changing the CLI.
+Of time, one date on a task is modelled (Task, `not_before`); due dates, estimates and recurrence are not. Nor are multi-target relations (RefSet), components on one entity, references from one project's records to another's, and per-field permissions. Each has a place to grow without changing the CLI.
 
 ## Implementation notes (T2, 2026-09-24)
 

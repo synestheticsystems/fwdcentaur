@@ -1,5 +1,5 @@
-//! The anchors' local store: a SQLite file beside the project's database in the data directory
-//! (`projects/<id>/anchors.sqlite`), for what one machine learns about anchors and never syncs.
+//! The anchors' local store: a SQLite file in the project's local folder in the data directory
+//! (`projects/<id>/anchors.sqlite`, beside its checkout registry), for what one machine learns about anchors and never syncs.
 //! Today it holds the resolution cache: where an anchor was found in a given version of its file,
 //! keyed by the anchor, the file's path there and its blob id, so switching back to a branch, or
 //! popping a stash, answers from the cache. A resolution is knowledge about one checkout that
@@ -24,8 +24,7 @@ pub struct Sidecar {
 }
 
 impl Sidecar {
-    /// The file beside a project's database, given the project's storage directory
-    /// (`Paths::storage_dir`).
+    /// The file in a project's local folder, given that folder (`Paths::storage_dir`).
     pub fn path(storage_dir: &Path) -> PathBuf {
         storage_dir.join("anchors.sqlite")
     }

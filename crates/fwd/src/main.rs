@@ -2299,6 +2299,9 @@ async fn run_cli() -> Result<()> {
                             "id": resolved.project.id.to_string(),
                             "name": resolved.project.name,
                             "upstreams": upstreams,
+                            // The store holds the project's records, among every project's; its
+                            // folder holds what this machine alone knows of it.
+                            "store": paths.store_path(),
                             "storage": paths.storage_dir(&resolved.project),
                             "checkout": resolved.checkout,
                             "root": resolved.root,
@@ -3057,7 +3060,7 @@ async fn highlight_here(
     ops::highlight(graph, app.me, repo, &spec).await
 }
 
-/// The anchors' local store beside the project's database, where resolutions are cached. A store
+/// The anchors' local store in the project's local folder, where resolutions are cached. A store
 /// that cannot be opened costs only recomputing, so it is warned about, not fatal.
 fn anchor_store(app: &App) -> Option<fwd_core::sidecar::Sidecar> {
     let path = fwd_core::sidecar::Sidecar::path(&app.paths.storage_dir(&app.project));

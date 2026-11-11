@@ -64,7 +64,10 @@ function openDaemon(root, binaries, report) {
       this.expectSameDaemon(`after ${name} opened`);
       const daemonBuild = (args, options) => fwd(binaries.daemon, ['--as', PRINCIPAL, ...args], repository, options);
       const client = (args, options) => fwd(binaries.client, ['--as', PRINCIPAL, '--no-autostart', ...args], repository, options);
-      const database = path.join(process.env.FWD_DATA_DIR, 'projects', id, 'project.sqlite');
+      // The daemon's store, read only: one for every project since the daemon keeps them all in one
+      // node (docs/DECISIONS.md, D135), and the project's own for a daemon of an earlier build.
+      const oneStore = path.join(process.env.FWD_DATA_DIR, 'store.sqlite');
+      const database = fs.existsSync(oneStore) ? oneStore : path.join(process.env.FWD_DATA_DIR, 'projects', id, 'project.sqlite');
       const sql = query => execFileSync('sqlite3', [`file:${database}?mode=ro`, query], { encoding: 'utf8' }).trim();
       return {
         id, daemonBuild,

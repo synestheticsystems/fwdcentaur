@@ -768,7 +768,7 @@ echo "== backup and restore =="
 BACKUP=$("$F" admin backup --to "$T/backups" --format json)   # while the daemon runs
 BK=$(echo "$BACKUP" | j "d['backup']")
 check "the backup lists the project" "$(echo "$BACKUP" | j "','.join(p['name'] for p in d['projects'])")" "roles renamed"
-check "the project's database is in it, copied through SQLite" "$(echo "$BACKUP" | j "[f['database'] for f in d['files'] if f['path'].endswith('/project.sqlite')]")" "[True]"
+check "the store, with every project's records, is in it, copied through SQLite" "$(echo "$BACKUP" | j "[f['database'] for f in d['files'] if f['path'] == 'store.sqlite']")" "[True]"
 check "no log, lock file or write-ahead log is" "$(echo "$BACKUP" | j "[f['path'] for f in d['files'] if f['path'].endswith(('.log', '.lock', '-wal', '-shm'))]")" "[]"
 check "the backup restores into a new folder" "$("$F" admin restore "$BK" --into "$T/restored" --format json | j "d['into'].endswith('/restored')")" "True"
 restored() { FWD_DATA_DIR=$T/restored FWD_RUNTIME_DIR=$T/run-restored FWD_DEV_RUNNER_DIR=$T/dev-runner-restored "$F" "$@"; }   # fwd with a daemon of its own on the restored folder

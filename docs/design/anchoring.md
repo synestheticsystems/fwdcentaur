@@ -62,7 +62,7 @@ It runs cheap-first and verifies after every strategy:
 
 After any strategy the resolved lines are compared with `anchored_text`, and a difference is changed content: `exact` is never claimed when the text differs.
 
-Answers are cached in the anchors' own SQLite file beside the project's database (`projects/<id>/anchors.sqlite` in the data directory), keyed by the anchor's key (its id before it has one), the file's path in the target and the target's blob, with the resolver's version, so a branch switched back to or a stash popped answers from the cache. A resolution is knowledge about one checkout that changes with every commit, so it is no longer written to the anchor entity, where each machine's answers fought over one synced field. Answers made without the basis, and `absent` ones, are not kept. The cache is advisory; any reader may recompute.
+Answers are cached in the anchors' own SQLite file in the project's local folder (`projects/<id>/anchors.sqlite` in the data directory, beside its checkout registry), keyed by the anchor's key (its id before it has one), the file's path in the target and the target's blob, with the resolver's version, so a branch switched back to or a stash popped answers from the cache. A resolution is knowledge about one checkout that changes with every commit, so it is no longer written to the anchor entity, where each machine's answers fought over one synced field. Answers made without the basis, and `absent` ones, are not kept. The cache is advisory; any reader may recompute.
 
 ## Live buffers in the editor
 

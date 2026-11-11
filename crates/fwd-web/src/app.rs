@@ -264,7 +264,7 @@ pub fn BootError(reason: String) -> impl IntoView {
 }
 
 /// Which project the page shows, among every project the daemon hosts. Choosing another reloads
-/// the page on that project's node. The selector is always there (Daniel, 2026-09-26: "I want a
+/// the page on that project's graph. The selector is always there (Daniel, 2026-09-26: "I want a
 /// project selector in the web UI"), even with one project; only a page pinned to one project
 /// (the VS Code webview, `?lock=1`) shows the name alone. The daemon's list is read again when
 /// the selector takes the focus or is opened, and every 30 seconds while the page is in view, so
