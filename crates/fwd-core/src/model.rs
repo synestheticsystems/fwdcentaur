@@ -1,7 +1,13 @@
-//! The Ankurah models. One collection per model, on Ankurah 0.9.3. Shapes and reasons are in
+//! The Ankurah models. One collection per model. Shapes and reasons are in
 //! docs/design/data-model.md; the message, notification and task shapes follow the simplikeys
 //! models Daniel pointed at (durable, visible messages and tasks with one status field; thin
 //! per-recipient notifications with Json `target` and `originator` refs; Json `context` maps).
+//!
+//! A daemon keeps every project it hosts in one node and one store (docs/DECISIONS.md, D135), so
+//! every record of the nine models a project's work is made of names its [`Project`] in a
+//! `project` field, set when the record is made and never changed. That field, not the store a
+//! record sits in, is what keeps one project's records apart from another's (D38), and the
+//! project's graph (`crate::project_graph`) adds it to every read and every creation.
 //!
 //! Enumerations (`string_enum_property!`) are stored as their snake_case names (`"in_progress"`), so predicates read
 //! `status = 'in_progress'` and unknown values survive as strings. Identity is the Ankurah
@@ -37,6 +43,23 @@ macro_rules! string_enum_property {
             }
         }
     };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Project
+
+/// One project of the daemon's node: one entity per project, which every record of the models below
+/// names. Made by the daemon as it first hosts the project, from this machine's index
+/// (`projects.toml`). fwd's own plain model: who belongs to a project is said by its principals,
+/// each of which is someone's part in one project.
+#[derive(Model, Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    /// The project's public name, which never changes: the UUID that the index, every repository's
+    /// `.fwd/project.toml` and the page's addresses carry, as hyphenated lowercase text.
+    pub uuid: String,
+    /// What people call the project, as the index names it (`fwd project rename`).
+    #[active_type(LWW)]
+    pub name: String,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -91,10 +114,12 @@ pub enum AgentRole {
 string_enum_property!(AgentRole);
 
 /// A person or an agent identity. Agents are principals in their own right so attribution and
-/// inboxes work the same way for both. Each project's graph holds its own principals, so a person
-/// or an agent in two projects is two principals with one handle.
+/// inboxes work the same way for both. A principal is someone's part in one project, with its role
+/// and its inbox there, so a person or an agent in two projects is two principals with one handle.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Principal {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
     #[active_type(LWW)]
     pub kind: PrincipalKind,
     /// A name, not a key, which several principals may share: the GitHub login for people
@@ -113,7 +138,7 @@ pub struct Principal {
     /// False once retired (`fwd principal retire`): the principal stays, so that what it did is
     /// still attributed to it, and no picker offers it and no rule reaches it for its role.
     pub active: bool,
-    /// Whether the principal belongs to the project whose graph holds it, which is what the page's
+    /// Whether the principal belongs to the project it names, which is what the page's
     /// pickers offer (docs/design/agents-and-inbox.md, "Who belongs to a project"): true for a
     /// person from `fwd init`, for an agent from `fwd principal add`, by which it names itself, and
     /// for any principal from its first command that writes work into the project; false for the
@@ -172,6 +197,8 @@ pub struct Principal {
 /// A registered repository, keyed by its upstream (`remote_urls`). Anchors reference it so a project can span several repositories.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
     #[active_type(LWW)]
     pub name: String,
     /// `["git@github.com:org/x.git", ...]`
@@ -211,6 +238,8 @@ string_enum_property!(TaskStatus);
 /// work happens is a `worked_in` relation to a scope; readiness is derived, never stored.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
     #[active_type(LWW)]
     pub title: String,
     /// Spec / description.
@@ -345,6 +374,8 @@ string_enum_property!(RelationStatus);
 /// An edge is an entity with two named endpoints and full provenance. Binary only in v1.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Relation {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
     #[active_type(LWW)]
     pub kind: RelationKind,
     /// Named `from_id`/`to_id` because `from` is a reserved word in ankql predicates. Plain ids
@@ -440,6 +471,8 @@ impl Piece {
 /// computed on demand and cached outside the graph (`sidecar`). See docs/design/anchoring.md.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct CodeAnchor {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
     pub repo: Ref<Repo>,
     /// Repo-relative, at the anchored version.
     #[active_type(LWW)]
@@ -574,6 +607,8 @@ string_enum_property!(MessageStatus);
 /// (`ops::edit_message`), which changes nothing else about it but saying when and by whom.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
     pub author: Ref<Principal>,
     pub created: i64,
     /// Markdown, in a collaborative text type. Only the author, or an agent that succeeded the
@@ -689,6 +724,8 @@ string_enum_property!(NotificationStatus);
 /// of steps and comments reaches its recipient once (docs/design/agents-and-inbox.md, rule 10).
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
     pub recipient: Ref<Principal>,
     #[active_type(LWW)]
     pub notification_type: NotificationType,
@@ -738,6 +775,8 @@ string_enum_property!(ScopeStatus);
 /// `fwd admin migrate` can clear them.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Scope {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
     #[active_type(LWW)]
     pub status: ScopeStatus,
     #[active_type(LWW)]
@@ -820,8 +859,10 @@ string_enum_property!(DecisionStatus);
 /// reject, supersede, repeal), each recording its reason as a comment on the decision.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
-    /// The project's counter, shown as `D<number>`: the next after the highest existing, assigned
-    /// at creation. Two clients creating at once can draw the same number; v1 is single-user.
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
+    /// The project's counter, shown as `D<number>`: the next after the highest in its project,
+    /// assigned at creation. Two clients creating at once can draw the same number; v1 is single-user.
     pub number: i64,
     #[active_type(LWW)]
     pub title: String,
@@ -869,4 +910,26 @@ pub struct Decision {
     /// transaction, so the notifications the move causes carry that comment and no later one.
     /// Absent on a decision closed before this field existed.
     pub closed_reason_message: Option<Ref<Message>>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// FormerId
+
+/// An id a record had before it was renumbered, which people may have cited for months in messages,
+/// commits and notes, kept so that what they wrote still finds the record. Moving the projects'
+/// separate stores into the daemon's one store gives every record a new id, and a later change of
+/// Ankurah's stored format may give it another, so a record can have several former ids, one
+/// entity each. Every place that takes an id (`ops::resolve_id`, the page's router, the reference
+/// parser) accepts a former id, whole or as a prefix, beside current ids. Only the move that
+/// renumbers records writes these.
+#[derive(Model, Debug, Clone, Serialize, Deserialize)]
+pub struct FormerId {
+    /// The project the record belongs to, set when it is made and never changed.
+    pub project: Ref<Project>,
+    /// The earlier id as people wrote it: its base64 text, which a cited prefix is matched against.
+    pub former: String,
+    /// The record the earlier id names now, of any model above but `Project`: a plain id, as a
+    /// relation's ends are, since a `Ref` names one model. A move that renumbers the record again
+    /// re-points it.
+    pub record: EntityId,
 }
