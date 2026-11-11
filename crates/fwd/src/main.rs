@@ -2315,6 +2315,15 @@ async fn run_cli() -> Result<()> {
                 ProjectCommand::Rename { name } => {
                     let resolved = resolve_project(&cli, &paths)?;
                     let marker = project::rename(&paths, &resolved.project, &resolved.root, name)?;
+                    // A daemon that hosts the project now gives its record the new name too; one
+                    // that starts later takes it from the index.
+                    let hosted = daemon::status(&paths).await?.is_some_and(|running| {
+                        running.projects.iter().any(|p| p.id == resolved.project.id && p.error.is_none())
+                    });
+                    if hosted {
+                        let client = daemon::ensure_daemon(&paths, &resolved.project, Autostart::Never).await?;
+                        client.while_writing(async { Ok(client.graph.rename(name).await?) }).await?;
+                    }
                     print_value(
                         format,
                         &json!({

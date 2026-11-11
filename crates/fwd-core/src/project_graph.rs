@@ -167,6 +167,16 @@ impl ProjectGraph {
         Ref::new(self.project)
     }
 
+    /// Gives the project's record `name`, as `fwd project rename` renames the project in this
+    /// machine's index while the daemon runs; a daemon that starts later takes the name from the
+    /// index as it hosts the project ([`ProjectGraph::ensure`]).
+    pub async fn rename(&self, name: &str) -> Result<(), ProjectGraphError> {
+        let record: ProjectView = self.ctx.get(self.project).await?;
+        let trx = self.ctx.begin();
+        record.edit(&trx)?.name()?.set(&name.to_string())?;
+        Ok(trx.commit().await?)
+    }
+
     /// `args` narrowed to the project's records.
     fn scoped(&self, args: MatchArgs<Parsed>) -> MatchArgs<Parsed> {
         let MatchArgs { selection, cache_policy } = args;
