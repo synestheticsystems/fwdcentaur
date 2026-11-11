@@ -10,7 +10,8 @@ use super::{run, Args};
 use crate::fixture::{id, new_id, text, OldFolder, V};
 use crate::judge::judge;
 use crate::merge::{write, Moving};
-use crate::old_store::OldStore;
+use crate::old_store::{OldStore, ReadError};
+use crate::records::Unrepresentable;
 
 /// A project of the fixture, with the ids its records have in its old store, by name.
 struct Project {
@@ -287,26 +288,47 @@ async fn the_judge_refuses_a_changed_value_and_a_lost_former_id() {
     assert!(judge(&store, &old).is_err());
 }
 
+/// Each spoiled store is refused by the reader or the writer, for what was spoiled, and not later by
+/// the judge.
 #[tokio::test]
 async fn a_record_the_current_models_cannot_represent_is_refused_and_nothing_is_written() {
+    fn unrepresentable(error: &anyhow::Error, model: &str, reason: &str) -> bool {
+        let refusal = error.downcast_ref::<Unrepresentable>();
+        refusal.is_some_and(|refusal| refusal.model == model && refusal.reason == reason)
+    }
+    fn unknown_field(error: &anyhow::Error, model: &str, column: &str) -> bool {
+        let refusal = error.downcast_ref::<ReadError>();
+        matches!(refusal, Some(ReadError::UnknownField { model: m, column: c, .. }) if *m == model && c == column)
+    }
+    /// Whether an error is the refusal a spoiled store must meet.
+    type Refusal = fn(&anyhow::Error) -> bool;
     let property = new_id();
-    for spoil in [
-        r#"UPDATE "principal" SET "agent_role" = 'supervisor'"#.to_owned(),
-        r#"UPDATE "task" SET "title" = NULL"#.to_owned(),
-        format!(
-            r#"INSERT INTO "_ankurah_property" VALUES ('{property}', 'owner', NULL, 'lww', 'entityid');
-               INSERT INTO "_ankurah_sqlite_column_map" SELECT "model_key", '{{"EntityId":"{property}"}}', 'owner'
-                   FROM "_ankurah_sqlite_model_map" WHERE "materialization_table_name" = 'scope';
-               ALTER TABLE "scope" ADD COLUMN "owner";
-               UPDATE "scope" SET "owner" = "created_by";"#
+    let cases: [(String, Refusal); 3] = [
+        (r#"UPDATE "principal" SET "agent_role" = 'supervisor'"#.to_owned(), |error| {
+            unrepresentable(error, "Principal", r#"agent_role holds "supervisor", which this build does not know"#)
+        }),
+        (r#"UPDATE "task" SET "title" = NULL"#.to_owned(), |error| {
+            unrepresentable(error, "Task", "title, which every record has, is empty")
+        }),
+        (
+            format!(
+                r#"INSERT INTO "_ankurah_property" VALUES ('{property}', 'owner', NULL, 'lww', 'entityid');
+                   INSERT INTO "_ankurah_sqlite_column_map" SELECT "model_key", '{{"EntityId":"{property}"}}', 'owner'
+                       FROM "_ankurah_sqlite_model_map" WHERE "materialization_table_name" = 'scope';
+                   ALTER TABLE "scope" ADD COLUMN "owner";
+                   UPDATE "scope" SET "owner" = "created_by";"#
+            ),
+            |error| unknown_field(error, "Scope", "owner"),
         ),
-    ] {
+    ];
+    for (spoil, is_its_refusal) in cases {
         let root = tempfile::tempdir().unwrap();
         let mut folder = OldFolder::new(root.path());
         let alpha = project(&mut folder, "alpha");
         Connection::open(alpha.store(&folder)).unwrap().execute_batch(&spoil).unwrap();
         let to = root.path().join("merged");
-        assert!(run(&Args { from: folder.data.clone(), to: to.clone() }).await.is_err(), "{spoil}");
+        let error = run(&Args { from: folder.data.clone(), to: to.clone() }).await.unwrap_err();
+        assert!(is_its_refusal(&error), "{spoil}: {error:#}");
         assert!(!to.exists(), "{spoil}");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1, "no partial folder is left: {spoil}");
     }
