@@ -385,7 +385,7 @@ pub struct FormerId {
 }
 ```
 
-Every place that takes an id accepts a former id, whole or as a prefix, beside current ids (`crates/fwd-core/src/former_ids.rs`): the command line's id resolver, the reference parser, and the page's picker, router and lozenges. A prefix that names two records is refused with both listed, saying which matched through a former id. A text written before the renumbering keeps the former id as it was typed and reads as naming the record; its JSON gives the record's id and, as `former_id`, the id it stores. Only the move that renumbers records writes these.
+Every place that takes an id accepts a former id, whole or as a prefix, beside current ids, in the project's graph alone (`crates/fwd-core/src/former_ids.rs`): the command line's id resolver, a principal's name (`--as`, the page's `?as=` and `?for=`, after the handle), a scope's name, a checklist step (after its number), the scope a checkout was bound to, the reference parser, and the page's pickers, router and lozenges. A prefix that names two records is refused with both listed, saying which matched through a former id. A text written before the renumbering keeps the former id as it was typed and reads as naming the record; its JSON gives the record's id and, as `former_id`, the id it stores. Only the move that renumbers records writes these.
 
 ## Rules (implemented once, in fwd-core)
 

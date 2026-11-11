@@ -2,8 +2,10 @@
 //! what people cited for months still finds the record: a commit message, a memory file or a
 //! message's text that names a task by its old id, whole or by its first characters. Every place
 //! that takes an id reads these beside the current ids: the command line's id resolver
-//! (`ops::name_to_id`), the reference parser (`ops::resolve_reference`) and the reading of a stored
-//! text's references (`ops::describe`), and the page's router and lozenges.
+//! (`ops::name_to_id`), a principal's name (`naming::resolve`), a scope's (`ops::scope_by_name`), a
+//! checklist step, a checkout's bound scope, the reference parser (`ops::resolve_reference`) and
+//! the reading of a stored text's references (`ops::describe`), and the page's router, pickers and
+//! lozenges.
 
 use crate::model::FormerIdView;
 use crate::project_graph::ProjectGraph;
