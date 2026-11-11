@@ -144,7 +144,7 @@ pub(crate) fn principal(handle: &str, kind: &str, role: Option<&str>) -> Vec<(&'
     fields
 }
 
-fn task(title: &str, by: &str, context: serde_json::Value) -> Vec<(&'static str, V)> {
+pub(crate) fn task(title: &str, by: &str, context: serde_json::Value) -> Vec<(&'static str, V)> {
     vec![
         ("title", text(title)),
         ("status", text("open")),

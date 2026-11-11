@@ -8,7 +8,7 @@ use super::judge;
 use crate::fixture::{id, text, OldFolder, V};
 use crate::merge::{write, Moving};
 use crate::old_store::OldStore;
-use crate::tests::{now, principal};
+use crate::tests::{now, principal, task};
 
 /// Writes the folder's one project into a store beside the folder, and gives that store and the
 /// project's old one.
@@ -66,4 +66,33 @@ async fn a_serves_value_of_json_with_leading_whitespace_is_mapped_as_the_writer_
     let serves: String =
         db.query_row("SELECT serves FROM principal WHERE id = ?", [now(&db, &triage)], |row| row.get(0)).unwrap();
     assert_eq!(serde_json::from_str::<serde_json::Value>(&serves).unwrap(), json!({"scopes": [now(&db, &scope)]}));
+}
+
+/// A task's description and reasons, written and then cleared in the old store, which the old
+/// engine materializes as the empty string; the new engine materializes no value for an empty text.
+/// One cleared text sits in a column beside a text that was kept, and the other has no column in the
+/// new store, so the judge meets both: a NULL against "", and a missing value against "".
+#[tokio::test]
+async fn text_written_and_then_cleared_merges_and_passes_the_judge() {
+    let root = tempfile::tempdir().unwrap();
+    let mut folder = OldFolder::new(root.path());
+    let (uuid, mut store) = folder.project("alpha");
+    let me = store.record("Principal", principal("dnorman", "human", None));
+    let mut cleared = task("cleared", &me, json!({}));
+    cleared.extend([("what", text("")), ("why", text(""))]);
+    let cleared = store.record("Task", cleared);
+    let mut kept = task("kept", &me, json!({}));
+    kept.push(("what", text("typed")));
+    store.record("Task", kept);
+    let (new, old) = merged(&folder, uuid).await;
+
+    judge(&new, &[(uuid, old.as_path())]).unwrap();
+    let db = Connection::open(&new).unwrap();
+    let what: Option<String> =
+        db.query_row("SELECT what FROM task WHERE id = ?", [now(&db, &cleared)], |row| row.get(0)).unwrap();
+    assert_eq!(what, None, "the cleared text beside a kept one");
+    let why: i64 = db
+        .query_row("SELECT count(*) FROM pragma_table_info('task') WHERE name = 'why'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(why, 0, "the cleared text no record of the new store holds");
 }

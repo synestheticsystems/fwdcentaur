@@ -140,8 +140,9 @@ pub fn fields_of(model: &str) -> &'static [&'static str] {
     }
 }
 
-/// The collaborative-text fields, which the engine leaves out of a materialization while empty.
-const TEXTS: [(&str, &str); 8] = [
+/// The required collaborative-text fields, which the engine leaves out of a materialization while
+/// empty.
+pub const TEXTS: [(&str, &str); 8] = [
     ("Task", "what"),
     ("Task", "why"),
     ("Task", "done_when"),

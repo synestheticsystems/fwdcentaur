@@ -70,7 +70,11 @@ every value as it was, references and JSON ids mapped; every id naming a record 
 project, or carried unchanged from an old value that named nothing; and the records made, and
 their rows held, in the order they were. JSON is compared parsed, whatever its spacing; a `Json`
 field that does not hold JSON is refused, and text in `Principal::serves` that is not JSON, which
-the move carries as it was, must be the same to the byte.
+the move carries as it was, must be the same to the byte. A required collaborative text (a task's
+`what`, `why` and `done_when`, a message's `content`, a scope's `intention`, a decision's
+`context`, `decision` and `consequences`) holds nothing whether it is missing, NULL or empty: the
+old engine keeps the empty string for a text written and then cleared, and the new one keeps no
+value for an empty text.
 
 ## Switching a machine over
 

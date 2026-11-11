@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags};
 use uuid::Uuid;
 
 use crate::old_store::{all_model_tables, open_immutable, ModelTable};
-use crate::records::{id_shaped, MODELS};
+use crate::records::{id_shaped, MODELS, TEXTS};
 
 /// One model's rows: by id, each column's value by property name; and the ids in row order.
 struct Rows {
@@ -259,7 +259,7 @@ fn compare(
         };
         let same = match json {
             Some(holds) => same_json(holds, &expected, value, now_of).map_err(|what| at(field, what))?,
-            None => expected == *value,
+            None => expected == *value || (empty_text(model, field, was) && empty_text(model, field, value)),
         };
         if !same {
             return Err(at(field, "differs from the old value"));
@@ -282,11 +282,23 @@ fn compare(
         }
     }
     for (field, value) in old {
-        if *value != Sql::Null && !new.contains_key(field) {
+        if *value != Sql::Null && !empty_text(model, field, value) && !new.contains_key(field) {
             return Err(at(field, "has a value the new record lost"));
         }
     }
     Ok(())
+}
+
+/// Whether a required collaborative-text field holds no text: missing, NULL or the empty string,
+/// which count the same. The old engine materializes a text written and then cleared as the empty
+/// string; the new one, given an empty text to make, records nothing and materializes no value.
+fn empty_text(model: &str, field: &str, value: &Sql) -> bool {
+    let empty = match value {
+        Sql::Null => true,
+        Sql::Text(text) => text.is_empty(),
+        _ => false,
+    };
+    empty && TEXTS.iter().any(|&(m, f)| m == model && f == field)
 }
 
 /// How a model's property holds JSON.
