@@ -5,6 +5,7 @@ use ankurah::EntityId;
 use ankurah::{policy::DEFAULT_CONTEXT, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::former_ids::FormerIds;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateDecision, CreateScope, CreateTask, EditScope, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
@@ -3089,16 +3090,19 @@ async fn a_tasks_scopes_change_in_one_write_down_to_none_telling_no_one() -> Res
 fn a_scope_is_named_by_its_title_or_its_id_among_scopes_in_hand() {
     let (hosting, docs, twin) = (EntityId::random(), EntityId::random(), EntityId::random());
     let scopes = vec![(hosting, "Cloud Hosting".to_string()), (docs, "Docs".to_string()), (twin, "Docs".to_string())];
-    assert_eq!(ops::scope_by_name(" cloud HOSTING ", &scopes).unwrap(), hosting);
-    assert_eq!(ops::scope_by_name(&hosting.to_base64(), &scopes).unwrap(), hosting);
-    assert_eq!(ops::scope_by_name(&docs.to_base64()[..10], &scopes).unwrap(), docs);
-    assert!(ops::scope_by_name("Docs", &scopes).unwrap_err().to_string().starts_with("2 scopes have the title `Docs`"));
+    assert_eq!(ops::scope_by_name(" cloud HOSTING ", &scopes, &FormerIds::default()).unwrap(), hosting);
+    assert_eq!(ops::scope_by_name(&hosting.to_base64(), &scopes, &FormerIds::default()).unwrap(), hosting);
+    assert_eq!(ops::scope_by_name(&docs.to_base64()[..10], &scopes, &FormerIds::default()).unwrap(), docs);
+    assert!(ops::scope_by_name("Docs", &scopes, &FormerIds::default())
+        .unwrap_err()
+        .to_string()
+        .starts_with("2 scopes have the title `Docs`"));
     assert_eq!(
-        ops::scope_by_name("Hostng", &scopes).unwrap_err().to_string(),
+        ops::scope_by_name("Hostng", &scopes, &FormerIds::default()).unwrap_err().to_string(),
         "no scope has the title `Hostng` or an id starting with it"
     );
     let gone = EntityId::random();
-    assert!(ops::scope_by_name(&gone.to_base64(), &scopes)
+    assert!(ops::scope_by_name(&gone.to_base64(), &scopes, &FormerIds::default())
         .unwrap_err()
         .to_string()
         .starts_with("no scope of this project"));

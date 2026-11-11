@@ -7,6 +7,7 @@
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::former_ids::FormerIds;
 use fwd_core::model::*;
 use fwd_core::naming::{self, Named, Refused};
 use fwd_core::ops::{self, CreateScope, CreateTask, MessageContext};
@@ -118,7 +119,7 @@ async fn a_name_no_principal_has_names_no_one_and_each_command_says_how_one_is_m
     assert_eq!(named(&graph, "nobody").await?, None);
     assert_eq!(named(&graph, "abc").await?, None, "too short to start an id");
     let principals = ops::principals(&graph).await?;
-    assert!(matches!(naming::resolve(&principals, "nobody", None), Named::NoOne));
+    assert!(matches!(naming::resolve(&principals, "nobody", None, &FormerIds::default()), Named::NoOne));
     assert_eq!(
         ops::set_role(&graph, "nobody", AgentRole::Implementer, None).await.unwrap_err().to_string(),
         "no principal of this project is named `nobody`: an agent names itself and selects its role at once, `fwd principal add nobody --role implementer`"
@@ -162,7 +163,9 @@ async fn a_name_two_principals_share_is_refused_listing_each_by_id_role_and_the_
     );
     assert_eq!(refused(naming::principal_named(&graph, "@implementer", None).await), expected);
     let principals = ops::principals(&graph).await?;
-    assert!(matches!(naming::resolve(&principals, "implementer", None), Named::Shared(ref s) if s.len() == 2));
+    assert!(
+        matches!(naming::resolve(&principals, "implementer", None, &FormerIds::default()), Named::Shared(ref s) if s.len() == 2)
+    );
     assert!(naming::shows_scopes(&principals, "implementer"), "a picker shows the scopes beside a repeated name");
     assert!(!naming::shows_scopes(&principals, "dnorman"));
 

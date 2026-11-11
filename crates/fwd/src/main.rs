@@ -11,6 +11,7 @@ use fwd_core::backup;
 use fwd_core::daemon::{self, Autostart, Bind, CheckoutRecord, Client};
 use fwd_core::decision_log;
 use fwd_core::dormancy;
+use fwd_core::former_ids::FormerIds;
 use fwd_core::model::*;
 use fwd_core::naming;
 use fwd_core::not_before;
@@ -2914,18 +2915,20 @@ async fn bound_session(graph: &ProjectGraph) -> Result<Option<(String, String)>>
 /// repository, of all the project's active scopes, whoever made them (docs/DECISIONS.md, D108, "A
 /// scope has no owner: scopes are not assigned to principals"). A scope's `context` holds where
 /// its work happens: its repository and branches, or on a scope from before 2026-09-25 a single
-/// branch and the directory it was made in.
+/// branch and the directory it was made in. A binding made before the scope was renumbered holds
+/// an id it had then (`former_ids`), which names it still.
 async fn scope_for_checkout(client: &Client, resolved: &Resolved) -> Result<rules::ScopeHere> {
     let graph = &client.graph;
     let cwd = std::env::current_dir()?;
     let mut bound = None;
     if let Some(c) = &resolved.checkout {
         if let Ok(records) = daemon::checkouts(client).await {
-            bound = records
-                .iter()
-                .find(|r| r.root == c.root)
-                .and_then(|r| r.scope.as_deref())
-                .and_then(|s| s.parse::<EntityId>().ok());
+            if let Some(written) = records.iter().find(|r| r.root == c.root).and_then(|r| r.scope.as_deref()) {
+                bound = match FormerIds::named_in(graph, written).await? {
+                    Some(record) => Some(record),
+                    None => written.parse::<EntityId>().ok(),
+                };
+            }
         }
     }
     let scopes: Vec<ScopeView> = graph.fetch("status = 'active'").await?;
@@ -4040,10 +4043,11 @@ fn message_lines(m: &Value, indent: usize) -> Vec<String> {
 
 /// A step named on the command line among a task's `steps`: its number in the checklist (from 1),
 /// or the id of its relation or of what it is (a highlight, a message, a task), whole or its first
-/// six characters or more, looked for among this checklist's steps alone. Returns its number and
-/// its relation. A name that fits no step of the checklist is refused, saying so, and so is a
-/// start of an id that fits several.
-fn step_at(steps: &[RelationView], s: &str) -> Result<(usize, EntityId)> {
+/// six characters or more, an id either had before it was renumbered (`former`) counting as its
+/// id, looked for among this checklist's steps alone. Returns its number and its relation. A name
+/// that fits no step of the checklist is refused, saying so, and so is a start of an id that fits
+/// several.
+fn step_at(steps: &[RelationView], s: &str, former: &FormerIds) -> Result<(usize, EntityId)> {
     if let Ok(n) = s.parse::<usize>() {
         if (1..=steps.len()).contains(&n) {
             return Ok((n, steps[n - 1].id()));
@@ -4059,7 +4063,12 @@ fn step_at(steps: &[RelationView], s: &str) -> Result<(usize, EntityId)> {
             ops::MIN_PREFIX
         );
     }
-    let fits = |id: EntityId| whole.map_or_else(|| id.to_base64().starts_with(s), |w| w == id);
+    let renumbered: Vec<EntityId> = match whole {
+        Some(_) => former.named(s).into_iter().collect(),
+        None => former.starting(s).map(|(_, record)| record).collect(),
+    };
+    let fits =
+        |id: EntityId| renumbered.contains(&id) || whole.map_or_else(|| id.to_base64().starts_with(s), |w| w == id);
     let found: Vec<usize> =
         steps.iter().enumerate().filter(|(_, r)| fits(r.id()) || r.from_id().is_ok_and(fits)).map(|(i, _)| i).collect();
     match found.as_slice() {
@@ -4074,13 +4083,19 @@ fn step_at(steps: &[RelationView], s: &str) -> Result<(usize, EntityId)> {
     }
 }
 
+/// The project's former ids, read when `s` may be an id; none for a step's number or a name too
+/// short to start an id, which no former id can stand for.
+async fn former_ids_for(graph: &ProjectGraph, s: &str) -> Result<FormerIds> {
+    Ok(if ops::may_start_an_id(s) { FormerIds::of(graph).await? } else { FormerIds::default() })
+}
+
 /// Checks or unchecks a step of a task and prints it, with the first thread on its highlight,
 /// which moves with it; and the highlight's steps on other checklists that moved with it, as JSON
 /// under `checked_steps` or `unchecked_steps`, for people a line each.
 async fn check_step(app: &App, task: &str, step: &str, check: bool) -> Result<()> {
     let graph = app.graph();
     let task = app.id(task, &[Kind::Task]).await?;
-    let (n, edge) = step_at(&ops::steps(graph, task).await?, step)?;
+    let (n, edge) = step_at(&ops::steps(graph, task).await?, step, &former_ids_for(graph, step).await?)?;
     let moved = ops::check_step(graph, app.me, edge, check).await?;
     let r: RelationView = graph.get(edge).await?;
     let mut v = step_json(graph, &r, n).await?;
@@ -4113,7 +4128,7 @@ async fn check_step(app: &App, task: &str, step: &str, check: bool) -> Result<()
 async fn remove_step(app: &App, task: &str, step: &str, reason: &str, retire: bool) -> Result<()> {
     let graph = app.graph();
     let task = app.id(task, &[Kind::Task]).await?;
-    let (n, edge) = step_at(&ops::steps(graph, task).await?, step)?;
+    let (n, edge) = step_at(&ops::steps(graph, task).await?, step, &former_ids_for(graph, step).await?)?;
     let mut removed = step_json(graph, &graph.get::<RelationView>(edge).await?, n).await?;
     let retired = ops::remove_step(graph, app.me, task, edge, reason, retire).await?;
     removed["reason"] = json!(reason.trim());

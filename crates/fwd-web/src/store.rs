@@ -480,7 +480,7 @@ pub fn relations_of(id: EntityId) -> Vec<RelationView> {
 /// (docs/design/agents-and-inbox.md, "A principal's name").
 pub fn principal_named(name: &str) -> Result<Option<PrincipalView>, String> {
     let principals = principals();
-    match naming::resolve(&principals, name, None) {
+    match naming::resolve(&principals, name, None, &former_ids()) {
         Named::One(p) => Ok(Some(p.clone())),
         Named::NoOne => Ok(None),
         Named::Shared(several) => {

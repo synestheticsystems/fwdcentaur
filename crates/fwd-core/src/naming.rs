@@ -14,6 +14,7 @@
 //! applies it to its standing queries and a command to what it fetched ([`principal_named`]).
 
 use crate::dormancy;
+use crate::former_ids::FormerIds;
 use crate::model::*;
 use crate::ops;
 use crate::project_graph::ProjectGraph;
@@ -53,9 +54,15 @@ pub fn by_name<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
 
 /// What `name` names among `principals`, of `kind` when one is given, retired principals
 /// included: first the principals that have it as their name, one or several; else the principal
-/// whose whole id it is; else, for six characters or more, the principals whose id it starts.
-/// The name comes first so that a name that happens to read as an id still names its principal.
-pub fn resolve<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<PrincipalKind>) -> Named<'a> {
+/// whose whole id, or one of whose ids before it was renumbered (`former`), it is; else, for six
+/// characters or more, the principals whose id, or a former id, it starts, each once. The name
+/// comes first so that a name that happens to read as an id still names its principal.
+pub fn resolve<'a>(
+    principals: &'a [PrincipalView],
+    name: &str,
+    kind: Option<PrincipalKind>,
+    former: &FormerIds,
+) -> Named<'a> {
     let name = bare(name);
     match by_name(principals, name, kind).as_slice() {
         [] => {}
@@ -63,7 +70,8 @@ pub fn resolve<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
         several => return Named::Shared(several.to_vec()),
     }
     let of_kind = || principals.iter().filter(|p| kind.is_none() || p.kind().ok() == kind);
-    if let Ok(id) = name.parse::<EntityId>() {
+    let whole = name.parse::<EntityId>().ok().into_iter().chain(former.named(name));
+    for id in whole {
         if let Some(p) = of_kind().find(|p| p.id() == id) {
             return Named::One(p);
         }
@@ -71,7 +79,14 @@ pub fn resolve<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
     if !ops::may_start_an_id(name) {
         return Named::NoOne;
     }
-    let started: Vec<&PrincipalView> = of_kind().filter(|p| p.id().to_base64().starts_with(name)).collect();
+    let mut started: Vec<&PrincipalView> = of_kind().filter(|p| p.id().to_base64().starts_with(name)).collect();
+    for (_, record) in former.starting(name) {
+        if let Some(p) = of_kind().find(|p| p.id() == record) {
+            if !started.iter().any(|q| q.id() == record) {
+                started.push(p);
+            }
+        }
+    }
     match started.as_slice() {
         [] => Named::NoOne,
         [one] => Named::One(one),
@@ -89,7 +104,13 @@ pub async fn principal_named(
     kind: Option<PrincipalKind>,
 ) -> Result<Option<PrincipalView>> {
     let principals = ops::principals(graph).await?;
-    match resolve(&principals, name, kind) {
+    // The former ids are read only for a name no principal has that may be an id.
+    let former = if by_name(&principals, name, kind).is_empty() && ops::may_start_an_id(bare(name)) {
+        FormerIds::of(graph).await?
+    } else {
+        FormerIds::default()
+    };
+    match resolve(&principals, name, kind, &former) {
         Named::One(p) => Ok(Some(p.clone())),
         Named::NoOne => Ok(None),
         Named::Shared(several) => Err(refused(graph, name, &several, false).await?.into()),

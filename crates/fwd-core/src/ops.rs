@@ -1183,7 +1183,7 @@ pub async fn rename_principal(graph: &ProjectGraph, principal: EntityId, name: &
         );
     }
     // No other principal has the name; one whose id it is, or starts, is named by it all the same.
-    let by_id: Vec<&PrincipalView> = match naming::resolve(&found, name, None) {
+    let by_id: Vec<&PrincipalView> = match naming::resolve(&found, name, None, &FormerIds::of(graph).await?) {
         naming::Named::One(q) => vec![q],
         naming::Named::Started(several) => several,
         naming::Named::NoOne | naming::Named::Shared(_) => Vec::new(),
@@ -1238,7 +1238,7 @@ pub async fn person_by_handle(graph: &ProjectGraph, name: &str) -> Result<Entity
     if let Some(p) = naming::principal_named(graph, name, Some(PrincipalKind::Human)).await? {
         return Ok(p.id());
     }
-    match naming::resolve(&principals(graph).await?, name, None) {
+    match naming::resolve(&principals(graph).await?, name, None, &FormerIds::of(graph).await?) {
         naming::Named::NoOne => bail!("no one in this project has the handle `@{name}`"),
         _ => bail!(
             "`@{name}` is an agent, not a person: a ruling recorded on someone's word names the person who gave it"
@@ -4745,7 +4745,8 @@ pub fn name_to_id(
 }
 
 /// The scope a command line names: its whole id, its title (without regard to case or to the
-/// spaces around it), or the first six characters or more of its id, for a command that takes a
+/// spaces around it), or the first six characters or more of its id, an id it had before it was
+/// renumbered (`former_ids`) counting as its id, for a command that takes a
 /// scope a person names by its title as often as by its id (`fwd decision attach D12 "Cloud
 /// Hosting"`). A title several scopes share, and a start several ids share, are refused with
 /// each of those scopes listed; a name that fits no scope is refused saying so, a whole id among
@@ -4754,22 +4755,31 @@ pub fn name_to_id(
 pub async fn resolve_scope(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
     let scopes: Vec<ScopeView> = graph.all().await?;
     let held: Vec<(EntityId, String)> = scopes.iter().map(|s| (s.id(), s.title().unwrap_or_default())).collect();
-    scope_by_name(name, &held)
+    let former = if may_start_an_id(name.trim()) { FormerIds::of(graph).await? } else { FormerIds::default() };
+    scope_by_name(name, &held, &former)
 }
 
 /// The scope `name` names among `scopes`, each scope's id and title, by [`resolve_scope`]'s rule,
 /// so that the page's box for a task's scopes reads a name as the command line does: its whole id,
 /// its title (without regard to case or to the spaces around it), or the first six characters or
-/// more of its id; a title several share, a start several ids share and a name that fits none are
-/// refused with the sentence the command line gives.
-pub fn scope_by_name(name: &str, scopes: &[(EntityId, String)]) -> Result<EntityId> {
+/// more of its id, a scope's former id among `former` counting as its id; a title several share, a
+/// start several scopes' ids share and a name that fits none are refused with the sentence the
+/// command line gives.
+pub fn scope_by_name(name: &str, scopes: &[(EntityId, String)], former: &FormerIds) -> Result<EntityId> {
+    let held = |id: EntityId| scopes.iter().any(|(s, _)| *s == id);
     if let Ok(id) = name.parse::<EntityId>() {
-        if !scopes.iter().any(|(s, _)| *s == id) {
-            bail!("no scope of this project has the id {id}");
+        if held(id) {
+            return Ok(id);
         }
-        return Ok(id);
+        match former.named(name) {
+            Some(record) if held(record) => return Ok(record),
+            _ => bail!("no scope of this project has the id {id}"),
+        }
     }
     let wanted = name.trim();
+    if let Some(record) = former.named(wanted).filter(|record| held(*record)) {
+        return Ok(record);
+    }
     let listed = |found: &[&(EntityId, String)], chars: usize| {
         found
             .iter()
@@ -4792,7 +4802,8 @@ pub fn scope_by_name(name: &str, scopes: &[(EntityId, String)]) -> Result<Entity
         ),
     }
     let started: Vec<&(EntityId, String)> = if may_start_an_id(wanted) {
-        scopes.iter().filter(|(id, _)| id.to_base64().starts_with(wanted)).collect()
+        let by_former: Vec<EntityId> = former.starting(wanted).map(|(_, record)| record).collect();
+        scopes.iter().filter(|(id, _)| id.to_base64().starts_with(wanted) || by_former.contains(id)).collect()
     } else {
         Vec::new()
     };
@@ -4808,7 +4819,7 @@ pub fn scope_by_name(name: &str, scopes: &[(EntityId, String)]) -> Result<Entity
 }
 
 /// Whether a name is long enough, and made of the right characters, to be the start of an id.
-pub(crate) fn may_start_an_id(s: &str) -> bool {
+pub fn may_start_an_id(s: &str) -> bool {
     s.len() >= MIN_PREFIX && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
