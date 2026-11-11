@@ -335,7 +335,7 @@ fn same_json(holds: HoldsJson, old: &Sql, new: &Sql, now_of: &HashMap<String, St
         _ => None,
     };
     match (parse(old), parse(new)) {
-        (Some(Ok(old)), Some(Ok(new))) => Ok(mapped_json(&old, now_of) == new),
+        (Some(Ok(old_json)), Some(Ok(new_json))) => Ok(mapped_json(&old_json, now_of) == new_json),
         (Some(Err(_)), _) | (_, Some(Err(_))) if holds == HoldsJson::Json => Err("is not JSON"),
         _ => Ok(old == new),
     }

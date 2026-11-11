@@ -361,19 +361,19 @@ impl<'a> Fields<'a> {
         }
         value
     }
-    fn json(&mut self, later: Patchable) -> Result<Json, Unrepresentable> {
-        let field = later.name();
-        match self.record.get(field).clone() {
-            Stored::Json(value) => Ok(Json::new(self.repointed(later, &value))),
-            Stored::Null => Err(self.refuse(format!("{field}, which every record has, is empty"))),
-            other => Err(self.refuse(format!("{field} holds {other:?}, not JSON"))),
+    fn json(&mut self, field: Patchable) -> Result<Json, Unrepresentable> {
+        let name = field.name();
+        match self.record.get(name).clone() {
+            Stored::Json(value) => Ok(Json::new(self.repointed(field, &value))),
+            Stored::Null => Err(self.refuse(format!("{name}, which every record has, is empty"))),
+            other => Err(self.refuse(format!("{name} holds {other:?}, not JSON"))),
         }
     }
     /// A JSON value kept as text (`Principal::serves`).
-    fn opt_json_text(&mut self, later: Patchable) -> Result<Option<String>, Unrepresentable> {
-        let Some(text) = self.opt_text(later.name())? else { return Ok(None) };
+    fn opt_json_text(&mut self, field: Patchable) -> Result<Option<String>, Unrepresentable> {
+        let Some(text) = self.opt_text(field.name())? else { return Ok(None) };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return Ok(Some(text)) };
-        let repointed = self.repointed(later, &value);
+        let repointed = self.repointed(field, &value);
         // Unchanged text stays byte for byte; changed text is written as serde_json writes it,
         // which is how fwd writes it.
         Ok(Some(if repointed == value { text } else { repointed.to_string() }))
