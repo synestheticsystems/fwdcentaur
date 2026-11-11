@@ -126,9 +126,11 @@ fn is_ankurah_store(path: &Path) -> Result<bool, FolderError> {
 }
 
 /// The folder the move is written into: beside the destination, under a name no fwd reads, until
-/// [`Staging::settle`] gives it the destination's name. Until then, dropping it removes it, so an
-/// ordinary failure leaves no partial folder; only a process that ends without unwinding (a kill,
-/// an abort) can leave `<destination>.partial-<pid>` behind, which no fwd reads.
+/// [`Staging::settle`] gives it the destination's name. It is made readable by its owner alone
+/// before anything is written into it, since it holds every project's records while the move runs,
+/// whatever the umask or the destination's parent allows. Until it settles, dropping it removes it,
+/// so an ordinary failure leaves no partial folder; only a process that ends without unwinding (a
+/// kill, an abort) can leave `<destination>.partial-<pid>` behind, which no fwd reads.
 pub struct Staging {
     pub path: PathBuf,
     to: PathBuf,
@@ -154,7 +156,10 @@ impl Staging {
         }
         let name = to.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         let path = to.with_file_name(format!("{name}.partial-{}", std::process::id()));
-        fs::create_dir(&path).map_err(io(&path))?;
+        let mut folder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut folder, 0o700);
+        folder.create(&path).map_err(io(&path))?;
         Ok(Self { path, to, settled: false })
     }
 
@@ -197,3 +202,6 @@ impl Drop for Staging {
 pub fn io(path: &Path) -> impl Fn(std::io::Error) -> FolderError + '_ {
     move |error| FolderError::Io { path: path.to_owned(), error }
 }
+
+#[cfg(test)]
+mod tests;

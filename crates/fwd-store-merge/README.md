@@ -12,11 +12,12 @@ fwd-store-merge --from <data folder> --to <new data folder>
 
 Stop the daemon that serves the folder first (`cutover.py` does, below). The source is only read
 (SQLite opens each store as an unchanging file); the destination must not exist. The tool writes
-`<new data folder>.partial-<pid>` beside it and renames it only once the new store is judged; it
-removes that folder on any failure it survives, and a tool that is killed can leave it behind, which
-no fwd reads. It prints, per project, how many records of each model it moved, how many fields it
-set in a second pass, the ids that name nothing (carried as they were), and the records `fwd admin
-migrate` would still change (carried as they are, since the current models represent them).
+`<new data folder>.partial-<pid>` beside it, readable by its owner alone, and renames it, with the
+source folder's permissions, only once the new store is judged; it removes that folder on any
+failure it survives, and a tool that is killed can leave it behind, which no fwd reads. It prints,
+per project, how many records of each model it moved, how many fields it set in a second pass, the
+ids that name nothing (carried as they were), and the records `fwd admin migrate` would still change
+(carried as they are, since the current models represent them).
 
 ## What it carries
 
