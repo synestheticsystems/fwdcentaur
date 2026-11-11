@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fwd-core", "crates/fwd", "crates/fwd-store-convert"]
+members = ["crates/fwd-core", "crates/fwd", "crates/fwd-store-convert", "crates/fwd-store-merge"]
 # The web UI and the extension host's node target wasm32 only and are their own workspaces
 # (crates/fwd-web/Cargo.toml, crates/fwd-host/Cargo.toml), so the native
 # `cargo build|test|clippy --workspace` never tries to build them for this machine.

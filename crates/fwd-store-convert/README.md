@@ -71,7 +71,8 @@ Then two judges look at the new file, and either refuses the store:
 
 `cutover.py` beside this file stops the daemon, backs up, converts, and exchanges the data folder
 and the installed `fwd`, holding the daemon's locks so that no daemon of either build starts in
-between; `cutover.py back` goes back. Its `--help` lists the steps. A failure, SIGINT, SIGTERM or
+between; `cutover.py back` goes back. This hop is `--hop ankurah-main`; the script also carries the
+one-store hop (crates/fwd-store-merge/README.md). Its `--help` lists the steps. A failure, SIGINT, SIGTERM or
 SIGHUP before the new daemon answers undoes what was switched. After it has answered, clients may
 have written to it, so a failure is reported and the new pair stays; going back is a decision.
 

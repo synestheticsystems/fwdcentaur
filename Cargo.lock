@@ -1235,6 +1235,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fwd-store-merge"
+version = "0.0.1"
+dependencies = [
+ "ankurah",
+ "ankurah-storage-sqlite",
+ "anyhow",
+ "bincode",
+ "clap",
+ "fwd-core",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Moves a machine's fwd from a build pinned at Ankurah f8e85d2 to one pinned at 5d8a000b
-(`forward`), or back (`back`), so that no daemon of either build serves the data folder between the
-old daemon's stop and the new one's start.
+"""Moves a machine's fwd across one hop (`forward`), or back (`back`), so that no daemon of either
+build serves the data folder between the old daemon's stop and the new one's start. Each hop has a
+tool that makes the incoming data folder from the old one, and two names its folders and binaries
+rest under:
+
+  ankurah-main  f8e85d2 -> 5d8a000b       fwd-store-convert: Ankurah f8e85d2's stored format into
+                                          that of Ankurah main at 5d8a000b
+  one-store     per-project -> one-store  fwd-store-merge: every project's store into the daemon's
+                                          one store (docs/DECISIONS.md, D174)
 
 Other sessions keep running fwd commands throughout, and a command that finds no daemon starts
 one. A command starts a daemon only while it holds the bootstrap lock in the runtime folder, and a
@@ -19,23 +25,25 @@ forward:
    2. stop the daemon; `fwd daemon stop` returns once its process has exited
    3. take the lifetime lock (no daemon can serve the folder from here on)
    4. back up the data folder with the installed fwd (`fwd admin backup`), the safety copy
-   5. convert the folder as it is on disk now into <data>.5d8a000b (fwd-store-convert), then
-      check that no file other than the stores changed meanwhile (a command can write the project
-      index or the anchors' cache without a daemon); if one did, stop with nothing switched
-   6. exchange the folders in one rename; the old one then rests as <data>.f8e85d2
-   7. install the staged fwd by a rename; the old binary rests as <installed>.f8e85d2
+   5. make the incoming folder <data>.<new> from the folder as it is on disk now, with the hop's
+      tool, then check that no file other than the stores changed meanwhile (a command can write
+      the project index or the anchors' cache without a daemon); if one did, stop with nothing
+      switched
+   6. exchange the folders in one rename; the old one then rests as <data>.<old>
+   7. install the staged fwd by a rename; the old binary rests as <installed>.<old>
    8. release the lifetime lock and start the new daemon; commands reach it once it answers
    9. check that it hosts exactly the projects the old one did, none with an error, and that no
       project's counts shrank
   10. release the bootstrap lock
 
-back: the same steps with the resting folder and binary, without the backup and the conversion; the
-converted folder then rests as <data>.5d8a000b. What was written after the cutover is only there.
+back: the same steps with the resting folder and binary, without the backup and the tool; the
+incoming folder then rests as <data>.<new>. What was written after the cutover is only there.
 
 A failure, SIGINT, SIGTERM or SIGHUP up to step 8 undoes whatever was switched and ends the daemon
 this script started, so the next command starts the previous build's daemon on the previous
 folder. Once the new daemon has answered, clients may have written to it, so a failure in step 9 is
 reported and the new pair is left in place; going back is the person's decision (`cutover.py back`).
+Run one hop at a time, and go back across the later hop before the earlier one.
 README.md says what a SIGKILL can leave at each step and how to finish or undo it by hand.
 """
 
@@ -54,7 +62,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-OLD, NEW = "f8e85d2", "5d8a000b"
+# Each hop's old and new layouts, by the names their folders and binaries rest under.
+HOPS = {"ankurah-main": ("f8e85d2", "5d8a000b"), "one-store": ("per-project", "one-store")}
 RENAME_SWAP = 0x2  # renamex_np(2): exchange the two paths in one step
 LOCK_WAIT = 60  # seconds to wait for a launcher to let go of the bootstrap lock
 START_WAIT = 120  # seconds the daemon it starts has to open every project and answer
@@ -64,20 +73,21 @@ STOPPING = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("direction", choices=["forward", "back"])
+    parser.add_argument("--hop", choices=sorted(HOPS), required=True)
     parser.add_argument("--data-dir", type=Path, default=default_data_dir())
     parser.add_argument("--runtime-dir", type=Path, default=default_runtime_dir())
     parser.add_argument("--installed", type=Path, default=Path.home() / ".cargo/bin/fwd", help="the fwd other sessions run")
-    parser.add_argument("--staged", type=Path, help="forward: the fwd built at Ankurah 5d8a000b, to install")
-    parser.add_argument("--converter", type=Path, help="forward: the fwd-store-convert binary")
+    parser.add_argument("--staged", type=Path, help="forward: the fwd built for the new layout, to install")
+    parser.add_argument("--converter", type=Path, help="forward: the hop's tool (fwd-store-convert or fwd-store-merge)")
     parser.add_argument("--backups", type=Path, help="forward: the folder `fwd admin backup` writes into")
     args = parser.parse_args()
     machine = Machine(args.data_dir.absolute(), args.runtime_dir.absolute(), args.installed.absolute())
     if args.direction == "forward":
         if not (args.staged and args.converter and args.backups):
             parser.error("forward needs --staged, --converter and --backups")
-        forward(machine, args.staged.absolute(), args.converter.absolute(), args.backups.absolute())
+        forward(machine, HOPS[args.hop], args.staged.absolute(), args.converter.absolute(), args.backups.absolute())
     else:
-        back(machine)
+        back(machine, HOPS[args.hop])
 
 
 def default_data_dir():
@@ -213,9 +223,10 @@ def stop_by_signal(signum, _frame):
     raise Failure(f"received {signal.Signals(signum).name}")
 
 
-def forward(machine, staged, converter, backups):
-    converted, old_rest = machine.resting(machine.data, NEW), machine.resting(machine.data, OLD)
-    old_binary = machine.resting(machine.installed, OLD)
+def forward(machine, hop, staged, converter, backups):
+    old, new = hop
+    converted, old_rest = machine.resting(machine.data, new), machine.resting(machine.data, old)
+    old_binary = machine.resting(machine.installed, old)
     for path in (converted, old_rest, old_binary):
         if path.exists():
             raise SystemExit(f"{path} exists already; move it aside first")
@@ -248,9 +259,10 @@ def forward(machine, staged, converter, backups):
     )
 
 
-def back(machine):
-    old_rest, converted = machine.resting(machine.data, OLD), machine.resting(machine.data, NEW)
-    old_binary, new_binary = machine.resting(machine.installed, OLD), machine.resting(machine.installed, NEW)
+def back(machine, hop):
+    old, new = hop
+    old_rest, converted = machine.resting(machine.data, old), machine.resting(machine.data, new)
+    old_binary, new_binary = machine.resting(machine.installed, old), machine.resting(machine.installed, new)
     for path in (old_rest, old_binary):
         if not path.exists():
             raise SystemExit(f"{path} is missing, so there is nothing to go back to")
@@ -427,24 +439,25 @@ def swap(a, b):
 
 
 def files_beside_stores(folder):
-    """Every file in the data folder but the project stores, which only a daemon writes, by its
-    SHA-256."""
+    """Every file in the data folder but the stores, which only a daemon writes, by its SHA-256:
+    each project's own store in the per-project layout, the one store in the other."""
+
+    def store(path):
+        relative = path.relative_to(folder)
+        return relative == Path("store.sqlite") or (path.name == "project.sqlite" and path.parent.parent == folder / "projects")
+
     return {
         path.relative_to(folder): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(folder.rglob("*"))
-        if path.is_file() and not (path.name == "project.sqlite" and path.parent.parent.name == "projects")
+        if path.is_file() and not store(path)
     }
 
 
 def paths_now(machine):
     """Which of the names a switch moves things to exist now, and which build is installed."""
-    names = [
-        machine.resting(machine.data, OLD),
-        machine.resting(machine.data, NEW),
-        machine.resting(machine.installed, OLD),
-        machine.resting(machine.installed, NEW),
-        machine.installed.with_name(f"{machine.installed.name}.incoming"),
-    ]
+    layouts = sorted({layout for hop in HOPS.values() for layout in hop})
+    names = [machine.resting(path, layout) for path in (machine.data, machine.installed) for layout in layouts]
+    names.append(machine.installed.with_name(f"{machine.installed.name}.incoming"))
     present = [str(name) for name in names if name.exists()]
     try:
         installed = machine.fwd("--version", check=False).stdout.strip() or "a build that does not run"
