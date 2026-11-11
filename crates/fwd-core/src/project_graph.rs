@@ -57,8 +57,14 @@ in_project!(
     Scope => ScopeView,
     Decision => DecisionView,
     FormerId => FormerIdView,
-    before_d108::Scope => before_d108::ScopeView,
 );
+
+/// The scope as `fwd admin migrate` reads and clears what it held before D108, which no one makes.
+impl InProjectView for before_d108::ScopeView {
+    fn project_id(&self) -> Result<EntityId, PropertyError> {
+        Ok(*self.project()?)
+    }
+}
 
 /// Why a project's graph could not be opened, or refused a write.
 #[derive(Debug, thiserror::Error)]

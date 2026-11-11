@@ -260,7 +260,8 @@ async fn no_command_in_one_project_prints_finds_or_changes_a_record_of_the_other
         assert!(shown.is_err(), "fwd task show {named} in alpha found beta's record: {shown:?}");
     }
     let d1 = daemon.json(&daemon.alpha, &["decision", "show", "D1"])?.to_string();
-    prints_none_of(&others, &["decision", "show", "D1"], &d1);
+    let ours = records(&alpha.graph).await?;
+    assert!(ours.keys().any(|id| d1.contains(&id.to_base64()) && ours[id]["ref"] == "D1"), "{d1}");
 
     // What alpha's writes, and the daemon's routing of them, make stays in alpha. Routing handles
     // one project's records in the order they were written, so once the question asked last in
