@@ -13,13 +13,13 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/synestheticsystems/fwdcentaur"
 
 [workspace.dependencies]
-# Pinned by hash to Ankurah's feat/storage-node-sqlite-wasm branch, which carries storage/sqlite-node
-# and the durable node's publication fix (task 46J1eGA4); see docs/DECISIONS.md, D23 (fwdcentaur
-# tracks the storage-engine-contract line, pinned by hash).
-ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0", features = ["derive"] }
-ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
-ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
-ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
+# Pinned by hash to Ankurah main (docs/DECISIONS.md, D23: fwdcentaur pins Ankurah by hash); the
+# previous pin was f8e85d2 on the feat/storage-node-sqlite-wasm branch. crates/fwd-host stays on
+# f8e85d2 until storage/sqlite-node, the SQLite engine it runs on in Node.js, reaches Ankurah main.
+ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda", features = ["derive"] }
+ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda" }
+ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda" }
+ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda" }
 # The connection pool ankurah-storage-sqlite is built on, the same major: the CLI builds the pool
 # of its in-memory store itself (crates/fwd-core/src/daemon.rs, `ephemeral_store`).
 bb8                    = "0.9"
