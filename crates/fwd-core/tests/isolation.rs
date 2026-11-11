@@ -273,6 +273,9 @@ async fn a_record_of_the_other_project_is_never_found_resolved_edited_or_made() 
     Ok(())
 }
 
+/// How long a test waits for an arrival before it fails as one that never came.
+const NEVER: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Every id a live query's change sets have named, and each as it arrives.
 struct Heard {
     named: Arc<Mutex<Vec<EntityId>>>,
@@ -295,9 +298,14 @@ impl Heard {
         Heard { named, arrived, _guard }
     }
 
-    /// Returns once the query has named `id`.
+    /// Returns once the query has named `id`; fails the test, naming `id`, when a minute passes
+    /// first. The minute only detects an arrival that never comes: what orders the test is the
+    /// arrival itself.
     async fn until(&mut self, id: EntityId) {
-        while self.arrived.recv().await != Some(id) {}
+        let arrived = async { while self.arrived.recv().await != Some(id) {} };
+        if tokio::time::timeout(NEVER, arrived).await.is_err() {
+            panic!("the live query never named {id} within {}s", NEVER.as_secs());
+        }
     }
 
     fn named(&self) -> Vec<EntityId> {

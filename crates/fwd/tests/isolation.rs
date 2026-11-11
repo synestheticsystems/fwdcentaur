@@ -24,6 +24,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// One daemon's folders, and a checkout of each of the two projects it hosts.
@@ -181,6 +182,9 @@ fn prints_none_of(others: &BTreeSet<String>, command: &[&str], printed: &str) {
     assert!(leaked.is_empty(), "fwd {} printed the other project's ids {leaked:?}:\n{printed}", command.join(" "));
 }
 
+/// How long a test waits for an arrival before it fails as one that never came.
+const NEVER: Duration = Duration::from_secs(60);
+
 /// The notifications of `recipient` as they arrive, from a live query on its project's graph.
 struct Inbox {
     arrived: mpsc::UnboundedReceiver<NotificationView>,
@@ -201,24 +205,57 @@ impl Inbox {
     }
 
     /// Returns, once it has arrived, the notification of the message `message`, which routing
-    /// made after everything written in the project before that message.
+    /// made after everything written in the project before that message. Fails, naming the
+    /// message, when a minute passes first: the minute only detects a notification that never
+    /// comes, and what orders the test is its arrival.
     async fn told_of(&mut self, message: &str) -> Result<EntityId> {
-        loop {
-            let n = self.arrived.recv().await.ok_or_else(|| anyhow!("the inbox's query ended"))?;
-            if Value::from(n.originator()?)["message_id"] == message {
-                return Ok(n.id());
+        let arrived = async {
+            loop {
+                let n = self.arrived.recv().await.ok_or_else(|| anyhow!("the inbox's query ended"))?;
+                if Value::from(n.originator()?)["message_id"] == message {
+                    return Ok(n.id());
+                }
             }
-        }
+        };
+        tokio::time::timeout(NEVER, arrived)
+            .await
+            .map_err(|_| anyhow!("no notification of message {message} arrived within {}s", NEVER.as_secs()))?
     }
+}
+
+/// A daemon hosting alpha and beta, each filled by [`populate`], with a client of each.
+struct Two {
+    daemon: Daemon,
+    a: Held,
+    b: Held,
+    alpha: Client,
+    beta: Client,
+}
+
+impl Two {
+    async fn new() -> Result<Two> {
+        let daemon = Daemon::new()?;
+        let a = populate(&daemon, &daemon.alpha)?;
+        let b = populate(&daemon, &daemon.beta)?;
+        let (alpha, beta) = (daemon.client(&daemon.alpha).await?, daemon.client(&daemon.beta).await?);
+        assert_eq!(alpha.pf.instance_id, beta.pf.instance_id, "one daemon hosts both");
+        Ok(Two { daemon, a, b, alpha, beta })
+    }
+}
+
+/// Fails, naming the command, when `printed` holds none of `wanted`, so that a command checked to
+/// print nothing of the other project's is known to have printed its own.
+fn prints_its_own(wanted: &str, command: &[&str], printed: &str) {
+    assert!(
+        printed.contains(wanted),
+        "fwd {} printed nothing of its own project's {wanted}:\n{printed}",
+        command.join(" ")
+    );
 }
 
 #[tokio::test]
 async fn no_command_in_one_project_prints_finds_or_changes_a_record_of_the_other() -> Result<()> {
-    let daemon = Daemon::new()?;
-    let a = populate(&daemon, &daemon.alpha)?;
-    let b = populate(&daemon, &daemon.beta)?;
-    let (alpha, beta) = (daemon.client(&daemon.alpha).await?, daemon.client(&daemon.beta).await?);
-    assert_eq!(alpha.pf.instance_id, beta.pf.instance_id, "one daemon hosts both");
+    let Two { daemon, a, b, alpha, beta } = Two::new().await?;
     let theirs = records(&beta.graph).await?;
     let others = spellings(theirs.keys().copied());
     assert_eq!(records(&alpha.graph).await?.len(), theirs.len(), "the two hold look-alike records");
@@ -296,5 +333,201 @@ async fn no_command_in_one_project_prints_finds_or_changes_a_record_of_the_other
     let mut now = records(&beta.graph).await?;
     assert!(now.remove(&asked).is_some() && now.remove(&reached).is_some(), "beta's own question reached her");
     assert_eq!(now, theirs, "nothing alpha's commands wrote, or its routing made of them, changed beta");
+    Ok(())
+}
+
+/// Records, through `client`'s graph, that `record` once had the id `former`, as the move that
+/// renumbers records writes it.
+async fn renumbered(client: &Client, former: &str, record: EntityId) -> Result<()> {
+    let trx = client.graph.begin();
+    trx.create(&FormerId { project: client.graph.project(), former: former.into(), record }).await?;
+    trx.commit().await?;
+    Ok(())
+}
+
+/// An id a record of alpha's had before it was renumbered names that record wherever a command takes
+/// an id, whole or as a prefix: `--as` for a principal, a scope by name or id, a checklist step by
+/// its relation or by what it is, any record's argument, and the scope a checkout is bound to. In
+/// beta, the same text names nothing.
+#[tokio::test]
+async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_in_its_own_project_alone() -> Result<()> {
+    let Two { daemon, a, b, alpha, beta: _ } = Two::new().await?;
+    let alice = naming::principal_named(&alpha.graph, "impl-alice", None).await?.map(|p| p.id()).expect("impl-alice");
+    let scope: EntityId = a.scope.parse()?;
+    let step: EntityId = daemon.made(&daemon.alpha, &["step", "add", &a.retry, &a.cap])?.parse()?;
+    let cited = || EntityId::random().to_base64();
+    let (as_alice, as_scope, as_step, as_cap, as_question) = (cited(), cited(), cited(), cited(), cited());
+    renumbered(&alpha, &as_alice, alice).await?;
+    renumbered(&alpha, &as_scope, scope).await?;
+    renumbered(&alpha, &as_step, step).await?;
+    renumbered(&alpha, &as_cap, a.cap.parse()?).await?;
+    renumbered(&alpha, &as_question, a.question.parse()?).await?;
+
+    let in_alpha = |args: &[&str]| daemon.json(&daemon.alpha, args).map(|v| v.to_string());
+    for named in [as_alice.as_str(), &as_alice[..8]] {
+        prints_its_own(&alice.to_base64(), &["--as", named, "whoami"], &in_alpha(&["--as", named, "whoami"])?);
+    }
+    in_alpha(&["decision", "attach", "D1", &as_scope])?;
+    let attached = in_alpha(&["decision", "list", "--attached", &as_scope[..8]])?;
+    prints_its_own("\"D1\"", &["decision", "list", "--attached", &as_scope[..8]], &attached);
+    in_alpha(&["step", "check", &a.retry, &as_step])?;
+    in_alpha(&["step", "uncheck", &a.retry, &as_cap[..8]])?;
+    prints_its_own(&a.cap, &["task", "show", &as_cap], &in_alpha(&["task", "show", &as_cap])?);
+    prints_its_own(
+        &a.question,
+        &["message", "show", &as_question[..8]],
+        &in_alpha(&["message", "show", &as_question[..8]])?,
+    );
+
+    // The scope a checkout was bound to before the renumbering, which checkouts.json keeps as the
+    // id it had then: a scope on another branch, which the checkout finds through its binding alone
+    // (on its own branch it finds Replication).
+    let elsewhere: EntityId =
+        daemon.made(&daemon.alpha, &["scope", "create", "Elsewhere", "--branch", "elsewhere"])?.parse()?;
+    let as_elsewhere = cited();
+    renumbered(&alpha, &as_elsewhere, elsewhere).await?;
+    assert_eq!(
+        daemon.json(&daemon.alpha, &["whoami"])?["scope"],
+        a.scope,
+        "unbound, the checkout finds its branch's scope"
+    );
+    let checkout = fwd_core::project::checkout_at(&daemon.alpha)?.expect("alpha's checkout");
+    let mut binding = fwd_core::daemon::CheckoutRecord::from(&checkout);
+    binding.scope = Some(as_elsewhere);
+    daemon::report_checkout(&alpha, &binding).await?;
+    let here = daemon.json(&daemon.alpha, &["whoami"])?;
+    assert_eq!(
+        here["scope"],
+        elsewhere.to_base64(),
+        "the checkout's binding names its scope through the former id: {here}"
+    );
+
+    for args in [
+        vec!["--as", as_alice.as_str(), "whoami"],
+        vec!["decision", "attach", "D1", &as_scope],
+        vec!["decision", "list", "--attached", &as_scope],
+        vec!["step", "check", &b.retry, &as_step],
+        vec!["task", "show", &as_cap],
+        vec!["message", "show", &as_question[..8]],
+    ] {
+        let refused = daemon.output(&daemon.beta, &args)?;
+        assert!(refused.is_err(), "fwd {} in beta found what alpha's former id names: {refused:?}", args.join(" "));
+    }
+    Ok(())
+}
+
+/// The next line a `fwd watch` prints, as JSON; fails, saying what was awaited, when none comes in a
+/// minute.
+async fn next_line(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    awaited: &str,
+) -> Result<Value> {
+    let line = tokio::time::timeout(NEVER, lines.next_line())
+        .await
+        .map_err(|_| anyhow!("the watch printed no line for {awaited} within {}s", NEVER.as_secs()))??
+        .ok_or_else(|| anyhow!("the watch ended before {awaited}"))?;
+    Ok(serde_json::from_str(&line)?)
+}
+
+/// A `fwd watch` held open in alpha, as an agent runs it, prints alpha's notifications alone: a
+/// question asked in beta while it waits never reaches it, and the one asked in alpha after it does.
+#[tokio::test]
+async fn a_watch_held_open_in_one_project_hears_nothing_written_in_the_other() -> Result<()> {
+    use tokio::io::AsyncBufReadExt;
+    let Two { daemon, a, b: _, alpha: _, beta } = Two::new().await?;
+    let mut watch = tokio::process::Command::from({
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fwd"));
+        command
+            .current_dir(&daemon.alpha)
+            .args(["--format", "json", "--as", "impl-alice", "watch", "--count", "2"])
+            .env("FWD_RUNTIME_DIR", &daemon.paths.runtime_dir)
+            .env("FWD_DATA_DIR", &daemon.paths.data_dir)
+            .env_remove("FWD_PROJECT")
+            .env_remove("FWD_AS")
+            .env_remove("FWD_CLAUDE_SESSION")
+            .env_remove("FWD_CLAUDE_AGENT")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .stdout(std::process::Stdio::piped());
+        command
+    })
+    .kill_on_drop(true)
+    .spawn()?;
+    let mut lines = tokio::io::BufReader::new(watch.stdout.take().expect("piped")).lines();
+    // The question waiting from `populate` comes first, as the watch's snapshot: the watch is open.
+    let waiting = next_line(&mut lines, "the question waiting in alpha").await?;
+    assert_eq!(waiting["notification"]["originator"]["message_id"], a.question, "{waiting}");
+
+    daemon.made(&daemon.beta, &["ask", "--to", "impl-alice", "is beta's question heard in alpha?"])?;
+    let asked = daemon.made(&daemon.alpha, &["ask", "--to", "impl-alice", "is alpha's?"])?;
+    let heard = next_line(&mut lines, "the question asked in alpha").await?;
+    assert_eq!(
+        heard["notification"]["originator"]["message_id"], asked,
+        "the next thing the watch hears is alpha's question: {heard}"
+    );
+    let others = spellings(records(&beta.graph).await?.keys().copied());
+    for line in [&waiting, &heard] {
+        prints_none_of(&others, &["watch"], &line.to_string());
+    }
+    let ended = tokio::time::timeout(NEVER, watch.wait()).await.map_err(|_| anyhow!("the watch did not end"))??;
+    assert!(ended.success(), "the watch ended with {ended}");
+    Ok(())
+}
+
+/// The daemon's MCP endpoint, called as a Codex thread in alpha, gives alpha's records alone from
+/// every tool that reads, and finds none of beta's by its id.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mcp_read_tools_in_one_project_give_none_of_the_others_records() -> Result<()> {
+    use rmcp::model::{CallToolRequestParams, RequestMetaObject};
+    use rmcp::ServiceExt;
+    let Two { daemon, a, b, alpha, beta } = Two::new().await?;
+    daemon.made(&daemon.alpha, &["step", "add", &a.retry, &a.cap])?;
+    let url = format!("http://127.0.0.1:{}/mcp", alpha.pf.port);
+    let client = ().serve(rmcp::transport::StreamableHttpClientTransport::from_uri(url)).await?;
+    let thread = "019a0000-0000-7000-8000-0000000a1fa0";
+    let mut meta = RequestMetaObject::new();
+    for (key, value) in serde_json::json!({
+        "threadId": thread,
+        "sessionId": thread,
+        "x-codex-turn-metadata": {"thread_id": thread, "session_id": thread, "turn_id": "turn-1", "model": "fake"},
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default()
+    {
+        meta.insert(key, value);
+    }
+    let call = |tool: &'static str, args: Value| {
+        let (client, meta) = (&client, meta.clone());
+        async move {
+            let mut args = args.as_object().cloned().unwrap_or_default();
+            args.insert("project".into(), serde_json::json!("alpha"));
+            let mut params = CallToolRequestParams::new(tool.to_string()).with_arguments(args);
+            params.meta = Some(meta);
+            anyhow::Ok(client.call_tool(params).await?)
+        }
+    };
+    let others = spellings(records(&beta.graph).await?.keys().copied());
+    for (tool, args, own) in [
+        ("task_list", serde_json::json!({}), a.retry.as_str()),
+        ("task_show", serde_json::json!({"id": a.retry}), a.retry.as_str()),
+        ("task_explain", serde_json::json!({"id": a.retry}), a.cap.as_str()),
+        ("step_list", serde_json::json!({"task": a.retry}), a.cap.as_str()),
+        ("relations", serde_json::json!({"id": a.retry}), a.cap.as_str()),
+        ("scope_list", serde_json::json!({}), a.scope.as_str()),
+        ("decision_list", serde_json::json!({}), "D1"),
+        ("decision_show", serde_json::json!({"id": "D1"}), "Cap retries at 30s"),
+        ("principal_list", serde_json::json!({}), "impl-alice"),
+        ("message_show", serde_json::json!({"id": a.question}), a.question.as_str()),
+    ] {
+        let answer = call(tool, args.clone()).await?;
+        let given = answer.structured_content.clone().unwrap_or_default().to_string();
+        assert_ne!(answer.is_error, Some(true), "{tool} {args} was refused: {given}");
+        prints_none_of(&others, &[tool], &given);
+        prints_its_own(own, &[tool], &given);
+    }
+    for (tool, id) in [("task_show", &b.retry), ("message_show", &b.question)] {
+        let answer = call(tool, serde_json::json!({"id": id})).await?;
+        assert_eq!(answer.is_error, Some(true), "{tool} of beta's {id} through alpha answered");
+    }
     Ok(())
 }
