@@ -31,7 +31,7 @@ use crate::referents::Models;
 use crate::request_row::RequestRow;
 use crate::route::{self, Route};
 use crate::scope_filter::ScopeChoice;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::store;
 use crate::thread::{self, Hooks, Model, OpenQueries, ThreadState};
 use crate::waiting::{self, Batch, Fold, Group, Keep, Kind, Sorted, Stood};
@@ -82,7 +82,7 @@ fn InboxFor(
     // A dismissed notification is gone from the page, so the query leaves it out rather than the
     // page holding and grouping every notification the principal was ever sent.
     let selection = with_id("recipient = ? AND status != 'dismissed'", whose).expect("static selection");
-    let query = match ctx().query::<NotificationView>(selection) {
+    let query = match graph().query::<NotificationView>(selection) {
         Ok(q) => q,
         Err(e) => return view! { <p class="error">{format!("the inbox query was refused: {e}")}</p> }.into_any(),
     };

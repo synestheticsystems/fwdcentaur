@@ -21,7 +21,7 @@
 
 use crate::referents::{Mode, Models};
 use crate::scope_filter::ordered_scopes;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::Model;
 use crate::{empty, fmt, keys, labels, modes, store};
 use ankurah::EntityId;
@@ -224,7 +224,7 @@ pub fn TaskScopes(task: EntityId) -> impl IntoView {
     let change = move |add: Vec<EntityId>, take_off: Vec<EntityId>| {
         let Some(me) = session::me() else { return };
         spawn_local(async move {
-            match ops::change_scopes(&ctx(), me, task, &add, &take_off).await {
+            match ops::change_scopes(&graph(), me, task, &add, &take_off).await {
                 Ok(()) => {
                     session::wrote(me);
                     error.try_set(None)

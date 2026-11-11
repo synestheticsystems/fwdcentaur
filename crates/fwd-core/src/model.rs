@@ -807,20 +807,21 @@ pub struct Scope {
 /// written before, since a field no model declares cannot be written. Nothing else reads or writes
 /// them.
 pub mod before_d108 {
-    use super::Principal;
+    use super::{Principal, Project};
     use ankurah::{Model, Ref};
     use serde::{Deserialize, Serialize};
 
     /// The scope as it was stored before scopes lost their owner, less the fields [`super::Scope`]
-    /// still has. Each
-    /// field is optional here, so that the migration can set it to none: `owner`, whoever made the
-    /// scope, which decided who could work in it and who heard comments on its code; and its
-    /// heartbeat, `last_heartbeat` and `heartbeat_ttl_s` (600), which the implementer's hook
-    /// recorded. The struct takes the model's name, `Scope`, since a model is registered by its
-    /// name as well as its collection, and `no_ffi`, since no binding needs it.
+    /// still has but its project, by which the project's graph finds it. Each field it had then is
+    /// optional here, so that the migration can set it to none: `owner`, whoever made the scope,
+    /// which decided who could work in it and who heard comments on its code; and its heartbeat,
+    /// `last_heartbeat` and `heartbeat_ttl_s` (600), which the implementer's hook recorded. The
+    /// struct takes the model's name, `Scope`, since a model is registered by its name as well as
+    /// its collection, and `no_ffi`, since no binding needs it.
     #[derive(Model, Debug, Clone, Serialize, Deserialize)]
     #[model(no_ffi)]
     pub struct Scope {
+        pub project: Ref<Project>,
         pub owner: Option<Ref<Principal>>,
         #[active_type(LWW)]
         pub last_heartbeat: Option<i64>,

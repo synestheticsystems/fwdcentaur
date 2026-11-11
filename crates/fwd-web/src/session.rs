@@ -4,7 +4,8 @@
 //! projects it hosts, pick one (the one the URL names with `?p=<uuid>`, else the one this tab
 //! last opened while the daemon still has it open, else the first that opened), open a fresh
 //! IndexedDB database for it, connect to that project's socket, wait for the node to join the
-//! project's system and finish initializing, remember the project for this tab, install the
+//! daemon's system and finish initializing, open the project's graph, through which every read and
+//! write goes (`fwd_core::project_graph`), remember the project for this tab, install the
 //! reactive_graph bridge, then pick the acting principal: `?as=<handle>` in the URL, otherwise
 //! the project's person. The daemon is the page's own origin, which serves the page, unless
 //! `?daemon=http://127.0.0.1:<port>` names it on a page no daemon serves: the VS Code webview
@@ -17,13 +18,14 @@
 //! (`follow_restarts`).
 
 use ankurah::signals::Get as AnkurahGet;
-use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_signals::{CurrentObserver, ReactiveGraphObserver};
 use ankurah_storage_indexeddb_wasm::IndexedDBStorageEngine;
 use ankurah_websocket_client_wasm::WebsocketClient;
 use fwd_core::model::PrincipalView;
 use fwd_core::naming;
 use fwd_core::ops;
+use fwd_core::project_graph::ProjectGraph;
 use leptos::prelude::*;
 use send_wrapper::SendWrapper;
 use std::cell::RefCell;
@@ -35,10 +37,10 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::window;
 
 static NODE: OnceLock<Node<IndexedDBStorageEngine, PermissiveAgent>> = OnceLock::new();
-static CONTEXT: OnceLock<Context> = OnceLock::new();
+static GRAPH: OnceLock<ProjectGraph> = OnceLock::new();
 static CLIENT: OnceLock<SendWrapper<WebsocketClient>> = OnceLock::new();
-static PROJECT: OnceLock<Project> = OnceLock::new();
-static PROJECTS: OnceLock<ArcRwSignal<Vec<Project>>> = OnceLock::new();
+static PROJECT: OnceLock<HostedProject> = OnceLock::new();
+static PROJECTS: OnceLock<ArcRwSignal<Vec<HostedProject>>> = OnceLock::new();
 /// The daemon's address when `?daemon=` named it (checked at boot), for reading `/projects` again.
 static DAEMON: OnceLock<Option<String>> = OnceLock::new();
 static LOCKED: OnceLock<bool> = OnceLock::new();
@@ -63,17 +65,17 @@ const NO_PROJECTS: &str = "No projects yet: run `fwd init` in a repository.";
 
 /// A project the daemon hosts, as its project list reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Project {
+pub struct HostedProject {
     pub id: String,
     pub name: String,
     /// Why the daemon could not open it, when it could not.
     pub error: Option<String>,
 }
 
-/// The context every read and transaction goes through: the one `boot` obtained once the node
-/// had joined the project and finished initializing. Valid once `boot` has returned `Ok`.
-pub fn ctx() -> Context {
-    CONTEXT.get().expect("the page has not booted").clone()
+/// The project's graph, which every read and transaction goes through: the one `boot` opened once
+/// the node had joined the daemon and finished initializing. Valid once `boot` has returned `Ok`.
+pub fn graph() -> ProjectGraph {
+    GRAPH.get().expect("the page has not booted").clone()
 }
 
 pub fn client() -> WebsocketClient {
@@ -81,18 +83,18 @@ pub fn client() -> WebsocketClient {
 }
 
 /// The project this page shows.
-pub fn project() -> Project {
-    PROJECT.get().cloned().unwrap_or(Project { id: String::new(), name: String::new(), error: None })
+pub fn project() -> HostedProject {
+    PROJECT.get().cloned().unwrap_or(HostedProject { id: String::new(), name: String::new(), error: None })
 }
 
 /// Every project the daemon hosts, as last read.
-pub fn projects() -> Vec<Project> {
+pub fn projects() -> Vec<HostedProject> {
     project_list().get_untracked()
 }
 
 /// Every project the daemon hosts, as a signal the header's selector redraws from: read at boot,
 /// and again by `refresh_projects`, so a project registered while the page is open appears.
-pub fn project_list() -> ArcRwSignal<Vec<Project>> {
+pub fn project_list() -> ArcRwSignal<Vec<HostedProject>> {
     PROJECTS.get_or_init(|| ArcRwSignal::new(Vec::new())).clone()
 }
 
@@ -141,7 +143,7 @@ pub fn me() -> Option<EntityId> {
 /// shown: it moves the principal in no picker until its next write stamps it.
 pub fn wrote(me: EntityId) {
     spawn_local(async move {
-        if let Err(e) = fwd_core::dormancy::wrote(&ctx(), me).await {
+        if let Err(e) = fwd_core::dormancy::wrote(&graph(), me).await {
             tracing::warn!("could not record that {} wrote from this page: {e}", me.to_base64());
         }
     });
@@ -149,7 +151,7 @@ pub fn wrote(me: EntityId) {
 
 /// Shows another project: the page loads again with the new `?p=`, which boots a fresh node on
 /// that project's socket, at its inbox (and the tab remembers the project once it has opened).
-/// `?as=` is left behind: principals belong to one project's graph, so the new page acts as
+/// `?as=` is left behind: a principal is someone's part in one project, so the new page acts as
 /// that project's person until the header's picker says otherwise.
 pub fn switch_project(id: &str) {
     let Some(w) = window() else { return };
@@ -204,12 +206,12 @@ pub async fn boot() -> Result<(), String> {
     let node = Node::new(Arc::new(storage), PermissiveAgent::new());
     let client = WebsocketClient::new(node.clone(), &ws_url(daemon, &project.id))
         .map_err(|e| format!("The page could not open its connection to the daemon: {e}"))?;
-    let context = join(&node).await?;
+    let graph = join(&node, &project.id).await?;
     if let Some(session) = &session {
         let _ = session.set_item(CHOSEN, &project.id);
     }
     NODE.set(node).map_err(|_| booted_twice())?;
-    CONTEXT.set(context).map_err(|_| booted_twice())?;
+    GRAPH.set(graph).map_err(|_| booted_twice())?;
     CLIENT.set(SendWrapper::new(client)).map_err(|_| booted_twice())?;
     PROJECT.set(project).map_err(|_| booted_twice())?;
     // From here on, every Ankurah signal read inside a Leptos closure registers a dependency.
@@ -235,32 +237,39 @@ pub async fn wallboard_node(project_id: &str) -> Result<(), String> {
     NODE.set(node).map_err(|_| "The wallboard node already started")?;
     CLIENT.set(SendWrapper::new(client)).map_err(|_| "The wallboard connection already started")?;
     // The wallboard lists no projects, so it knows the project by no name, and shows none.
-    let project = Project { id: project_id.into(), name: String::new(), error: None };
+    let project = HostedProject { id: project_id.into(), name: String::new(), error: None };
     PROJECT.set(project).map_err(|_| "The wallboard project already opened")?;
     CurrentObserver::set(ReactiveGraphObserver::new());
     Ok(())
 }
 
-/// Waits, with no deadline, for the wallboard's node to join the project's system, then opens its
-/// context. A daemon that answers later admits this same node and connector, and once they are set
-/// up an ordinary disconnect replaces neither.
+/// Waits, with no deadline, for the wallboard's node to join the daemon's system, then opens the
+/// project's graph. A daemon that answers later admits this same node and connector, and once they
+/// are set up an ordinary disconnect replaces neither.
 #[cfg(feature = "wallboard")]
-pub async fn wallboard_context() -> Result<(), String> {
+pub async fn wallboard_graph() -> Result<(), String> {
     let node = NODE.get().ok_or("The wallboard node has not started")?;
     node.system.wait_system_ready().await.map_err(|e| e.to_string())?;
     let context = node.context_async(DEFAULT_CONTEXT).await.map_err(|e| e.to_string())?;
-    CONTEXT.set(context).map_err(|_| "The wallboard context already opened".to_string())
+    let graph = ProjectGraph::open(context, project_uuid(&project().id)?).await.map_err(|e| e.to_string())?;
+    GRAPH.set(graph).map_err(|_| "The wallboard graph already opened".to_string())
+}
+
+/// The UUID a project's id names, as the daemon's project list and the wallboard's configuration
+/// give it.
+fn project_uuid(id: &str) -> Result<uuid::Uuid, String> {
+    id.parse().map_err(|_| format!("`{id}` is not a project's id"))
 }
 
 /// The project the URL names (with its error, when the daemon could not open it), else the one
 /// this tab last opened when the daemon has it open, else the first one that opened. A page
 /// pinned to a project the daemon does not host says so rather than showing another.
 fn choose(
-    projects: &[Project],
+    projects: &[HostedProject],
     named: Option<&str>,
     remembered: Option<&str>,
     locked: bool,
-) -> Result<Project, String> {
+) -> Result<HostedProject, String> {
     let hosted = |id: &str| projects.iter().find(|p| p.id == id).cloned();
     if let Some(id) = named {
         if let Some(project) = hosted(id) {
@@ -346,7 +355,7 @@ async fn named_build(health: web_sys::Response) -> Result<Option<String>, String
     Ok(health["build"].as_str().map(str::to_string))
 }
 
-async fn hosted_projects(daemon: Option<&str>) -> Result<Vec<Project>, String> {
+async fn hosted_projects(daemon: Option<&str>) -> Result<Vec<HostedProject>, String> {
     let response = fetch(daemon, "/projects").await.ok_or_else(|| not_answering(daemon))?;
     if response.status() != 200 {
         return Err(format!("The daemon refused the page's request for its projects (HTTP {}).", response.status()));
@@ -363,7 +372,7 @@ async fn hosted_projects(daemon: Option<&str>) -> Result<Vec<Project>, String> {
         .map(|items| {
             items
                 .iter()
-                .map(|p| Project {
+                .map(|p| HostedProject {
                     id: p["id"].as_str().unwrap_or_default().to_string(),
                     name: p["name"].as_str().unwrap_or_default().to_string(),
                     error: p["error"].as_str().map(str::to_string),
@@ -483,23 +492,25 @@ fn ws_url(daemon: Option<&str>, project: &str) -> String {
     format!("{scheme}://{host}/p/{project}")
 }
 
-/// Waits, at most `JOIN_TIMEOUT_MS`, for the node to join the project's system over the socket
-/// and then to finish its own initialization, and returns the context every read and write goes
-/// through. A joined node is not initialized yet (its synchronous `context` refuses until it
-/// is), and `wait_system_ready` has no timeout of its own and only resolves over the socket, so
-/// both waits run as one task while this polls, since the wasm executor offers no select.
-async fn join(node: &Node<IndexedDBStorageEngine, PermissiveAgent>) -> Result<Context, String> {
-    // None while waiting, then the context or the reason there is none.
-    let outcome: Rc<RefCell<Option<Result<Context, String>>>> = Rc::new(RefCell::new(None));
+/// Waits, at most `JOIN_TIMEOUT_MS`, for the node to join the daemon's system over the socket,
+/// then to finish its own initialization and open the graph of project `id`, which it returns. A
+/// joined node is not initialized yet (its synchronous `context` refuses until it is), and
+/// `wait_system_ready` has no timeout of its own and only resolves over the socket, so the waits
+/// run as one task while this polls, since the wasm executor offers no select.
+async fn join(node: &Node<IndexedDBStorageEngine, PermissiveAgent>, id: &str) -> Result<ProjectGraph, String> {
+    let uuid = project_uuid(id)?;
+    // None while waiting, then the graph or the reason there is none.
+    let outcome: Rc<RefCell<Option<Result<ProjectGraph, String>>>> = Rc::new(RefCell::new(None));
     spawn_local({
         let outcome = outcome.clone();
         let node = node.clone();
         async move {
-            let result = match node.system.wait_system_ready().await {
-                Ok(()) => node.context_async(DEFAULT_CONTEXT).await.map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
+            let result = async {
+                node.system.wait_system_ready().await.map_err(|e| e.to_string())?;
+                let context = node.context_async(DEFAULT_CONTEXT).await.map_err(|e| e.to_string())?;
+                ProjectGraph::open(context, uuid).await.map_err(|e| e.to_string())
             };
-            *outcome.borrow_mut() = Some(result);
+            *outcome.borrow_mut() = Some(result.await);
         }
     });
     for _ in 0..(JOIN_TIMEOUT_MS / POLL_STEP_MS) {
@@ -660,17 +671,17 @@ fn query_param(name: &str) -> Option<String> {
 /// project's person: the first by handle of the active people who belong to the project, else of
 /// the active people.
 async fn choose_principal() -> Result<PrincipalView, String> {
-    let ctx = ctx();
+    let graph = graph();
     if let Some(named) = query_param("as") {
         let none = if named.parse::<EntityId>().is_ok() { "id" } else { "handle" };
-        return naming::principal_named(&ctx, &named, None)
+        return naming::principal_named(&graph, &named, None)
             .await
             .map_err(|e| format!("{e}."))?
             .ok_or_else(|| format!("No principal has the {none} `{named}`."));
     }
     // `active` is filtered here, not in the predicate: a boolean literal in a predicate misses
     // entities that arrived over the wire (Ankurah 0.9.3; docs/design/data-model.md).
-    let mut humans: Vec<PrincipalView> = ctx
+    let mut humans: Vec<PrincipalView> = graph
         .fetch::<PrincipalView>("kind = 'human'")
         .await
         .map_err(|e| format!("could not list the project's people: {e}"))?

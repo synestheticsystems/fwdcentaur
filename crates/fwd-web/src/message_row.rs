@@ -12,7 +12,7 @@
 
 use crate::lozenges::{self, Target};
 use crate::referents::{Child, Listing, Models};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::{self, Actions, Editor, Hooks, Link, Model, Query, RowAt, Sending, ThreadState};
 use crate::{empty, fmt, references, steps, store};
 use ankurah::EntityId;
@@ -239,7 +239,7 @@ fn send_reply(me: EntityId, parent: EntityId, text: String) -> Sending {
     Box::pin(async move {
         let priority = store::message(parent).and_then(|m| m.priority().ok()).unwrap_or(Priority::Next);
         let mc = MessageContext { reply_to: Some(parent), ..Default::default() };
-        ops::post_message(&ctx(), me, &text, priority, mc).await.map_err(|e| e.to_string())
+        ops::post_message(&graph(), me, &text, priority, mc).await.map_err(|e| e.to_string())
     })
 }
 
@@ -266,14 +266,14 @@ const EDIT: Editor = Editor { placeholder: "what the message should say", send: 
 /// Saves `text` as `me`'s new text of `message`; a refusal (another's message, a name that fits
 /// nothing, a blank text) comes back in the words `ops::edit_message` gives it.
 fn save_edit(me: EntityId, message: EntityId, text: String) -> Sending {
-    Box::pin(
-        async move { ops::edit_message(&ctx(), me, message, &text).await.map(|()| message).map_err(|e| e.to_string()) },
-    )
+    Box::pin(async move {
+        ops::edit_message(&graph(), me, message, &text).await.map(|()| message).map_err(|e| e.to_string())
+    })
 }
 
 fn resolve(me: EntityId, message: EntityId, report: Callback<String>) {
     spawn_local(async move {
-        match ops::resolve_message(&ctx(), me, message).await {
+        match ops::resolve_message(&graph(), me, message).await {
             Ok(_) => session::wrote(me),
             Err(e) => {
                 report.try_run(e.to_string());

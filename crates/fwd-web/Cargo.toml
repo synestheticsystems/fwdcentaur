@@ -41,6 +41,8 @@ web-sys = { version = "0.3", features = [
     "DomRect", "MouseEvent", "PointerEvent", "UiEvent", "FocusEvent", "MediaQueryList", "CssStyleDeclaration",
 ] }
 send_wrapper = "0.6"
+# The page reads a project's id, from the daemon's project list, as the UUID its graph is opened by.
+uuid = "1"
 # The wallboard reads its runtime's layout requests as typed values, so that one no frame could give
 # is refused.
 serde = { version = "1", features = ["derive"], optional = true }

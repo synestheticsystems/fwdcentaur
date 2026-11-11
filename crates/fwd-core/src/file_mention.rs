@@ -153,15 +153,19 @@ pub fn stored_version(version: &str) -> Result<Version> {
 /// The whole-file highlight named by `id` (all of it, or its start) at `version`, as a stored file
 /// mention names it ([`Bracketed::Highlight`]): refused unless `id` names a highlight on a whole
 /// file and `version` is one a stored mention writes.
-pub async fn highlight_at(ctx: &ankurah::Context, id: &str, version: &str) -> Result<(ankurah::EntityId, Version)> {
+pub async fn highlight_at(
+    graph: &crate::project_graph::ProjectGraph,
+    id: &str,
+    version: &str,
+) -> Result<(ankurah::EntityId, Version)> {
     use crate::model::CodeAnchorView;
     use crate::ops::{self, Kind};
     let version = stored_version(version)?;
     if id.is_empty() {
         bail!("no highlight's id comes before the at-sign");
     }
-    let id = ops::resolve_id(ctx, id, &[Kind::Anchor]).await?;
-    let anchor: CodeAnchorView = ctx.get(id).await.map_err(|_| anyhow!("no highlight has that id"))?;
+    let id = ops::resolve_id(graph, id, &[Kind::Anchor]).await?;
+    let anchor: CodeAnchorView = graph.get(id).await.map_err(|_| anyhow!("no highlight has that id"))?;
     if !anchor.whole_file()?.unwrap_or(false) {
         bail!("a version goes with a whole file, and this highlight is on lines of one");
     }
@@ -179,7 +183,8 @@ mod native {
     use super::{NoCheckout, Version, INDEX, WORKTREE};
     use crate::anchoring::{self, Against, AnchorSpec};
     use crate::model::DiffSide;
-    use ankurah::{Context, EntityId};
+    use crate::project_graph::ProjectGraph;
+    use ankurah::EntityId;
     use anyhow::{bail, Result};
     use std::future::Future;
     use std::path::{Path, PathBuf};
@@ -281,9 +286,9 @@ mod native {
     /// The whole-file highlight holding what `read` read: the one made already for the same
     /// content of the same file, else a new one made by `by`, alone in its transaction, as `fwd
     /// anchor create` makes one (`ops::create_anchor`).
-    pub async fn highlight(ctx: &Context, by: EntityId, read: &Read) -> Result<EntityId> {
-        let repo = crate::ops::ensure_repo(ctx, &read.root).await?;
-        crate::ops::create_anchor(ctx, by, repo, &read.spec).await
+    pub async fn highlight(graph: &ProjectGraph, by: EntityId, read: &Read) -> Result<EntityId> {
+        let repo = crate::ops::ensure_repo(graph, &read.root).await?;
+        crate::ops::create_anchor(graph, by, repo, &read.spec).await
     }
 }
 
@@ -292,7 +297,8 @@ mod native {
 #[cfg(not(feature = "native"))]
 mod elsewhere {
     use super::{NoCheckout, Version};
-    use ankurah::{Context, EntityId};
+    use crate::project_graph::ProjectGraph;
+    use ankurah::EntityId;
     use anyhow::Result;
 
     /// A file a mention names, read in a checkout; never made where none is read.
@@ -307,7 +313,7 @@ mod elsewhere {
     }
 
     /// Refuses the file: no checkout is read here, so nothing was read to make a highlight of.
-    pub async fn highlight(_ctx: &Context, _by: EntityId, _read: &Read) -> Result<EntityId> {
+    pub async fn highlight(_graph: &ProjectGraph, _by: EntityId, _read: &Read) -> Result<EntityId> {
         Err(NoCheckout.into())
     }
 }

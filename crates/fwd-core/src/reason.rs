@@ -18,8 +18,9 @@
 //! from what it fetched ([`gather`]) and the page from its standing queries, and both say the same.
 
 use crate::model::*;
+use crate::project_graph::ProjectGraph;
 use crate::routing::{self, Why};
-use ankurah::{Context, EntityId};
+use ankurah::EntityId;
 use anyhow::Result;
 use serde_json::Value;
 use std::cell::RefCell;
@@ -882,10 +883,10 @@ impl Names for Fetched {
 
 /// The sentence for the notification `n` as `reader` reads it, ending with how to answer the
 /// message behind it when it has one to answer and `reader` is its recipient ([`reply_id`]), with
-/// the names fetched from `ctx`: the sentence is built, what it asked for and did not have is
+/// the names fetched from `graph`: the sentence is built, what it asked for and did not have is
 /// fetched, and it is built again, until it asks for nothing new (a message's thread is a second
 /// step, its first message's author a third).
-pub async fn gather(ctx: &Context, n: &NotificationView, reader: Option<EntityId>) -> Result<Vec<Part>> {
+pub async fn gather(graph: &ProjectGraph, n: &NotificationView, reader: Option<EntityId>) -> Result<Vec<Part>> {
     let recipient: EntityId = n.recipient()?.into();
     let reply = reply_id(n.id(), recipient, reader);
     let t = n.notification_type()?;
@@ -901,7 +902,7 @@ pub async fn gather(ctx: &Context, n: &NotificationView, reader: Option<EntityId
             return Ok(parts);
         }
         for (want, id) in wanted {
-            fetch(ctx, &mut fetched, want, id).await;
+            fetch(graph, &mut fetched, want, id).await;
         }
     }
     Ok(sentence(&fetched, recipient, reply, t, &target, &originator))
@@ -909,42 +910,42 @@ pub async fn gather(ctx: &Context, n: &NotificationView, reader: Option<EntityId
 
 /// Fetches one name into `f`; a name that cannot be read (another kind of entity, or gone) is
 /// left out, and the sentence says "a task" or "someone" in its place.
-async fn fetch(ctx: &Context, f: &mut Fetched, want: Want, id: EntityId) {
+async fn fetch(graph: &ProjectGraph, f: &mut Fetched, want: Want, id: EntityId) {
     match want {
         Want::Handle => {
-            if let Some(h) = ctx.get::<PrincipalView>(id).await.ok().and_then(|p| p.handle().ok()) {
+            if let Some(h) = graph.get::<PrincipalView>(id).await.ok().and_then(|p| p.handle().ok()) {
                 f.handles.insert(id, h);
             }
         }
         Want::Task => {
-            if let Some(title) = ctx.get::<TaskView>(id).await.ok().and_then(|t| t.title().ok()) {
+            if let Some(title) = graph.get::<TaskView>(id).await.ok().and_then(|t| t.title().ok()) {
                 f.tasks.insert(id, title);
             }
         }
         Want::Decision => {
-            if let Ok(d) = ctx.get::<DecisionView>(id).await {
+            if let Ok(d) = graph.get::<DecisionView>(id).await {
                 f.decisions.insert(id, (d.number().unwrap_or(0), d.title().unwrap_or_default()));
             }
         }
         Want::Scope => {
-            if let Some(title) = ctx.get::<ScopeView>(id).await.ok().and_then(|s| s.title().ok()) {
+            if let Some(title) = graph.get::<ScopeView>(id).await.ok().and_then(|s| s.title().ok()) {
                 f.scopes.insert(id, title);
             }
         }
         Want::Anchor => {
-            if let Ok(a) = ctx.get::<CodeAnchorView>(id).await {
+            if let Ok(a) = graph.get::<CodeAnchorView>(id).await {
                 if let (Ok(path), Ok(lines)) = (a.path(), crate::ops::lines_of(&a)) {
                     f.anchors.insert(id, (path, lines));
                 }
             }
         }
         Want::Message => {
-            if let Ok(m) = ctx.get::<MessageView>(id).await {
+            if let Ok(m) = graph.get::<MessageView>(id).await {
                 f.messages.insert(id, MessageFacts::of(&m));
             }
         }
         Want::Relation => {
-            if let Ok(r) = ctx.get::<RelationView>(id).await {
+            if let Ok(r) = graph.get::<RelationView>(id).await {
                 if let (Ok(kind), Ok(from), Ok(to)) = (r.kind(), r.from_id(), r.to_id()) {
                     f.relations.insert(id, RelationFacts { kind, from, to });
                 }

@@ -12,7 +12,7 @@
 
 use crate::lozenges::{self, Target};
 use crate::referents::{Child, Listing, Models};
-use crate::session::ctx;
+use crate::session::graph;
 use crate::thread::{self, Actions, Editor, Link, Model, Query, RowAt, Sending, ThreadState};
 use crate::{empty, fmt, store};
 use ankurah::EntityId;
@@ -247,7 +247,7 @@ const COMMENT: Editor = Editor { placeholder: "comment on this highlight", send:
 fn send_comment(me: EntityId, anchor: EntityId, text: String) -> Sending {
     Box::pin(async move {
         let mc = MessageContext { anchor_id: Some(anchor), ..Default::default() };
-        ops::post_message(&ctx(), me, &text, Priority::Next, mc).await.map_err(|e| e.to_string())
+        ops::post_message(&graph(), me, &text, Priority::Next, mc).await.map_err(|e| e.to_string())
     })
 }
 

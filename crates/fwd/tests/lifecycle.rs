@@ -1,8 +1,8 @@
 //! The daemon's lifecycle: concurrent launchers start exactly one daemon; data persists across a
 //! stop and restart, on the same port; a stale port file is recovered without killing any pid,
-//! and one that names another daemon's port is not trusted; a project a per-project daemon from
-//! an earlier build still holds is left to it; one daemon hosts every project, including one
-//! created while it runs; it keeps a dev-runner entry while it runs, and leaves none once it stops;
+//! and one that names another daemon's port is not trusted; one daemon hosts every project in its
+//! one store, including one created while it runs, and refuses a project whose records are still
+//! in a store of its own; it keeps a dev-runner entry while it runs, and leaves none once it stops;
 //! a `fwd watch` with no timeout hears across a restart, on the same port or another, and says
 //! nothing about it, and one given `--timeout` ends once it has passed; either exits within a
 //! second of its last line. Any other command caught waiting on its daemon when the daemon stops
@@ -22,7 +22,7 @@ use fwd_core::daemon::{self, Autostart, Bind, DaemonConfig, PortFile, LOST_AFTER
 use fwd_core::model::*;
 use fwd_core::naming;
 use fwd_core::ops::{self, CreateTask, MessageContext};
-use fwd_core::project::{self, Paths, Project};
+use fwd_core::project::{self, NamedProject, Paths};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -31,14 +31,14 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-fn setup() -> Result<(Scratch, Paths, Project)> {
+fn setup() -> Result<(Scratch, Paths, NamedProject)> {
     let dir = Scratch::new()?;
     let paths = dir.paths("run", "data");
     let ws = new_project(&paths, &dir.path().join("repo"), "test")?;
     Ok((dir, paths, ws))
 }
 
-fn new_project(paths: &Paths, root: &Path, name: &str) -> Result<Project> {
+fn new_project(paths: &Paths, root: &Path, name: &str) -> Result<NamedProject> {
     std::fs::create_dir_all(root)?;
     Ok(project::init(paths, root, project::InitOptions { name: Some(name), ..Default::default() })?.0.project)
 }
@@ -87,9 +87,10 @@ async fn data_persists_across_daemon_restarts() -> Result<()> {
     let (_dir, paths, ws) = setup()?;
     let task_id = {
         let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
-        let trx = client.ctx.begin();
+        let trx = client.graph.begin();
         let me = trx
             .create(&Principal {
+                project: client.graph.project(),
                 kind: PrincipalKind::Human,
                 handle: "dnorman".into(),
                 display_name: "Daniel".into(),
@@ -107,6 +108,7 @@ async fn data_persists_across_daemon_restarts() -> Result<()> {
         let now = fwd_core::now_ms();
         let task = trx
             .create(&Task {
+                project: client.graph.project(),
                 title: "Survive a restart".into(),
                 what: "".into(),
                 why: "".into(),
@@ -142,7 +144,7 @@ async fn data_persists_across_daemon_restarts() -> Result<()> {
         Some(second.port),
         "the daemon records its port to try it first next time"
     );
-    let task: TaskView = client.ctx.get(task_id).await?;
+    let task: TaskView = client.graph.get(task_id).await?;
     assert_eq!(task.title()?, "Survive a restart");
     assert!(daemon::stop(&paths).await?);
     Ok(())
@@ -160,22 +162,12 @@ async fn a_stale_port_file_is_replaced_without_killing_anything() -> Result<()> 
         &paths.port_file(),
         &PortFile { port, pid: 1, instance_id: "stale".into(), started: 0, bind: Bind::Loopback },
     )?;
-    // What a per-project daemon from an earlier build left behind when it died.
-    let leftovers = ["ws", "bootstrap.lock"].map(|ext| paths.runtime_dir.join(format!("{}.{ext}", ws.id)));
-    let project_lock = paths.runtime_dir.join(format!("{}.lock", ws.id));
-    for file in leftovers.iter().chain([&project_lock]) {
-        std::fs::write(file, "")?;
-    }
     assert!(daemon::status(&paths).await?.is_none(), "status never trusts a port file");
 
     let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
     let pf = daemon::read_port_file(&paths.port_file())?.expect("port file");
     assert_ne!(pf.instance_id, "stale");
     assert_eq!(pf.port, client.port);
-    for file in &leftovers {
-        assert!(!file.exists(), "{} is retired at start", file.display());
-    }
-    assert!(daemon::try_lock(&project_lock)?.is_none(), "the daemon holds the lock of the project it hosts");
     assert!(daemon::stop(&paths).await?);
     Ok(())
 }
@@ -207,171 +199,33 @@ async fn a_port_file_naming_another_daemons_port_is_not_trusted() -> Result<()> 
     Ok(())
 }
 
-/// A per-project daemon from an earlier build that still runs, played by a process of its own:
-/// this test binary run again as `EARLIER_DAEMON`, holding a project's `<uuid>.lock` until the
-/// test stops it. The lock has to be held by another process, as such a daemon holds it, and not
-/// by the test's own: a child this process is spawning (the other tests start daemons all the
-/// time) holds a copy of every descriptor this process has open until its exec closes them, so a
-/// lock this process had just released could still be held for a moment, and the daemon asked
-/// to open the project in that moment refused it as held ("a daemon from an earlier build of fwd
-/// still has this project open", 2026-09-28 and again 2026-09-29, under load).
-struct EarlierDaemon {
-    process: std::process::Child,
-    /// Its standard output, kept open so it can go on writing (the test harness reports a test
-    /// running for over a minute there) without being stopped by a closed pipe.
-    output: std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
-}
-
-/// The test `EarlierDaemon` runs in its process.
-const EARLIER_DAEMON: &str = "hold_a_projects_lock_as_an_earlier_builds_daemon";
-/// The variable that names the lock that process holds.
-const EARLIER_DAEMON_LOCK: &str = "FWD_TEST_EARLIER_DAEMON_LOCK";
-/// The line that process prints once it holds the lock.
-const HOLDING: &str = "holding the project's lock";
-
-impl EarlierDaemon {
-    /// Starts the process, and returns once it holds `lock`.
-    fn holding(lock: &Path) -> Result<EarlierDaemon> {
-        let mut process = std::process::Command::new(std::env::current_exe()?)
-            .args([EARLIER_DAEMON, "--exact", "--ignored", "--nocapture"])
-            .env(EARLIER_DAEMON_LOCK, lock)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()?;
-        let output = std::io::BufRead::lines(std::io::BufReader::new(process.stdout.take().expect("piped")));
-        // Ended by `Drop` should the process fail to take the lock.
-        let mut earlier = EarlierDaemon { process, output };
-        loop {
-            match earlier.output.next().transpose()? {
-                Some(line) if line.ends_with(HOLDING) => return Ok(earlier),
-                Some(_) => {}
-                None => return Err(anyhow!("the earlier build's daemon ended before it held {}", lock.display())),
-            }
-        }
-    }
-
-    /// The process's pid, which the daemon names when it refuses the project.
-    fn pid(&self) -> u32 {
-        self.process.id()
-    }
-
-    /// Stops the process and returns once it has exited: its lock is free then, as an earlier
-    /// build's daemon's is once `kill <pid>` has stopped it.
-    fn stop(mut self) -> Result<()> {
-        self.process.kill()?;
-        self.process.wait()?;
-        Ok(())
-    }
-}
-
-impl Drop for EarlierDaemon {
-    /// Stops the process of a test that failed before it stopped it.
-    fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-    }
-}
-
-/// The earlier build's daemon, as `EarlierDaemon` runs it in a process of its own: takes the lock
-/// `EARLIER_DAEMON_LOCK` names, says so, and holds it until the test stops the process, or until
-/// the test's own process ends and so closes this one's standard input. Run any other way, it
-/// does nothing.
-#[test]
-#[ignore = "the lock tests run it in a process of its own, as a daemon from an earlier build"]
-fn hold_a_projects_lock_as_an_earlier_builds_daemon() -> Result<()> {
-    let Some(lock) = std::env::var_os(EARLIER_DAEMON_LOCK) else { return Ok(()) };
-    let _held = daemon::try_lock(Path::new(&lock))?.ok_or_else(|| anyhow!("something else holds {lock:?}"))?;
-    println!("{HOLDING}");
-    std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new())?;
-    Ok(())
-}
-
-/// A per-project daemon from an earlier build that still runs holds `<uuid>.lock` and has the
-/// project's database open. The daemon leaves that project to it, naming its pid, and hosts the
-/// others; it holds the lock of every project it hosts, so such a build cannot open one of them
-/// a second time; and it opens the held project on request once that daemon has stopped.
+/// A project whose records are still in a store of its own, from before the daemon kept every
+/// project in one, is refused, naming that store, and the daemon hosts the others; once the store
+/// has moved away, the project opens on request.
 #[tokio::test]
-async fn a_project_an_earlier_builds_daemon_holds_is_left_to_it_until_its_lock_frees() -> Result<()> {
-    let (dir, paths, held) = setup()?;
+async fn a_project_whose_records_are_still_in_a_store_of_its_own_is_refused_and_the_others_are_hosted() -> Result<()> {
+    let (dir, paths, unmoved) = setup()?;
     let other = new_project(&paths, &dir.path().join("other"), "other")?;
-    paths.ensure()?;
-    let lock_of = |project: &Project| paths.runtime_dir.join(format!("{}.lock", project.id));
-    // What that daemon holds and wrote: the project's lock, and a port file with its pid.
-    let earlier = EarlierDaemon::holding(&lock_of(&held))?;
-    let pid = earlier.pid();
-    let earlier_port_file = paths.runtime_dir.join(format!("{}.ws", held.id));
-    let written =
-        serde_json::json!({"port": 1, "pid": pid, "instance_id": "earlier", "started": 0, "project": held.id});
-    std::fs::write(&earlier_port_file, written.to_string())?;
+    let own_store = paths.storage_dir(&unmoved).join("project.sqlite");
+    std::fs::create_dir_all(paths.storage_dir(&unmoved))?;
+    std::fs::write(&own_store, b"")?;
 
     let client = daemon::ensure_daemon(&paths, &other, spawn()).await?;
     let running = daemon::status(&paths).await?.expect("the daemon answers");
     let error_of =
         |id| running.projects.iter().find(|p| p.id == id).expect("every indexed project is listed").error.clone();
-    let error = error_of(held.id).expect("the held project is not opened");
-    assert!(error.contains(&format!("pid {pid}")), "the error names the earlier daemon's pid: {error}");
-    assert_eq!(error_of(other.id), None, "the other project opens");
-    assert!(daemon::try_lock(&lock_of(&other))?.is_none(), "the daemon holds the lock of the project it hosts");
-    assert!(earlier_port_file.exists(), "the files of a daemon that still runs stay");
-    let refused = daemon::ensure_daemon(&paths, &held, spawn()).await.err().expect("the held project is refused");
-    assert!(format!("{refused:#}").contains(&format!("pid {pid}")), "{refused:#}");
+    let error = error_of(unmoved.id).expect("the project is not hosted");
+    assert!(error.contains(&own_store.display().to_string()), "the refusal names the store: {error}");
+    assert_eq!(error_of(other.id), None, "the other project is hosted");
+    let refused = daemon::ensure_daemon(&paths, &unmoved, spawn()).await.err().expect("the project is refused");
+    assert!(format!("{refused:#}").contains("still in a store of its own"), "{refused:#}");
 
-    earlier.stop()?;
-    daemon::host(&client.pf, &held).await?;
-    let running = daemon::status(&paths).await?.expect("the daemon answers");
-    assert!(running.projects.iter().any(|p| p.id == held.id && p.error.is_none()), "{:?}", running.projects);
-    assert!(daemon::try_lock(&lock_of(&held))?.is_none(), "the daemon holds the lock now");
-    let reached = daemon::ensure_daemon(&paths, &held, spawn()).await?;
+    std::fs::remove_file(&own_store)?;
+    daemon::host(&client.pf, &unmoved).await?;
+    let reached = daemon::ensure_daemon(&paths, &unmoved, spawn()).await?;
     assert_eq!(reached.pf.instance_id, client.pf.instance_id);
 
     drop(reached);
-    drop(client);
-    assert!(daemon::stop(&paths).await?);
-    Ok(())
-}
-
-/// The storage layout moved on 2026-09-25 (`workspaces/<id>/workspace.sqlite` to
-/// `projects/<id>/project.sqlite`). SQLite keeps committed writes in the write-ahead log until a
-/// checkpoint, so a daemon that died without one leaves them there: the migration must move the
-/// log with the database, or the writes are gone.
-#[tokio::test]
-async fn a_killed_daemons_uncheckpointed_writes_survive_the_layout_migration() -> Result<()> {
-    let (_dir, paths, ws) = setup()?;
-    let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
-    let pid = client.pf.pid;
-    let me = ops::ensure_principal(&client.ctx, "d", "D", PrincipalKind::Human, None).await?;
-    let task = ops::create_task(&client.ctx, me, CreateTask { title: "survives".into(), ..Default::default() }).await?;
-    drop(client);
-
-    // No graceful stop: nothing checkpoints the log. The kernel frees the killed daemon's lock as
-    // its process exits, within milliseconds on a loaded machine too; the ten seconds only bound a
-    // daemon that does not die.
-    assert!(std::process::Command::new("kill").args(["-9", &pid.to_string()]).status()?.success());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while daemon::daemon_alive(&paths)? {
-        assert!(std::time::Instant::now() < deadline, "the killed daemon still holds its lock");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let _ = std::fs::remove_file(paths.port_file());
-
-    // Lay the files out the way the old binary left them.
-    let new = paths.storage_dir(&ws);
-    let old = paths.data_dir.join("workspaces").join(ws.id.to_string());
-    std::fs::create_dir_all(old.parent().unwrap())?;
-    std::fs::rename(&new, &old)?;
-    for suffix in ["", "-wal", "-shm"] {
-        let from = old.join(format!("project.sqlite{suffix}"));
-        if from.exists() {
-            std::fs::rename(&from, old.join(format!("workspace.sqlite{suffix}")))?;
-        }
-    }
-    assert!(old.join("workspace.sqlite-wal").exists(), "the kill left the write-ahead log behind");
-
-    let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
-    let found: TaskView = client.ctx.get(task).await?;
-    assert_eq!(found.title()?, "survives");
-    assert!(!old.exists(), "the legacy directory is gone");
-    assert!(paths.db_path(&ws).exists());
     drop(client);
     assert!(daemon::stop(&paths).await?);
     Ok(())
@@ -384,21 +238,21 @@ async fn one_daemon_hosts_every_project_and_each_is_reachable() -> Result<()> {
     let a = daemon::ensure_daemon(&paths, &first, spawn()).await?;
     let b = daemon::ensure_daemon(&paths, &second, spawn()).await?;
     assert_eq!(a.pf.instance_id, b.pf.instance_id, "one daemon serves both projects");
-    assert_ne!(a.ws.server_node_id(), b.ws.server_node_id(), "each project has its own durable node");
+    assert_eq!(a.ws.server_node_id(), b.ws.server_node_id(), "both projects are in the daemon's one node");
 
     let running = daemon::status(&paths).await?.expect("the daemon answers");
     let listed: Vec<(&str, bool)> = running.projects.iter().map(|p| (p.name.as_str(), p.error.is_none())).collect();
     assert_eq!(listed, vec![("other", true), ("test", true)], "listed by name, both open");
 
     // Each client writes into its own project's graph, and only there.
-    let me = ops::ensure_principal(&a.ctx, "d", "D", PrincipalKind::Human, None).await?;
-    let task = ops::create_task(&a.ctx, me, CreateTask { title: "first only".into(), ..Default::default() }).await?;
-    let you = ops::ensure_principal(&b.ctx, "e", "E", PrincipalKind::Human, None).await?;
-    ops::create_task(&b.ctx, you, CreateTask { title: "second only".into(), ..Default::default() }).await?;
+    let me = ops::ensure_principal(&a.graph, "d", "D", PrincipalKind::Human, None).await?;
+    let task = ops::create_task(&a.graph, me, CreateTask { title: "first only".into(), ..Default::default() }).await?;
+    let you = ops::ensure_principal(&b.graph, "e", "E", PrincipalKind::Human, None).await?;
+    ops::create_task(&b.graph, you, CreateTask { title: "second only".into(), ..Default::default() }).await?;
     let titles = |tasks: Vec<TaskView>| tasks.iter().map(|t| t.title().unwrap_or_default()).collect::<Vec<_>>();
-    assert_eq!(titles(a.ctx.fetch::<TaskView>("created > 0").await?), vec!["first only"]);
-    assert_eq!(titles(b.ctx.fetch::<TaskView>("created > 0").await?), vec!["second only"]);
-    assert_eq!(a.ctx.get::<TaskView>(task).await?.title()?, "first only");
+    assert_eq!(titles(a.graph.all::<TaskView>().await?), vec!["first only"]);
+    assert_eq!(titles(b.graph.all::<TaskView>().await?), vec!["second only"]);
+    assert_eq!(a.graph.get::<TaskView>(task).await?.title()?, "first only");
 
     drop(a);
     drop(b);
@@ -427,8 +281,10 @@ async fn a_project_created_while_the_daemon_runs_is_hosted_without_a_restart() -
     assert!(out.status.success(), "fwd init --new failed: {}", String::from_utf8_lossy(&out.stderr));
     let init: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     assert_eq!(init["project"]["created"], true);
-    let later =
-        Project { id: init["project"]["id"].as_str().expect("the new project's id").parse()?, name: "later".into() };
+    let later = NamedProject {
+        id: init["project"]["id"].as_str().expect("the new project's id").parse()?,
+        name: "later".into(),
+    };
 
     let running = daemon::status(&paths).await?.expect("the daemon answers");
     assert_eq!(running.pf.instance_id, before.instance_id, "the daemon that was running hosts it; no restart");
@@ -436,7 +292,7 @@ async fn a_project_created_while_the_daemon_runs_is_hosted_without_a_restart() -
     let reached = daemon::ensure_daemon(&paths, &later, spawn()).await?;
     assert_eq!(reached.pf.instance_id, before.instance_id);
     assert!(
-        naming::principal_named(&reached.ctx, "d", None).await?.is_some(),
+        naming::principal_named(&reached.graph, "d", None).await?.is_some(),
         "init recorded its person in the new project's graph"
     );
 
@@ -448,16 +304,17 @@ async fn a_project_created_while_the_daemon_runs_is_hosted_without_a_restart() -
 
 /// While the daemon runs, the dev-runner registry holds its entry: the meta file, naming the data
 /// directory, the daemon's pid and its port, and one status file, for the unit `daemon`, that
-/// counts the projects open (not one another daemon holds, until it opens on request), with none
-/// per project. Once the daemon has stopped, the registry holds nothing of it.
+/// counts the projects open (not one the daemon refused, until it opens on request), with none per
+/// project. Once the daemon has stopped, the registry holds nothing of it.
 #[tokio::test]
 async fn the_dev_runner_registry_holds_the_daemons_entry_while_it_runs_and_nothing_once_it_stops() -> Result<()> {
     let (dir, paths, first) = setup()?;
     new_project(&paths, &dir.path().join("second"), "My Project!")?;
     let held = new_project(&paths, &dir.path().join("held"), "held")?;
-    paths.ensure()?;
-    // As a per-project daemon from an earlier build would.
-    let earlier = EarlierDaemon::holding(&paths.runtime_dir.join(format!("{}.lock", held.id)))?;
+    // A store of its own, which the daemon refuses to host the project over.
+    let own_store = paths.storage_dir(&held).join("project.sqlite");
+    std::fs::create_dir_all(paths.storage_dir(&held))?;
+    std::fs::write(&own_store, b"")?;
 
     let client = daemon::ensure_daemon(&paths, &first, spawn()).await?;
     let pf = daemon::read_port_file(&paths.port_file())?.expect("port file");
@@ -485,11 +342,11 @@ async fn the_dev_runner_registry_holds_the_daemons_entry_while_it_runs_and_nothi
     assert!(meta["STARTED"].parse::<u64>().is_ok(), "STARTED is Unix seconds: {meta:?}");
     assert_eq!(meta["DAEMON_PORT"], pf.port.to_string(), "the daemon unit's port is the daemon's");
     let status = || std::fs::read_to_string(registry.join(format!("{id}.daemon.status")));
-    assert_eq!(status()?, "ready: 2 projects\n", "the project another daemon holds is not counted");
+    assert_eq!(status()?, "ready: 2 projects\n", "the project the daemon refused is not counted");
 
-    assert!(daemon::host(&client.pf, &held).await.is_err(), "the earlier daemon still holds it");
+    assert!(daemon::host(&client.pf, &held).await.is_err(), "its own store is still there");
     assert_eq!(status()?, "ready: 2 projects\n", "a project that fails to open leaves the status file as it was");
-    earlier.stop()?;
+    std::fs::remove_file(&own_store)?;
     daemon::host(&client.pf, &held).await?;
     assert_eq!(status()?, "ready: 3 projects\n", "a project that opens on request is counted");
 
@@ -534,8 +391,14 @@ async fn a_watch_given_a_timeout_ends_once_it_has_passed() -> Result<()> {
     let (dir, paths, ws) = setup()?;
     let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
     // `--as` names a principal the project has, and never makes one.
-    ops::ensure_principal(&client.ctx, "impl-watch", "impl-watch", PrincipalKind::Agent, Some(AgentRole::Implementer))
-        .await?;
+    ops::ensure_principal(
+        &client.graph,
+        "impl-watch",
+        "impl-watch",
+        PrincipalKind::Agent,
+        Some(AgentRole::Implementer),
+    )
+    .await?;
     let started = std::time::Instant::now();
     let mut watch = Watch::start(dir.path(), &paths, &["--count", "1", "--timeout", "2"])?;
     let line = next_line(&mut watch.lines).await?;
@@ -561,9 +424,9 @@ enum Restart {
 async fn watch_across_a_restart(idle: Duration, restart: Restart) -> Result<()> {
     let (dir, paths, ws) = setup()?;
     let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
-    let asker = ops::ensure_principal(&client.ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let asker = ops::ensure_principal(&client.graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     let watcher = ops::ensure_principal(
-        &client.ctx,
+        &client.graph,
         "impl-watch",
         "impl-watch",
         PrincipalKind::Agent,
@@ -576,7 +439,7 @@ async fn watch_across_a_restart(idle: Duration, restart: Restart) -> Result<()> 
     // milliseconds of the question, on a loaded machine too; the ten seconds only bound a service
     // that never does.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while ops::inbox(&client.ctx, watcher, true).await?.is_empty() {
+    while ops::inbox(&client.graph, watcher, true).await?.is_empty() {
         assert!(std::time::Instant::now() < deadline, "routing made no notification of the first question");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -696,7 +559,7 @@ async fn expect_notification(lines: &mut WatchOutput, content: &str) -> Result<(
 /// Asks `to` a question, as `fwd ask --to` does.
 async fn ask(client: &daemon::Client, from: EntityId, to: EntityId, text: &str) -> Result<()> {
     let to = MessageContext { to: Some(to.to_base64()), ..Default::default() };
-    ops::post_message(&client.ctx, from, text, Priority::Now, to).await?;
+    ops::post_message(&client.graph, from, text, Priority::Now, to).await?;
     Ok(())
 }
 
@@ -797,9 +660,10 @@ async fn a_write_committed_while_its_daemon_was_gone_is_not_reported_as_made() -
     // The write commits once the daemon has gone, and ends once the socket is open again.
     let write = client.while_writing(async {
         when_gone.await?;
-        let trx = client.ctx.begin();
+        let trx = client.graph.begin();
         let made = trx
             .create(&Principal {
+                project: client.graph.project(),
                 kind: PrincipalKind::Agent,
                 handle: "impl-unheard".into(),
                 display_name: "impl-unheard".into(),
@@ -835,7 +699,7 @@ async fn a_write_committed_while_its_daemon_was_gone_is_not_reported_as_made() -
     let (again, made) = away_and_back.map_err(|e| anyhow!("{e:#}; the write ended with {written:?}"))?;
     let error = written.expect_err("the write was reported as made");
     assert_eq!(error.downcast_ref::<daemon::Lost>(), Some(&daemon::Lost::Unconfirmed { port }), "{error:#}");
-    assert!(ops::principals(&again.ctx).await?.iter().all(|p| p.id() != made), "the daemon holds the write");
+    assert!(ops::principals(&again.graph).await?.iter().all(|p| p.id() != made), "the daemon holds the write");
 
     drop((client, again));
     assert!(daemon::stop(&paths).await?);
@@ -892,9 +756,9 @@ enum Caught {
 async fn caught_on_the_way(caught: Caught) -> Result<()> {
     let (dir, paths, ws) = setup()?;
     let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
-    let me = ops::ensure_principal(&client.ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let me = ops::ensure_principal(&client.graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     let spec = CreateTask { title: "Hear of a lost write".into(), ..Default::default() };
-    let task = ops::create_task(&client.ctx, me, spec).await?;
+    let task = ops::create_task(&client.graph, me, spec).await?;
     let joined = client.pf.clone();
     drop(client);
     let relay = Relay::start(joined.port, Hold::AfterNaming(task)).await?;
@@ -931,7 +795,7 @@ async fn caught_on_the_way(caught: Caught) -> Result<()> {
 
     if let Caught::Write = caught {
         let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
-        let said = ops::messages_about(&client.ctx, "task", task).await?;
+        let said = ops::messages_about(&client.graph, "task", task).await?;
         assert!(said.is_empty(), "the daemon holds {} message(s) on the task", said.len());
         drop(client);
         assert!(daemon::stop(&paths).await?);

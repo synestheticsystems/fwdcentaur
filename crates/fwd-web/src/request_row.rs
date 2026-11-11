@@ -37,7 +37,7 @@ use crate::lozenges::{self, Target};
 use crate::mentions::{MentionList, Mentions};
 use crate::referents::Models;
 use crate::route::{self, Route};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::{self, Hooks, Model};
 use crate::waiting::{Kind, Row, Sorted};
 use crate::{claim, empty, fmt, keys, notification_card, references, store, whose};
@@ -297,17 +297,17 @@ fn move_facts(kind: Kind, subject: EntityId) -> MoveFacts {
 /// Makes the move `mv` on `subject` as `me`, `why` being the reason its box asked for: the
 /// operation the task's panel, a decision's own row and a message's resolve run.
 async fn make(mv: Move, me: EntityId, subject: EntityId, why: Option<&str>) -> anyhow::Result<()> {
-    let ctx = ctx();
+    let graph = graph();
     let reason = why.unwrap_or("");
     match mv {
-        Move::Resolve => ops::resolve_message(&ctx, me, subject).await.map(drop),
-        Move::AcceptRuling => ops::move_decision(&ctx, me, subject, DecisionMove::Accept, reason).await.map(drop),
-        Move::RejectRuling => ops::move_decision(&ctx, me, subject, DecisionMove::Reject, reason).await.map(drop),
-        Move::AcceptReview => ops::transition(&ctx, me, subject, Verb::Accept, None).await.map(drop),
-        Move::Return => ops::transition(&ctx, me, subject, Verb::Return, why).await.map(drop),
-        Move::Approve => ops::transition(&ctx, me, subject, Verb::Approve, None).await.map(drop),
-        Move::RejectTask => ops::transition(&ctx, me, subject, Verb::Reject, why).await.map(drop),
-        Move::Done => ops::transition(&ctx, me, subject, Verb::Done, None).await.map(drop),
+        Move::Resolve => ops::resolve_message(&graph, me, subject).await.map(drop),
+        Move::AcceptRuling => ops::move_decision(&graph, me, subject, DecisionMove::Accept, reason).await.map(drop),
+        Move::RejectRuling => ops::move_decision(&graph, me, subject, DecisionMove::Reject, reason).await.map(drop),
+        Move::AcceptReview => ops::transition(&graph, me, subject, Verb::Accept, None).await.map(drop),
+        Move::Return => ops::transition(&graph, me, subject, Verb::Return, why).await.map(drop),
+        Move::Approve => ops::transition(&graph, me, subject, Verb::Approve, None).await.map(drop),
+        Move::RejectTask => ops::transition(&graph, me, subject, Verb::Reject, why).await.map(drop),
+        Move::Done => ops::transition(&graph, me, subject, Verb::Done, None).await.map(drop),
         // A reply is sent from the row's box, and Start from its own control (`claim::row_control`).
         Move::Reply | Move::Start => Ok(()),
     }
@@ -612,7 +612,7 @@ pub fn RequestRow(
         spawn_local(async move {
             let done = match make(mv, me, subject, why.as_deref()).await {
                 Ok(()) => match then_done {
-                    Some(task) => ops::transition(&ctx(), me, task, Verb::Done, None).await.map(drop),
+                    Some(task) => ops::transition(&graph(), me, task, Verb::Done, None).await.map(drop),
                     None => Ok(()),
                 },
                 failed => failed,
@@ -675,7 +675,7 @@ pub fn RequestRow(
             // At the priority of what it answers, as `fwd reply` and a reply box send it.
             let priority = store::message(subject).and_then(|m| m.priority().ok()).unwrap_or(Priority::Next);
             let mc = MessageContext { reply_to: Some(subject), ..Default::default() };
-            match ops::post_message(&ctx(), me, &text, priority, mc).await {
+            match ops::post_message(&graph(), me, &text, priority, mc).await {
                 Ok(_) => {
                     session::wrote(me);
                     reply.try_update(|written| {

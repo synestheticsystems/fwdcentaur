@@ -14,8 +14,9 @@
 //! security boundary.
 
 use crate::model::*;
+use crate::project_graph::ProjectGraph;
 use crate::{naming, ops};
-use ankurah::{Context, EntityId};
+use ankurah::EntityId;
 use anyhow::{bail, Result};
 
 /// The variable a stamped command carries the Claude Code session's id in.
@@ -162,8 +163,8 @@ pub fn of_same_session<'a>(principals: &'a [PrincipalView], subject: &str) -> Ve
 /// acts: none while the agent has not named itself. Should two be bound to it (two `fwd principal
 /// add`s of one agent at once), the one that is not retired; two that are not are refused, listed
 /// by id, for the agent to retire the one it does not mean.
-pub async fn principal_of(ctx: &Context, subject: &str) -> Result<Option<PrincipalView>> {
-    let principals = ops::principals(ctx).await?;
+pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<PrincipalView>> {
+    let principals = ops::principals(graph).await?;
     let bound = bound_to(&principals, subject);
     let active: Vec<&PrincipalView> = bound.iter().copied().filter(|p| p.active().unwrap_or(false)).collect();
     let one = match (bound.as_slice(), active.as_slice()) {
@@ -193,10 +194,10 @@ pub async fn principal_of(ctx: &Context, subject: &str) -> Result<Option<Princip
 /// not named itself. A typed `--as` must name that principal, since an agent acts only as itself;
 /// one that names another principal, or any `--as` while the agent has not named itself, is refused
 /// with the sentence saying so. `fwd principal bind` reads its `--as` itself.
-pub async fn caller(ctx: &Context, subject: &str, typed_as: Option<&str>) -> Result<Option<EntityId>> {
-    let bound = principal_of(ctx, subject).await?;
+pub async fn caller(graph: &ProjectGraph, subject: &str, typed_as: Option<&str>) -> Result<Option<EntityId>> {
+    let bound = principal_of(graph, subject).await?;
     if let Some(typed) = typed_as {
-        let named = naming::principal_named(ctx, naming::bare(typed), None).await?;
+        let named = naming::principal_named(graph, naming::bare(typed), None).await?;
         match (&bound, named) {
             (Some(b), Some(n)) if n.id() == b.id() => {}
             (Some(b), _) => bail!(

@@ -24,7 +24,7 @@
 use crate::referents::Mode;
 use crate::route::{self, Route};
 use crate::scope_filter::ScopeChoice;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{fmt, keys, labels, modes, panel, references, store};
 use ankurah::EntityId;
 use fwd_core::ops::{self, CreateTask, Kind};
@@ -349,7 +349,7 @@ pub fn NewTask(draft: Draft, scope: Memo<Option<ScopeChoice>>) -> impl IntoView 
         };
         busy.set(true);
         spawn_local(async move {
-            let made = ops::create_task(&ctx(), me, spec).await;
+            let made = ops::create_task(&graph(), me, spec).await;
             busy.try_set(false);
             match made {
                 Ok(id) => {

@@ -16,8 +16,9 @@
 use crate::dormancy;
 use crate::model::*;
 use crate::ops;
+use crate::project_graph::ProjectGraph;
 use crate::query::with_id;
-use ankurah::{Context, EntityId};
+use ankurah::EntityId;
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -82,13 +83,17 @@ pub fn resolve<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
 /// given: none when no principal has the name or an id it names, and a refusal ([`Refused`]) when
 /// it names several, listing each with the scopes its work is in. The caller words what none
 /// means where it is: the command that makes a principal, or that a person was wanted.
-pub async fn principal_named(ctx: &Context, name: &str, kind: Option<PrincipalKind>) -> Result<Option<PrincipalView>> {
-    let principals = ops::principals(ctx).await?;
+pub async fn principal_named(
+    graph: &ProjectGraph,
+    name: &str,
+    kind: Option<PrincipalKind>,
+) -> Result<Option<PrincipalView>> {
+    let principals = ops::principals(graph).await?;
     match resolve(&principals, name, kind) {
         Named::One(p) => Ok(Some(p.clone())),
         Named::NoOne => Ok(None),
-        Named::Shared(several) => Err(refused(ctx, name, &several, false).await?.into()),
-        Named::Started(several) => Err(refused(ctx, name, &several, true).await?.into()),
+        Named::Shared(several) => Err(refused(graph, name, &several, false).await?.into()),
+        Named::Started(several) => Err(refused(graph, name, &several, true).await?.into()),
     }
 }
 
@@ -108,8 +113,8 @@ impl std::error::Error for Refused {}
 
 /// The refusal of `name`, which `several` share, or whose ids it starts (`started`), each listed
 /// with the scopes its work is in, read from the graph.
-pub async fn refused(ctx: &Context, name: &str, several: &[&PrincipalView], started: bool) -> Result<Refused> {
-    let loaded = Loaded::of(ctx, &several.iter().map(|p| p.id()).collect::<Vec<_>>()).await?;
+pub async fn refused(graph: &ProjectGraph, name: &str, several: &[&PrincipalView], started: bool) -> Result<Refused> {
+    let loaded = Loaded::of(graph, &several.iter().map(|p| p.id()).collect::<Vec<_>>()).await?;
     let work = loaded.work();
     Ok(Refused(refusal(name, several, started, |id| scope_titles(&scopes_of(id, &work), work.scopes))))
 }
@@ -165,8 +170,8 @@ fn standing(p: &PrincipalView) -> &'static str {
 /// graph: the first eight characters of its id, which name it wherever a name is typed, then what
 /// it is, whether it is retired or does not belong here, and the scopes its work is in:
 /// `Ab3dEf12 (implementer, in Replication)`.
-pub async fn described(ctx: &Context, p: &PrincipalView) -> Result<String> {
-    let loaded = Loaded::of(ctx, &[p.id()]).await?;
+pub async fn described(graph: &ProjectGraph, p: &PrincipalView) -> Result<String> {
+    let loaded = Loaded::of(graph, &[p.id()]).await?;
     let work = loaded.work();
     let scopes = scope_titles(&scopes_of(p.id(), &work), work.scopes);
     let id: String = p.id().to_base64().chars().take(8).collect();
@@ -358,19 +363,14 @@ pub struct Loaded {
 
 impl Loaded {
     /// The work of `principals` in the project's graph.
-    pub async fn of(ctx: &Context, principals: &[EntityId]) -> Result<Loaded> {
-        let mut relations: Vec<RelationView> = ctx.fetch("kind = 'worked_in' AND status = 'accepted'").await?;
-        relations.extend(ctx.fetch::<RelationView>("kind = 'assigned_to' AND status = 'accepted'").await?);
+    pub async fn of(graph: &ProjectGraph, principals: &[EntityId]) -> Result<Loaded> {
+        let mut relations: Vec<RelationView> = graph.fetch("kind = 'worked_in' AND status = 'accepted'").await?;
+        relations.extend(graph.fetch::<RelationView>("kind = 'assigned_to' AND status = 'accepted'").await?);
         let mut messages = Vec::new();
         for p in principals {
-            messages.extend(ctx.fetch::<MessageView>(with_id("author = ?", *p)?).await?);
+            messages.extend(graph.fetch::<MessageView>(with_id("author = ?", *p)?).await?);
         }
-        Ok(Loaded {
-            tasks: ctx.fetch("created > 0").await?,
-            relations,
-            scopes: ctx.fetch("created > 0").await?,
-            messages,
-        })
+        Ok(Loaded { tasks: graph.all().await?, relations, scopes: graph.all().await?, messages })
     }
 
     pub fn work(&self) -> Work<'_> {

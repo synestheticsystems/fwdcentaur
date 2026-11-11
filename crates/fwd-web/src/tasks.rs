@@ -23,7 +23,7 @@ use crate::panel::{FullScreenToggle, PanelEdge, PanelSize};
 use crate::referents::Models;
 use crate::route::{self, Route};
 use crate::scope_filter::ScopeChoice;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::steps::{self, Steps};
 use crate::thread::{self, Hooks, Model, ThreadState};
 use crate::{
@@ -342,7 +342,7 @@ pub fn TaskDetail(id: EntityId) -> impl IntoView {
     let act = move |verb: Verb, note_text: Option<String>| {
         let Some(me) = session::me() else { return };
         spawn_local(async move {
-            match ops::transition(&ctx(), me, id, verb, note_text.as_deref()).await {
+            match ops::transition(&graph(), me, id, verb, note_text.as_deref()).await {
                 Ok(_) => {
                     session::wrote(me);
                     error.set(None);

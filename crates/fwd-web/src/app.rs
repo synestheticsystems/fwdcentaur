@@ -8,7 +8,7 @@
 use crate::cards::Notifications;
 use crate::route::{self, Route};
 use crate::scope_filter::{self, HeaderScope, ScopeChoice};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{anchors, decisions, graph, inbox, lozenges, questions, scopes, tasks};
 use crate::{clock, fmt, speech, store, waiting};
 use ankurah::signals::Get as AnkurahGet;
@@ -202,7 +202,7 @@ fn WaitingBadge() -> impl IntoView {
 fn WaitingFor(me: EntityId) -> impl IntoView {
     let query = with_id(&waiting::requests_selection(), me)
         .ok()
-        .and_then(|selection| ctx().query::<NotificationView>(selection).ok());
+        .and_then(|selection| graph().query::<NotificationView>(selection).ok());
     let notifications = query.map_or_else(Notifications::none, Notifications::of);
     let (answered, answers_loaded) = waiting::answers(me);
     let waiting = Memo::new(move |_| {
@@ -223,7 +223,7 @@ fn WaitingFor(me: EntityId) -> impl IntoView {
 #[component]
 pub fn BootError(reason: String) -> impl IntoView {
     let current = session::project().id;
-    let others: Vec<session::Project> = if session::locked() {
+    let others: Vec<session::HostedProject> = if session::locked() {
         Vec::new()
     } else {
         session::projects().into_iter().filter(|p| p.error.is_none() && p.id != current).collect()

@@ -1,6 +1,7 @@
 //! The client side of the daemon contract: find or spawn this OS user's one daemon (the `fwd`
-//! binary re-executed as `fwd daemon serve`), make sure it hosts the project, and connect to that
-//! project's node as an ephemeral Ankurah node. See docs/design/daemon.md, "`ensure_daemon()`".
+//! binary re-executed as `fwd daemon serve`), make sure it hosts the project, and join the
+//! daemon's node as an ephemeral Ankurah node through the project's socket, holding that project's
+//! graph. See docs/design/daemon.md, "`ensure_daemon()`".
 //!
 //! The daemon owns `daemon.lock` (the lifetime lock) for as long as it runs and writes
 //! `daemon.ws` (the port file) atomically once it is listening. A client that finds no daemon
@@ -19,9 +20,10 @@
 //! command exits, so such a command ends with [`Lost`] whenever its socket closed while it ran
 //! ([`Client::while_writing`]).
 
-use crate::project::{Checkout, Paths, Project};
+use crate::project::{Checkout, NamedProject, Paths};
+use crate::project_graph::ProjectGraph;
 use ankurah::signals::{Subscribe, SubscriptionGuard};
-use ankurah::{policy::DEFAULT_CONTEXT, Context, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Node, PermissiveAgent};
 use ankurah_storage_sqlite::{SqliteConnectionManager, SqliteStorageEngine};
 use ankurah_websocket_client::{ConnectionState, WebsocketClient};
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -176,16 +178,16 @@ pub fn daemon_alive(paths: &Paths) -> Result<bool> {
     Ok(try_lock(&paths.lifetime_lock())?.is_none())
 }
 
-/// An ephemeral node connected to one project's node in the daemon, plus a context for reads
-/// and transactions.
+/// An ephemeral node joined to the daemon's node through one project's socket, and that project's
+/// graph, through which every read and transaction goes.
 pub struct Client {
     pub node: Node<SqliteStorageEngine, PermissiveAgent>,
     pub ws: WebsocketClient<SqliteStorageEngine, PermissiveAgent>,
-    pub ctx: Context,
+    pub graph: ProjectGraph,
     pub port: u16,
     /// The port file this client connected through; its port also carries the control routes.
     pub pf: PortFile,
-    /// The project whose node this client joined.
+    /// The project whose socket this client joined, and whose graph it holds.
     pub project: Uuid,
     /// Where the port file lives, read again to find the daemon after the socket closes
     /// ([`Client::moved`]).
@@ -349,8 +351,9 @@ impl Client {
     }
 }
 
-/// The base URL a client hands Ankurah's connector for one project (the connector appends
-/// `/ws` itself).
+/// The base URL a client hands Ankurah's connector for one project's socket (the connector
+/// appends `/ws` itself). Every project's socket reaches the daemon's one node; the path names the
+/// project the client works in.
 pub fn socket_base(pf: &PortFile, project: Uuid) -> String {
     format!("ws://127.0.0.1:{}/p/{project}", pf.port)
 }
@@ -378,15 +381,16 @@ async fn ephemeral_store() -> Result<SqliteStorageEngine> {
     SqliteStorageEngine::new(pool).await
 }
 
-/// Joins a new ephemeral node to `project`'s node in the daemon `pf` names, and waits until it is
-/// ready. The node is ready once the daemon has answered its first queries (Ankurah's catalog of
-/// the project's models), for as long as that takes while the socket is open; a daemon that stops
+/// Joins a new ephemeral node to the daemon `pf` names through `project`'s socket, waits until it
+/// is ready, and opens the project's graph. The node is ready once the daemon has answered its
+/// first queries (Ankurah's catalog of the models), for as long as that takes while the socket is
+/// open; a daemon that stops
 /// before answering them ends the wait with [`Lost`], within [`LOST_AFTER`]. Until 2026-09-30 that
 /// wait had no end: the socket client retried the old port and the queries waited for a daemon
 /// that had moved elsewhere, and a command caught there never ended (task tXSgMMXC). From the
 /// moment the node is ready, the client records every close of its socket, for a command that
 /// writes ([`Client::while_writing`]).
-pub async fn connect(paths: &Paths, pf: &PortFile, project: &Project, timeout: Duration) -> Result<Client> {
+pub async fn connect(paths: &Paths, pf: &PortFile, project: &NamedProject, timeout: Duration) -> Result<Client> {
     let port = pf.port;
     let storage = ephemeral_store().await?;
     let node = Node::new(Arc::new(storage), PermissiveAgent::new());
@@ -400,12 +404,18 @@ pub async fn connect(paths: &Paths, pf: &PortFile, project: &Project, timeout: D
         .map_err(|e| anyhow!("daemon connection failed: {e}"))?;
     tokio::time::timeout(timeout, node.system.wait_system_ready())
         .await
-        .map_err(|_| anyhow!("timed out waiting for project {}'s system on port {port}", project.name))?
-        .map_err(|e| anyhow!("project {}'s system is not ready: {e}", project.name))?;
+        .map_err(|_| anyhow!("timed out waiting for the daemon's system on port {port}"))?
+        .map_err(|e| anyhow!("the daemon's system is not ready: {e}"))?;
     let port_file = paths.port_file();
-    let ctx = tokio::select! {
+    let opened = async {
+        let ctx = node.context_async(DEFAULT_CONTEXT).await?;
+        ProjectGraph::open(ctx, project.id)
+            .await
+            .with_context(|| format!("opening project {}'s graph on port {port}", project.name))
+    };
+    let graph = tokio::select! {
         biased;
-        ctx = node.context_async(DEFAULT_CONTEXT) => ctx?,
+        graph = opened => graph?,
         lost = lost(&ws, pf, &port_file) => return Err(lost.into()),
     };
     // From here the command may write, so every close of the socket from now on is recorded,
@@ -420,7 +430,7 @@ pub async fn connect(paths: &Paths, pf: &PortFile, project: &Project, timeout: D
     if !ws.is_connected() {
         closed.store(true, Ordering::Release);
     }
-    Ok(Client { node, ws, ctx, port, pf: pf.clone(), project: project.id, port_file, closed, _closes })
+    Ok(Client { node, ws, graph, port, pf: pf.clone(), project: project.id, port_file, closed, _closes })
 }
 
 #[derive(Debug, Clone)]
@@ -435,9 +445,9 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// The shared startup routine: the daemon running (spawned when needed), the project hosted in
 /// it (opened on request when the daemon started before the project existed), and a client
-/// connected to the project's node. Never searches PATH: the caller passes the binary to
+/// holding the project's graph. Never searches PATH: the caller passes the binary to
 /// re-execute (normally its own).
-pub async fn ensure_daemon(paths: &Paths, project: &Project, autostart: Autostart) -> Result<Client> {
+pub async fn ensure_daemon(paths: &Paths, project: &NamedProject, autostart: Autostart) -> Result<Client> {
     let running = ensure_running(paths, &autostart).await?;
     if !running.projects.iter().any(|p| p.id == project.id && p.error.is_none()) {
         host(&running.pf, project).await?;
@@ -546,10 +556,10 @@ async fn hosted_projects(pf: &PortFile) -> Result<Vec<HostedProject>> {
     }
 }
 
-/// Asks the daemon to open a project from the index that it does not host: one created after
+/// Asks the daemon to host a project from the index that it does not host: one created after
 /// the daemon started (`fwd init`), or one that failed to open. The daemon answers once the
-/// project's node is ready, or with the reason it could not open it.
-pub async fn host(pf: &PortFile, project: &Project) -> Result<()> {
+/// project's graph is ready, or with the reason it could not host it.
+pub async fn host(pf: &PortFile, project: &NamedProject) -> Result<()> {
     let body = serde_json::json!({ "id": project.id }).to_string();
     let answer = match http(pf, "POST", "/projects", Some(&body), START_DEADLINE).await {
         Err(e) if e.is::<NoAnswer>() => {

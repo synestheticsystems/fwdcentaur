@@ -1,7 +1,8 @@
 //! Projects, the checkouts that belong to them, and the directories the daemon and CLI share.
 //!
-//! A project is the task graph and its database: a UUID and a name, kept under the data
-//! directory, independent of any folder on disk. A project is a set of repositories, each
+//! A project is a task graph: a UUID and a name, whose records the daemon keeps with every other
+//! project's in one store under the data directory, independent of any folder on disk. A project
+//! is a set of repositories, each
 //! identified by its upstream remote, never by a clone or a worktree (Daniel, 2026-09-25). A
 //! checkout is any clone or worktree of a member repository on this machine: local, dynamic, and
 //! never in the graph. Resolution goes from a directory to its git upstream, and from the
@@ -26,8 +27,10 @@ struct Marker {
     name: String,
 }
 
+/// A project as this machine's index, a repository's marker or an address names it: its UUID and
+/// its name. What the project holds is in the daemon's store, under its `model::Project` record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Project {
+pub struct NamedProject {
     pub id: Uuid,
     pub name: String,
 }
@@ -55,7 +58,7 @@ pub struct NoProject(pub PathBuf);
 /// A project resolved from a directory, with the checkout it was reached through.
 #[derive(Debug, Clone)]
 pub struct Resolved {
-    pub project: Project,
+    pub project: NamedProject,
     /// `None` outside any git repository (a marker alone can name a project).
     pub checkout: Option<Checkout>,
     /// The checkout's root, else the directory holding the marker, else the start directory.
@@ -68,9 +71,9 @@ pub struct Resolved {
 pub struct Paths {
     /// The daemon's lock files and its port file. Owner-only. Default: `$TMPDIR/fwd-<uid>/`.
     pub runtime_dir: PathBuf,
-    /// The project index, identity, the daemon's settings and log, and per-project storage
-    /// (`projects/<id>/project.sqlite`, the checkout registry). Default: the OS data directory
-    /// plus `fwd`.
+    /// The project index, identity, the daemon's settings and log, the store that holds every
+    /// project's records (`store.sqlite`), and each project's local files (`projects/<id>/`: the
+    /// checkout registry and the anchors' cache). Default: the OS data directory plus `fwd`.
     pub data_dir: PathBuf,
 }
 
@@ -108,13 +111,17 @@ impl Paths {
     pub fn index_path(&self) -> PathBuf {
         self.data_dir.join("projects.toml")
     }
-    pub fn storage_dir(&self, project: &Project) -> PathBuf {
+    /// The daemon's one store: every project's records, each naming its project (docs/DECISIONS.md,
+    /// D135).
+    pub fn store_path(&self) -> PathBuf {
+        self.data_dir.join("store.sqlite")
+    }
+    /// A project's local files, which are this machine's knowledge and never in the store: its
+    /// checkout registry and its anchors' cache.
+    pub fn storage_dir(&self, project: &NamedProject) -> PathBuf {
         self.data_dir.join("projects").join(project.id.to_string())
     }
-    pub fn db_path(&self, project: &Project) -> PathBuf {
-        self.storage_dir(project).join("project.sqlite")
-    }
-    pub fn checkouts_path(&self, project: &Project) -> PathBuf {
+    pub fn checkouts_path(&self, project: &NamedProject) -> PathBuf {
         self.storage_dir(project).join("checkouts.json")
     }
     /// The one daemon's log, for every project it hosts.
@@ -138,60 +145,16 @@ impl Paths {
         self.runtime_dir.join("daemon.bootstrap.lock")
     }
 
-    /// Moves a project's storage from the pre-2026-09-25 layout (`workspaces/<id>/workspace.sqlite`)
-    /// to the current one. Call it only while holding the daemon's lifetime lock: nothing may
-    /// have the database open while its files move. The id did not change, so the graph is the
-    /// same graph.
-    ///
-    /// SQLite runs in WAL mode, so a database is three files (`.sqlite`, `-wal`, `-shm`) that
-    /// must move together, main file last: while `workspace.sqlite` still exists the completion
-    /// step below reruns on the next start, so an interrupted move finishes instead of leaving
-    /// the daemon to open an empty database. A directory that already exists on the new side
-    /// (earlier launchers created it for the project's log) is merged into; a database on both
-    /// sides is a conflict this refuses to guess about.
-    pub fn migrate_legacy(&self, project: &Project) -> Result<()> {
-        let old = self.data_dir.join("workspaces").join(project.id.to_string());
-        let new = self.storage_dir(project);
-        if old.is_dir() {
-            let both_have_databases = old.join("workspace.sqlite").exists() && self.db_path(project).exists();
-            if both_have_databases {
-                bail!(
-                    "{} and {} both hold a database; keep one by hand, then start the daemon again",
-                    old.join("workspace.sqlite").display(),
-                    self.db_path(project).display()
-                );
-            }
-            std::fs::create_dir_all(&new)?;
-            for entry in std::fs::read_dir(&old)? {
-                let entry = entry?;
-                let name = entry.file_name();
-                let to = new.join(&name);
-                if to.exists() {
-                    // Not a database file (that case was refused above): keep the legacy copy
-                    // beside the new one rather than overwrite either.
-                    let kept = new.join(format!("{}.legacy", name.to_string_lossy()));
-                    std::fs::rename(entry.path(), &kept)?;
-                } else {
-                    std::fs::rename(entry.path(), &to)?;
-                }
-            }
-            std::fs::remove_dir(&old).with_context(|| format!("removing the emptied {}", old.display()))?;
-            fsync_dir(&new)?;
-            if let Some(parent) = old.parent() {
-                fsync_dir(parent)?;
-            }
-        }
-        // Completion step, on every start: the database files take their new names, main file last.
-        if new.join("workspace.sqlite").exists() && !self.db_path(project).exists() {
-            for suffix in ["-wal", "-shm", ""] {
-                let from = new.join(format!("workspace.sqlite{suffix}"));
-                if from.exists() {
-                    std::fs::rename(&from, new.join(format!("project.sqlite{suffix}")))?;
-                }
-            }
-            fsync_dir(&new)?;
-        }
-        Ok(())
+    /// The store `project` had of its own, when one is still in the data directory: until the
+    /// daemon kept every project in one store, each project's records were in its own database,
+    /// `projects/<id>/project.sqlite`, and before 2026-09-25 in `workspaces/<id>/`. Its records
+    /// reach the one store only through the move, so the daemon hosts no project that still has
+    /// one, and never shows the project empty over records it cannot see.
+    pub fn unmoved_store(&self, project: &NamedProject) -> Option<PathBuf> {
+        let id = project.id.to_string();
+        [self.storage_dir(project).join("project.sqlite"), self.data_dir.join("workspaces").join(id)]
+            .into_iter()
+            .find(|path| path.exists())
     }
 }
 
@@ -224,9 +187,9 @@ pub struct IndexEntry {
     pub upstreams: Vec<String>,
 }
 
-impl From<&IndexEntry> for Project {
+impl From<&IndexEntry> for NamedProject {
     fn from(e: &IndexEntry) -> Self {
-        Project { id: e.id, name: e.name.clone() }
+        NamedProject { id: e.id, name: e.name.clone() }
     }
 }
 
@@ -310,7 +273,7 @@ impl Index {
     }
 
     /// Records that `project` exists and claims `upstream`; true when anything changed.
-    pub fn register(&mut self, project: &Project, upstream: Option<&str>) -> bool {
+    pub fn register(&mut self, project: &NamedProject, upstream: Option<&str>) -> bool {
         let mut changed = false;
         let entry = match self.projects.iter_mut().find(|p| p.id == project.id) {
             Some(e) => e,
@@ -430,11 +393,11 @@ fn marker_for(start: &Path, checkout: Option<&Checkout>) -> Result<Option<(PathB
 }
 
 /// The project the marker at `root` names, if there is one.
-pub fn marker_project(root: &Path) -> Result<Option<Project>> {
-    Ok(read_marker(root)?.map(|m| Project { id: m.id, name: m.name }))
+pub fn marker_project(root: &Path) -> Result<Option<NamedProject>> {
+    Ok(read_marker(root)?.map(|m| NamedProject { id: m.id, name: m.name }))
 }
 
-fn write_marker(root: &Path, project: &Project) -> Result<()> {
+fn write_marker(root: &Path, project: &NamedProject) -> Result<()> {
     let marker = root.join(MARKER);
     std::fs::create_dir_all(marker.parent().expect(".fwd"))?;
     let text = toml::to_string_pretty(&Marker { id: project.id, name: project.name.clone() })?;
@@ -453,7 +416,7 @@ fn write_marker(root: &Path, project: &Project) -> Result<()> {
 /// The project a selector names: an id, a project name, or (when it contains a path separator,
 /// or nothing is named that way and it is a directory) a directory inside one of the project's
 /// checkouts. Names and ids come first so a project called `docs` is not shadowed by a folder.
-pub fn select(paths: &Paths, index: &Index, selector: &str) -> Result<Project> {
+pub fn select(paths: &Paths, index: &Index, selector: &str) -> Result<NamedProject> {
     let looks_like_a_path = selector.contains(std::path::MAIN_SEPARATOR) || selector.contains('/');
     if !looks_like_a_path {
         if let Some(entry) = index.get(selector)? {
@@ -481,7 +444,7 @@ pub fn resolve(paths: &Paths, start: &Path, wanted: Option<&str>) -> Result<Reso
     }
     let upstream = checkout.as_ref().and_then(|c| c.upstream.clone());
     if let Some((dir, m)) = marker_for(&start, checkout.as_ref())? {
-        let project = Project { id: m.id, name: m.name };
+        let project = NamedProject { id: m.id, name: m.name };
         // A marker teaches this machine's index about the project and this upstream, so every
         // other worktree of the repository resolves without one.
         let known = index.get(&project.id.to_string())?.is_some_and(|e| match &upstream {
@@ -511,7 +474,7 @@ pub fn resolve(paths: &Paths, start: &Path, wanted: Option<&str>) -> Result<Reso
 /// file it could not write, the directory the file lives in and why the command was writing it
 /// (docs/DECISIONS.md, D86, "A read-only command that cannot write the project index stops with an
 /// error that names projects.toml", 2026-09-28); the error from the write follows as its cause.
-fn index_not_written(paths: &Paths, project: &Project, upstream: Option<&str>, marker_dir: &Path) -> String {
+fn index_not_written(paths: &Paths, project: &NamedProject, upstream: Option<&str>, marker_dir: &Path) -> String {
     let doing = match upstream {
         Some(u) => format!(
             "joining the checkout's upstream {u} to the project \"{}\", which the checkout's marker names and this machine's index did not yet list for that upstream",
@@ -551,7 +514,7 @@ pub fn init(paths: &Paths, start: &Path, opts: InitOptions) -> Result<(Resolved,
     let root = checkout.as_ref().map(|c| c.root.clone()).unwrap_or_else(|| start.clone());
     let upstream = checkout.as_ref().and_then(|c| c.upstream.clone());
     let index = Index::load(paths)?;
-    let fresh = |index: &Index| -> Result<Project> {
+    let fresh = |index: &Index| -> Result<NamedProject> {
         let name = opts
             .name
             .map(str::to_string)
@@ -559,18 +522,18 @@ pub fn init(paths: &Paths, start: &Path, opts: InitOptions) -> Result<(Resolved,
         if index.projects.iter().any(|p| p.name == name) {
             bail!("a project named `{name}` already exists on this machine; pass --name <another>, or --project {name} to join it");
         }
-        Ok(Project { id: Uuid::new_v4(), name })
+        Ok(NamedProject { id: Uuid::new_v4(), name })
     };
     let (project, created) = if let Some(j) = opts.join {
         (select(paths, &index, j)?, false)
     } else if opts.new {
         (fresh(&index)?, true)
     } else if let Some((_, m)) = marker_for(&start, checkout.as_ref())? {
-        (Project { id: m.id, name: m.name }, false)
+        (NamedProject { id: m.id, name: m.name }, false)
     } else {
         let candidates = upstream.as_deref().map(|u| index.by_upstream(u)).unwrap_or_default();
         match candidates.as_slice() {
-            [one] => (Project::from(*one), false),
+            [one] => (NamedProject::from(*one), false),
             [] => (fresh(&index)?, true),
             many => bail!(
                 "this repository's upstream belongs to several projects ({}); pass --project <name|id> or --new",
@@ -588,7 +551,7 @@ pub fn init(paths: &Paths, start: &Path, opts: InitOptions) -> Result<(Resolved,
 /// people select a project (`--project`, the page's selector), so a blank name, or one another
 /// project on this machine already has, is refused. Markers in other checkouts keep the old name
 /// until the rewritten marker is committed and reaches them.
-pub fn rename(paths: &Paths, project: &Project, root: &Path, name: &str) -> Result<Option<PathBuf>> {
+pub fn rename(paths: &Paths, project: &NamedProject, root: &Path, name: &str) -> Result<Option<PathBuf>> {
     if name.trim().is_empty() {
         bail!("a project's name cannot be blank");
     }
@@ -606,7 +569,7 @@ pub fn rename(paths: &Paths, project: &Project, root: &Path, name: &str) -> Resu
     })??;
     match marker_project(root)? {
         Some(marked) if marked.id == project.id => {
-            write_marker(root, &Project { id: project.id, name: name.to_string() })?;
+            write_marker(root, &NamedProject { id: project.id, name: name.to_string() })?;
             Ok(Some(root.join(MARKER)))
         }
         _ => Ok(None),

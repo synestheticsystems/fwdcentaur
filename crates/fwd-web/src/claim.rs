@@ -27,7 +27,7 @@
 //! it.
 
 use crate::route::{Route, ScopePanel};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{fmt, store};
 use ankurah::EntityId;
 use fwd_core::model::{ScopeStatus, TaskStatus};
@@ -167,7 +167,7 @@ pub fn control(
         let (Some(me), Some(scope)) = (session::me(), target.get_untracked()) else { return };
         spawn_local(async move {
             // `ops::start` in that scope, the start `fwd task start --scope <its id>` runs.
-            match ops::claim(&ctx(), me, task, scope.id).await {
+            match ops::claim(&graph(), me, task, scope.id).await {
                 Ok(()) => {
                     session::wrote(me);
                     error.try_set(None)
@@ -241,7 +241,7 @@ pub fn row_control<Then: FnOnce() + 'static>(
         let (Some(me), Some(scope)) = (session::me(), target.get_untracked()) else { return };
         let then = started();
         spawn_local(async move {
-            match ops::claim(&ctx(), me, task, scope.id).await {
+            match ops::claim(&graph(), me, task, scope.id).await {
                 Ok(()) => {
                     session::wrote(me);
                     error.try_set(None);
