@@ -19,12 +19,12 @@ wallboard = ["dep:serde", "dep:unicode-width"]
 
 [dependencies]
 fwd-core = { path = "../fwd-core", default-features = false, features = ["wasm"] }
-ankurah = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0", features = ["derive", "wasm"] }
+ankurah = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda", features = ["derive", "wasm"] }
 # Leptos reads Ankurah signals through the reactive_graph bridge (ReactiveGraphObserver), not
 # the React bindings: never turn on `ankurah/react` here.
-ankurah-signals = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0", features = ["reactive-graph"] }
-ankurah-websocket-client-wasm = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
-ankurah-storage-indexeddb-wasm = { git = "https://github.com/ankurah/ankurah", rev = "f8e85d2e2399c0c5bdf80ef06498b5f454b87ac0" }
+ankurah-signals = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda", features = ["reactive-graph"] }
+ankurah-websocket-client-wasm = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda" }
+ankurah-storage-indexeddb-wasm = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda" }
 leptos = { version = "0.8", features = ["csr"] }
 console_error_panic_hook = "0.1"
 wasm-bindgen = "0.2"

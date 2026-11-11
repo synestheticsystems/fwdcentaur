@@ -312,8 +312,8 @@ impl Watch {
 /// Returning through `main` instead would shut the runtime down, which waits for each of its
 /// threads, and one can be stuck for good inside Ankurah. When a node the watch has let go of stops
 /// (the one it left for the daemon's new port), Ankurah's reactor closes the node's subscriptions
-/// on a runtime thread (`SubscriptionState::close`, core/src/reactor/subscription_state.rs at the
-/// pinned rev f8e85d2): it holds their state lock while it marks each result set unloaded, which
+/// on a runtime thread (`SubscriptionState::close`, core/src/reactor/subscription_state.rs at
+/// rev f8e85d2): it holds their state lock while it marks each result set unloaded, which
 /// can drop a live query whose unsubscribing asks for the same lock, so the thread waits on
 /// itself. A watch that had printed `done` never exited that way twice in thirty runs under load
 /// (2026-09-29), and in another run the shutdown cancelled a task of Ankurah's, which logged an
