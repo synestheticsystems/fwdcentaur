@@ -27,10 +27,14 @@
 //!   record's own project ([`ProjectGraph::graph_of`]), so that each rule is read where its subject
 //!   is and each notification is made in its recipient's project.
 //!
+//! - A record changes project in one write alone, [`ProjectTransaction::take_in`], which a task's
+//!   move to another project makes (`task_move`); every other write of a project's graph makes and
+//!   changes that project's records alone.
+//!
 //! The Ankurah context the graph wraps never leaves this module, so an operation that left the
 //! project out of a list would not compile. A record's project is read each time and never
-//! remembered, so a record moved to another project (an operation of its own, which nothing
-//! performs yet) leaves this graph's lists and live queries and joins the other's.
+//! remembered, so a record moved to another project leaves this graph's lists and live queries and
+//! joins the other's.
 
 use crate::model::*;
 use ankurah::ankql::ast::{ComparisonOperator, Expr, Parsed, PathExpr, Predicate, Selection};
@@ -52,6 +56,10 @@ pub trait InProject: Model {
 pub trait InProjectView: View {
     /// The project the record names.
     fn project_id(&self) -> Result<EntityId, PropertyError>;
+
+    /// Names `project` as the project of the record `record` changes: what
+    /// [`ProjectTransaction::take_in`] writes.
+    fn name_project(record: &<Self::Model as Model>::Mutable, project: &Ref<Project>) -> Result<(), PropertyError>;
 }
 
 macro_rules! in_project {
@@ -64,6 +72,13 @@ macro_rules! in_project {
         impl InProjectView for $view {
             fn project_id(&self) -> Result<EntityId, PropertyError> {
                 Ok(*self.project()?)
+            }
+
+            fn name_project(
+                record: &<$model as Model>::Mutable,
+                project: &Ref<Project>,
+            ) -> Result<(), PropertyError> {
+                record.project()?.set(project)
             }
         }
     )*};
@@ -87,6 +102,10 @@ impl InProjectView for before_d108::ScopeView {
     fn project_id(&self) -> Result<EntityId, PropertyError> {
         Ok(*self.project()?)
     }
+
+    fn name_project(record: &before_d108::ScopeMut, project: &Ref<Project>) -> Result<(), PropertyError> {
+        record.project()?.set(project)
+    }
 }
 
 /// Why a project's graph could not be opened, or refused a write.
@@ -106,7 +125,9 @@ pub enum ProjectGraphError {
     /// A record of another project, such as a relation another project made that points at one of
     /// this project's records, was to be changed in this project's graph, which changes only its
     /// own project's records, so that what a command writes is attributed to its caller in the
-    /// project it runs in: a command that acts on the record runs in the record's project.
+    /// project it runs in: a command that acts on the record runs in the record's project. Only a
+    /// task's move to another project takes a record of another project in
+    /// ([`ProjectTransaction::take_in`]).
     #[error(
         "{} is a record of another project ({}), which only a command run in that project changes",
         .record.to_base64(),
@@ -365,10 +386,24 @@ impl ProjectGraph {
             return Ok(Some(Whose::This));
         }
         let Some(p) = absent(self.ctx.get::<ProjectView>(project).await)? else { return Ok(None) };
-        let text = p.uuid()?;
-        let uuid =
-            text.parse().map_err(|_| PropertyError::InvalidValue { value: text, ty: "a project's UUID".into() })?;
-        Ok(Some(Whose::Other(ProjectRecord { record: project, uuid, name: p.name()? })))
+        Ok(Some(Whose::Other(ProjectRecord::of(&p)?)))
+    }
+
+    /// Every project of the node, by its record, UUID and name: where a task may be moved
+    /// (`task_move`). A project is no project's record, so this lists no project's records.
+    pub async fn projects(&self) -> Result<Vec<ProjectRecord>, ProjectGraphError> {
+        let every: Vec<ProjectView> = self.ctx.fetch(selecting(Predicate::True)).await?;
+        Ok(every.iter().map(ProjectRecord::of).collect::<Result<_, _>>()?)
+    }
+
+    /// The graph of the project `project` is the record of, which a record moved there joins.
+    pub fn graph_of_project(&self, project: &ProjectRecord) -> ProjectGraph {
+        Self::bound(self.ctx.clone(), project.record)
+    }
+
+    /// The record of this graph's project, as [`ProjectGraph::projects`] lists it.
+    pub fn record(&self) -> EntityId {
+        self.project
     }
 
     /// The record that `id`, an id a record had before it was renumbered, names now, in whichever
@@ -469,6 +504,16 @@ impl ProjectGraph {
         Ok(every.iter().map(|v| Ok((v.id(), v.project_id()?))).collect::<Result<_, PropertyError>>()?)
     }
 
+    /// The former ids of each of `records`, of whichever project keeps them: what a record moved
+    /// to another project takes with it, so that what cited it by an id it had still finds it
+    /// there (`task_move`).
+    pub async fn former_ids_of(&self, records: &[EntityId]) -> Result<Vec<FormerIdView>, RetrievalError> {
+        let mut each = records.iter().map(|id| equals("record", Value::EntityId(*id)));
+        let Some(first) = each.next() else { return Ok(Vec::new()) };
+        let any = each.fold(first, |any, one| Predicate::Or(Box::new(any), Box::new(one)));
+        self.ctx.fetch(selecting(any)).await
+    }
+
     /// The former ids, of every project, that start with `prefix`, the start of an id someone
     /// typed: the former ids it may name, read as one range of their text ([`starting`]) rather
     /// than every former id the node keeps, which are tens of thousands.
@@ -567,6 +612,16 @@ pub struct ProjectRecord {
     pub name: String,
 }
 
+impl ProjectRecord {
+    /// The project `view` shows.
+    fn of(view: &ProjectView) -> Result<ProjectRecord, PropertyError> {
+        let text = view.uuid()?;
+        let uuid =
+            text.parse().map_err(|_| PropertyError::InvalidValue { value: text, ty: "a project's UUID".into() })?;
+        Ok(ProjectRecord { record: view.id(), uuid, name: view.name()? })
+    }
+}
+
 /// What a reader needs of a record another record refers to, by its kind: what names it, and
 /// what a dependency on it is judged by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,6 +682,21 @@ impl ProjectTransaction {
             return Err(ProjectGraphError::OtherProject { named, bound: self.project });
         }
         Ok(self.trx.create(model).await?)
+    }
+
+    /// Takes the record `view` shows into the transaction's project, from whichever project it is
+    /// in, and gives it to change further in this transaction: the one write that changes a
+    /// record's project, which a task's move to another project makes for the task and what
+    /// belongs to it (`task_move`), so that what one project grouped another groups, every id that
+    /// names the record naming it still. A record of the project already is taken as it is. Every
+    /// other change to a record of another project is refused ([`ProjectTransaction::edit`]).
+    pub fn take_in<'rec, 'trx: 'rec, V: InProjectView>(
+        &'trx self,
+        view: &V,
+    ) -> Result<MutableBorrow<'rec, <V::Model as Model>::Mutable>, ProjectGraphError> {
+        let taken = self.trx.edit::<V::Model>(view.entity())?;
+        V::name_project(&taken, &Ref::new(self.project))?;
+        Ok(taken)
     }
 
     /// The record `view` shows, to change in this transaction. A record of another project is

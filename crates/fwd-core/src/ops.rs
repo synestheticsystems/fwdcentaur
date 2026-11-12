@@ -2688,7 +2688,7 @@ async fn did_work(graph: &ProjectGraph, principal: EntityId) -> Result<bool> {
 
 /// Applies a status verb. `note` is the evidence for submit, the reason for reject, return,
 /// cancel, reopen and rejustify, and the acceptance note for accept. A reason is kept as a comment
-/// on the task by `by`, written in the same transaction ([`task_move_comment`]), so that whoever
+/// on the task by `by`, written in the same transaction ([`transition_comment`]), so that whoever
 /// reads the task learns why it moved: until 2026-10-03 the reason for a return, a reopen or a
 /// rejustify was asked for and stored nowhere (task jJp3bcF7). A reject's and a cancel's are also
 /// the task's `closed_reason`, as before.
@@ -2725,7 +2725,7 @@ pub async fn transition(
     }
     // The reason, read as a post reads its text before the move is made, so that what it names
     // draws by name and a reference that names nothing refuses the move, as a decision's move does.
-    let reason = match (task_move_opening(verb), note.map(str::trim).filter(|n| !n.is_empty())) {
+    let reason = match (transition_opening(verb), note.map(str::trim).filter(|n| !n.is_empty())) {
         (Some(opening), Some(note)) => Some((opening, read_reason(graph, by, note).await?)),
         _ => None,
     };
@@ -2759,20 +2759,20 @@ pub async fn transition(
         m.closed_reason()?.set(&None)?;
     }
     if let Some((opening, reason)) = &reason {
-        task_move_comment(&trx, by, task, opening, reason).await?;
+        transition_comment(&trx, by, task, opening, reason).await?;
     }
     trx.commit().await?;
     Ok(next)
 }
 
-/// The words the comment keeping a task move's reason opens with, before its colon and the reason,
-/// for the moves whose note is a reason: what should change on a return, why on a reject, a cancel
+/// The words the comment keeping why a task's status moved opens with, before its colon and the
+/// reason, for the moves whose note is a reason: what should change on a return, why on a reject, a cancel
 /// or a reopen, the new reason on a rejustify; its lowercase is the move the comment names in
 /// `context.move` ([`MOVE_KEY`]). None for every other move: a submission keeps its evidence in the
 /// task's context, which the task's panel and the review rows show, and repeats it nowhere, so
 /// that it does not reach the task's reviewer twice (the lead's ruling of 2026-10-03 on task
 /// jJp3bcF7).
-fn task_move_opening(verb: Verb) -> Option<&'static str> {
+fn transition_opening(verb: Verb) -> Option<&'static str> {
     match verb {
         Verb::Return => Some("Returned"),
         Verb::Reject => Some("Rejected"),
@@ -2783,12 +2783,12 @@ fn task_move_opening(verb: Verb) -> Option<&'static str> {
     }
 }
 
-/// Records why a task moved, in the move's own transaction `trx`: the comment on `task` by
+/// Records why a task's status moved, in the move's own transaction `trx`: the comment on `task` by
 /// `author`, "Returned: <what should change>", naming the move in `context.move`, with a `mention`
 /// relation to each thing the reason names, as a decision's move records its reason
 /// ([`decision_comment`]). It is a comment on the task like any other, so routing tells the task's
 /// assignee and its scope's triage agent of it (`agents-and-inbox.md`, rule 2), never its author.
-async fn task_move_comment(
+async fn transition_comment(
     trx: &ProjectTransaction,
     author: EntityId,
     task: EntityId,
@@ -3492,7 +3492,7 @@ pub async fn edit_message(graph: &ProjectGraph, by: EntityId, message: EntityId,
 /// What wrote a message's text, which [`write_mentions`] marks on each `mention` relation it adds,
 /// since routing tells whom a post names with the post, and whom an edit names anew from the
 /// relation the edit wrote ([`EDITED_KEY`]).
-enum WrittenBy {
+pub(crate) enum WrittenBy {
     /// The text a message is created with, by a post or by a decision's or a task's move, which
     /// writes its reason as a comment: the message has no relations yet.
     Post,
@@ -3513,7 +3513,7 @@ enum WrittenBy {
 /// inline, its place and, for an edit, that the edit wrote it; and a relation that no reference
 /// keeps is retracted with the reason, which tells no one. A message being created has no
 /// relations to keep.
-async fn write_mentions(
+pub(crate) async fn write_mentions(
     trx: &ProjectTransaction,
     by: EntityId,
     message: EntityId,
@@ -4211,9 +4211,9 @@ pub const MOVE_KEY: &str = "move";
 
 /// A move's reason as the comment that records it stores it: the note, trimmed, with each inline
 /// reference as `[[<full id>]]`, and what the references name, in the order the note names them.
-struct Reason {
-    text: String,
-    named: Vec<EntityId>,
+pub(crate) struct Reason {
+    pub(crate) text: String,
+    pub(crate) named: Vec<EntityId>,
 }
 
 /// So that the comment a move writes names what its note names, as any comment does (Daniel,
@@ -4221,7 +4221,7 @@ struct Reason {
 /// work"): reads the note as [`post_message`] reads a message's text, before the move is made, a
 /// file it names becoming a highlight made by `by`. A reference that names nothing refuses the
 /// move with the sentence a post gets.
-async fn read_reason(graph: &ProjectGraph, by: EntityId, note: &str) -> Result<Reason> {
+pub(crate) async fn read_reason(graph: &ProjectGraph, by: EntityId, note: &str) -> Result<Reason> {
     let note = note.trim();
     let found = crate::references::find(note);
     let named = resolve_references(graph, by, &found).await?;

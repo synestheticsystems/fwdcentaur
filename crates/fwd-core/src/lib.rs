@@ -42,6 +42,7 @@ pub mod rules;
 #[cfg(feature = "native")]
 pub mod sidecar;
 pub mod subject;
+pub mod task_move;
 
 /// Milliseconds since the Unix epoch, wall clock. Informational only: Ankurah's causal ordering
 /// decides merges, not these timestamps.
