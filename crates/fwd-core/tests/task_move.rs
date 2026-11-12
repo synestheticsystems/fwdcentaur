@@ -1,7 +1,8 @@
 //! A task moved to another project (`task_move`): it takes with it everything that belongs to it
-//! and nothing else, every connection it has is found from both ends afterwards, the principals it
-//! names stay the ones they were, the ids it and its messages had still find them, a move stopped
-//! partway finishes when run again, each refusal writes nothing, and each project's lists and live
+//! and nothing else, every relation staying with its `from` end's project, every connection it has
+//! is found from both ends afterwards, the principals it names stay the ones they were, the ids it
+//! and its messages had still find them, a move stopped partway finishes when run again, a task
+//! there already keeps its scopes, each refusal writes nothing, and each project's lists and live
 //! queries see the task leave and arrive.
 
 use ankurah::changes::{ChangeSet, ItemChange};
@@ -12,17 +13,21 @@ use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateDecision, CreateScope, CreateTask, MessageContext};
+use fwd_core::project::Paths;
 use fwd_core::project_graph::{InProjectView, ProjectGraph, Whose};
 use fwd_core::rules::{NotReadyReason, Readiness, Verb};
-use fwd_core::task_move::{self, Brought, Destination, Refused};
+use fwd_core::task_move::{self, Brought, Destination, MoveLock, Moved, Refused};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// alpha, where the tasks are filed, and beta, where they move, over one store: the person and an
-/// implementer in each, alpha's scope `Inbox` and beta's active scope `Commons`.
+/// implementer in each, alpha's scope `Inbox` and beta's active scope `Commons`; and the folders
+/// that hold the node's move lock.
 struct Two {
+    _folders: tempfile::TempDir,
+    paths: Paths,
     node: Context,
     alpha: ProjectGraph,
     beta: ProjectGraph,
@@ -46,7 +51,10 @@ async fn two() -> Result<Two> {
     let scope = |title: &str| CreateScope { title: title.into(), ..Default::default() };
     let inbox = ops::create_scope(&alpha, daniel, scope("Inbox")).await?;
     let commons = ops::create_scope(&beta, their_daniel, scope("Commons")).await?;
-    Ok(Two { node: ctx, alpha, beta, daniel, alice, their_daniel, inbox, commons })
+    let folders = tempfile::tempdir()?;
+    let paths = Paths { runtime_dir: folders.path().join("run"), data_dir: folders.path().join("data") };
+    paths.ensure()?;
+    Ok(Two { _folders: folders, paths, node: ctx, alpha, beta, daniel, alice, their_daniel, inbox, commons })
 }
 
 async fn task(graph: &ProjectGraph, by: EntityId, title: &str) -> Result<EntityId> {
@@ -56,6 +64,20 @@ async fn task(graph: &ProjectGraph, by: EntityId, title: &str) -> Result<EntityI
 /// Beta, into its scope `Commons`, as `fwd task move --to beta --to-scope Commons` names it.
 async fn to_beta(t: &Two) -> Result<Destination> {
     Destination::named(&t.alpha, "beta", Some("Commons")).await
+}
+
+/// Moves `tasks` to `to` as `fwd task move` does: placed under the node's move lock, and made from
+/// `graph`, the project it runs in, by `by`, its principal there.
+async fn moving(
+    t: &Two,
+    graph: &ProjectGraph,
+    by: EntityId,
+    tasks: &[EntityId],
+    to: Destination,
+    note: Option<&str>,
+) -> Result<Vec<Moved>> {
+    let lock = MoveLock::take(&t.paths, || panic!("no other move holds the lock")).await?;
+    task_move::place(graph, tasks, to, lock).await?.make(graph, by, note).await
 }
 
 /// A former id of `record`, kept in `graph`'s project, as the renumbering of a store writes one.
@@ -90,8 +112,9 @@ async fn put<V: InProjectView>(t: &Two, graph: &ProjectGraph, record: EntityId) 
 /// What alpha holds of a task filed there with something of every kind that belongs to it, and
 /// beside it what stays: a comment that names alice and her reply; the scope `Inbox`; a
 /// dependency on a task that stays and a dependent that stays; a citation of alpha's decision;
-/// two steps, one a task and one a message about nothing else; a former id of the task and of the
-/// comment; and a notification about the task in alice's inbox.
+/// two steps, a task, whose `step_of` is that task's, and a note written about the task, whose
+/// `step_of` is the note's; a former id of the task and of the comment; and a notification about
+/// the task in alice's inbox.
 struct Filed {
     task: EntityId,
     comment: EntityId,
@@ -140,8 +163,8 @@ async fn filed(t: &Two) -> Result<Filed> {
     let decision = ops::create_decision(alpha, daniel, ruling).await?;
     let cites = ops::cite(alpha, daniel, moving, decision, None).await?;
     let step_task = task(alpha, daniel, "Name the kinds").await?;
-    let step_note =
-        ops::post_message(alpha, daniel, "read the old notes", Priority::Later, MessageContext::default()).await?;
+    let about_it = MessageContext { task_id: Some(moving), ..Default::default() };
+    let step_note = ops::post_message(alpha, daniel, "read the old notes", Priority::Later, about_it).await?;
     let steps = [
         ops::add_step(alpha, daniel, moving, step_task).await?,
         ops::add_step(alpha, daniel, moving, step_note).await?,
@@ -174,30 +197,34 @@ async fn filed(t: &Two) -> Result<Filed> {
     })
 }
 
-/// A task moved to beta's scope takes with it, unchanged, itself, its messages, the relations
-/// from it and from its messages, its steps and its former ids; what stays (a dependency's target
-/// and a dependent, the citation's decision, what each step is, the scope it left, its
-/// notification, the principals) stays in alpha. Its scope of alpha is retracted with the move as
-/// the reason, it is worked in `Commons`, and one comment by the mover says where it came from.
+/// A task moved to beta's scope takes with it, unchanged, itself, its messages (the note that is
+/// one of its steps among them), the relations from it and from its messages (that note's
+/// `step_of` among them) and its former ids; what stays (a dependency's target and a dependent,
+/// the citation's decision, the task that is one of its steps with that task's `step_of`, the scope
+/// it left, its notification, the principals) stays in alpha, and its checklist still shows both
+/// steps. Its scope of alpha is retracted with the move as the reason, it is worked in `Commons`,
+/// and one comment by the mover says where it came from.
 #[tokio::test]
 async fn a_moved_task_takes_what_belongs_to_it_and_leaves_what_does_not() -> Result<()> {
     let t = two().await?;
     let f = filed(&t).await?;
     let before = ops::json_of_task(&t.alpha.get::<TaskView>(f.task).await?, None)?;
 
-    let moved = task_move::move_tasks(&t.alpha, t.daniel, &[f.task], &to_beta(&t).await?, Some("it is beta's work"))
-        .await?
-        .remove(0);
+    let moved =
+        moving(&t, &t.alpha, t.daniel, &[f.task], to_beta(&t).await?, Some("it is beta's work")).await?.remove(0);
 
-    assert!(moved.moved && moved.from.name == "alpha", "{moved:?}");
-    let brought = Brought { messages: 2, relations: 4, steps: 2, former_ids: 2 };
-    assert_eq!(moved.brought, brought, "the comment and its reply; worked_in, depends_on, cites and the mention");
+    assert!(moved.moved && moved.from.name == "alpha" && !moved.kept_scopes, "{moved:?}");
+    let brought = Brought { messages: 3, relations: 5, former_ids: 2 };
+    assert_eq!(
+        moved.brought, brought,
+        "the comment, its reply and the note; worked_in, depends_on, cites, the mention and the note's step_of"
+    );
     assert_eq!((moved.taken_off.as_slice(), moved.worked_in.as_slice()), (&[t.inbox][..], &[t.commons][..]));
     assert_eq!(ops::json_of_task(&t.beta.get::<TaskView>(f.task).await?, None)?, before, "every field unchanged");
-    for message in [f.comment, f.reply] {
+    for message in [f.comment, f.reply, f.step_note] {
         assert_eq!(project_of::<MessageView>(&t, message).await?, "beta");
     }
-    for relation in [f.mention, f.depends_on, f.cites, f.in_inbox, f.steps[0], f.steps[1]] {
+    for relation in [f.mention, f.depends_on, f.cites, f.in_inbox, f.steps[1]] {
         assert_eq!(project_of::<RelationView>(&t, relation).await?, "beta", "relation {relation}");
     }
     for former in t.beta.former_ids_of(&[f.task, f.comment]).await? {
@@ -206,8 +233,10 @@ async fn a_moved_task_takes_what_belongs_to_it_and_leaves_what_does_not() -> Res
     for task in [f.prerequisite, f.dependent, f.step_task] {
         assert_eq!(project_of::<TaskView>(&t, task).await?, "alpha", "task {task} stays");
     }
-    assert_eq!(project_of::<MessageView>(&t, f.step_note).await?, "alpha", "what a step is stays");
+    assert_eq!(project_of::<RelationView>(&t, f.steps[0]).await?, "alpha", "a task's step_of is that task's");
     assert_eq!(project_of::<RelationView>(&t, f.depended_on_by).await?, "alpha", "a relation into it stays");
+    let checklist: Vec<EntityId> = ops::steps(&t.beta, f.task).await?.iter().map(View::id).collect();
+    assert_eq!(checklist, f.steps, "the checklist reads its steps by the task's id, wherever each is");
     assert_eq!(project_of::<DecisionView>(&t, f.decision).await?, "alpha");
     assert_eq!(project_of::<ScopeView>(&t, t.inbox).await?, "alpha");
     assert_eq!(project_of::<NotificationView>(&t, f.notification).await?, "alpha");
@@ -221,7 +250,7 @@ async fn a_moved_task_takes_what_belongs_to_it_and_leaves_what_does_not() -> Res
     assert_eq!(comment.task()?.map(EntityId::from), Some(f.task));
     assert_eq!(EntityId::from(comment.author()?), t.daniel, "by the mover, alpha's principal");
     let comments = ops::messages_about(&t.beta, "task", f.task).await?;
-    assert_eq!(comments.len(), 3, "the move wrote one comment");
+    assert_eq!(comments.len(), 4, "the move wrote one comment beside the three");
     Ok(())
 }
 
@@ -240,7 +269,7 @@ async fn each_connection_of_a_moved_task_is_found_from_both_ends() -> Result<()>
     let decision = ops::create_decision(&t.alpha, t.daniel, ruling).await?;
     let cites = ops::cite(&t.alpha, t.daniel, moving, decision, None).await?;
 
-    task_move::move_tasks(&t.alpha, t.daniel, &[moving], &to_beta(&t).await?, None).await?;
+    self::moving(&t, &t.alpha, t.daniel, &[moving], to_beta(&t).await?, None).await?;
 
     let ends = |relations: Vec<RelationView>| {
         relations.iter().map(|r| (r.from_id().unwrap(), r.to_id().unwrap())).collect::<Vec<_>>()
@@ -285,7 +314,7 @@ async fn each_connection_of_a_moved_task_is_found_from_both_ends() -> Result<()>
 async fn the_principals_a_moved_task_names_stay_alphas_and_are_named_with_alpha() -> Result<()> {
     let t = two().await?;
     let f = filed(&t).await?;
-    let moved = task_move::move_tasks(&t.alpha, t.daniel, &[f.task], &to_beta(&t).await?, None).await?.remove(0);
+    let moved = moving(&t, &t.alpha, t.daniel, &[f.task], to_beta(&t).await?, None).await?.remove(0);
 
     let moving: TaskView = t.beta.get(f.task).await?;
     assert_eq!(ops::assignee_of(&moving)?, Some(t.alice));
@@ -306,7 +335,7 @@ async fn the_principals_a_moved_task_names_stay_alphas_and_are_named_with_alpha(
 async fn the_former_ids_of_a_moved_task_and_its_messages_find_them_in_the_destination() -> Result<()> {
     let t = two().await?;
     let f = filed(&t).await?;
-    task_move::move_tasks(&t.alpha, t.daniel, &[f.task], &to_beta(&t).await?, None).await?;
+    moving(&t, &t.alpha, t.daniel, &[f.task], to_beta(&t).await?, None).await?;
 
     for (former, record) in [(&f.former_task, f.task), (&f.former_comment, f.comment)] {
         let here = ops::locate(&t.beta, &former[..8], ops::ANY).await?;
@@ -326,45 +355,54 @@ async fn a_move_stopped_before_the_task_moved_finishes_when_run_again() -> Resul
     let f = filed(&t).await?;
     put::<MessageView>(&t, &t.beta, f.comment).await?;
     put::<RelationView>(&t, &t.beta, f.depends_on).await?;
-    put::<RelationView>(&t, &t.beta, f.steps[0]).await?;
+    put::<RelationView>(&t, &t.beta, f.steps[1]).await?;
 
-    let moved = task_move::move_tasks(&t.alpha, t.daniel, &[f.task], &to_beta(&t).await?, None).await?.remove(0);
+    let moved = moving(&t, &t.alpha, t.daniel, &[f.task], to_beta(&t).await?, None).await?.remove(0);
 
     assert!(moved.moved);
-    assert_eq!(moved.brought, Brought { messages: 1, relations: 3, steps: 1, former_ids: 2 }, "what was left");
+    assert_eq!(moved.brought, Brought { messages: 2, relations: 3, former_ids: 2 }, "what was left");
     assert_eq!(project_of::<TaskView>(&t, f.task).await?, "beta");
-    for message in [f.comment, f.reply] {
+    for message in [f.comment, f.reply, f.step_note] {
         assert_eq!(project_of::<MessageView>(&t, message).await?, "beta");
     }
-    for relation in [f.mention, f.depends_on, f.cites, f.in_inbox, f.steps[0], f.steps[1]] {
+    for relation in [f.mention, f.depends_on, f.cites, f.in_inbox, f.steps[1]] {
         assert_eq!(project_of::<RelationView>(&t, relation).await?, "beta", "relation {relation}");
     }
-    assert_eq!(ops::messages_about(&t.beta, "task", f.task).await?.len(), 3, "one comment records the move");
+    assert_eq!(ops::messages_about(&t.beta, "task", f.task).await?.len(), 4, "one comment records the move");
     Ok(())
 }
 
 /// A task in beta already with a record of it left in alpha, as a comment a client that had not
 /// heard of the move wrote there, is reported as there already when the move runs again, from beta
 /// where the task is: the record is taken in, and no second comment is written. Run once more, it
-/// takes nothing.
+/// takes nothing; and run into another of beta's scopes, it keeps the scopes it has, saying so.
 #[tokio::test]
-async fn a_task_there_already_with_a_record_left_behind_takes_it_in_and_is_reported_as_there() -> Result<()> {
+async fn a_task_there_already_takes_in_a_record_left_behind_and_keeps_its_scopes() -> Result<()> {
     let t = two().await?;
     let f = filed(&t).await?;
-    let to = to_beta(&t).await?;
-    task_move::move_tasks(&t.alpha, t.daniel, &[f.task], &to, None).await?;
+    moving(&t, &t.alpha, t.daniel, &[f.task], to_beta(&t).await?, None).await?;
     put::<MessageView>(&t, &t.alpha, f.reply).await?;
-    assert_eq!(task_move::place(&t.alpha, &[f.task], &to).await?, Whose::Other(to.project.clone()));
+    let lock = MoveLock::take(&t.paths, || panic!("no other move holds the lock")).await?;
+    let placed = task_move::place(&t.alpha, &[f.task], to_beta(&t).await?, lock).await?;
+    assert_eq!(placed.runs_in(&t.alpha), Whose::Other(placed.destination().project.clone()), "it runs in beta");
+    drop(placed);
 
-    let again = task_move::move_tasks(&t.beta, t.their_daniel, &[f.task], &to, None).await?.remove(0);
-    assert!(!again.moved && again.comment.is_none(), "{again:?}");
+    let again = moving(&t, &t.beta, t.their_daniel, &[f.task], to_beta(&t).await?, None).await?.remove(0);
+    assert!(!again.moved && again.comment.is_none() && !again.kept_scopes, "{again:?}");
     assert_eq!(again.from.name, "beta");
     assert_eq!(again.brought, Brought { messages: 1, ..Default::default() });
     assert_eq!(project_of::<MessageView>(&t, f.reply).await?, "beta");
-    assert_eq!(ops::messages_about(&t.beta, "task", f.task).await?.len(), 3, "no second comment");
+    assert_eq!(ops::messages_about(&t.beta, "task", f.task).await?.len(), 4, "no second comment");
 
-    let once_more = task_move::move_tasks(&t.beta, t.their_daniel, &[f.task], &to, None).await?.remove(0);
+    let once_more = moving(&t, &t.beta, t.their_daniel, &[f.task], to_beta(&t).await?, None).await?.remove(0);
     assert_eq!((once_more.moved, once_more.brought), (false, Brought::default()));
+
+    let annex = CreateScope { title: "Annex".into(), ..Default::default() };
+    ops::create_scope(&t.beta, t.their_daniel, annex).await?;
+    let elsewhere = Destination::named(&t.beta, "beta", Some("Annex")).await?;
+    let kept = moving(&t, &t.beta, t.their_daniel, &[f.task], elsewhere, None).await?.remove(0);
+    assert!(kept.kept_scopes && !kept.moved, "{kept:?}");
+    assert_eq!(kept.worked_in, vec![t.commons], "the task keeps the scope it has, and is put in no other");
     Ok(())
 }
 
@@ -382,11 +420,11 @@ async fn everything(graph: &ProjectGraph) -> Result<Vec<EntityId>> {
 
 /// Each refusal is typed and says what to do, and writes nothing: an id that names no task, tasks
 /// of two projects, a project the node does not hold, a scope of another project than the
-/// destination, and no scope for a destination that has an active one. A destination with no scope
-/// takes a task into none.
+/// destination, and a move made from another project than the one it was placed in. A move that
+/// names no scope takes a task into none, into a destination with an active scope as into one with
+/// none.
 #[tokio::test]
-async fn each_refusal_is_typed_and_writes_nothing_and_a_destination_with_no_scope_takes_a_task_into_none() -> Result<()>
-{
+async fn each_refusal_is_typed_and_writes_nothing_and_a_move_naming_no_scope_takes_a_task_into_none() -> Result<()> {
     let t = two().await?;
     let gamma = ProjectGraph::ensure(t.node.clone(), uuid::Uuid::new_v4(), "gamma").await?;
     let theirs =
@@ -398,38 +436,40 @@ async fn each_refusal_is_typed_and_writes_nothing_and_a_destination_with_no_scop
     let to = to_beta(&t).await?;
 
     let nothing = EntityId::random();
-    let e = refused(task_move::move_tasks(&t.alpha, t.daniel, &[ours, nothing], &to, None).await.unwrap_err());
+    let e = refused(moving(&t, &t.alpha, t.daniel, &[ours, nothing], to.clone(), None).await.unwrap_err());
     assert_eq!(e, Refused::NoTask(nothing));
-    let e = refused(task_move::move_tasks(&t.alpha, t.daniel, &[ours, theirs], &to, None).await.unwrap_err());
+    let e = refused(moving(&t, &t.alpha, t.daniel, &[ours, theirs], to.clone(), None).await.unwrap_err());
     let named = vec![
         (ours.to_base64()[..8].to_string(), "alpha".to_string()),
         (theirs.to_base64()[..8].to_string(), "gamma".to_string()),
     ];
     assert_eq!(e, Refused::SeveralProjects(named));
     assert!(e.to_string().contains("move each project's tasks with a command of their own"), "{e}");
-    let e = refused(Destination::named(&t.alpha, "nowhere", None).await.err().expect("no such project"));
+    let e = refused(Destination::named(&t.alpha, "nowhere", None).await.expect_err("no such project"));
     assert!(matches!(&e, Refused::NoProject { named, held } if named == "nowhere" && held.len() == 3), "{e}");
     let elsewhere = t.inbox.to_base64();
-    let e = refused(Destination::named(&t.alpha, "beta", Some(&elsewhere)).await.err().expect("alpha's scope"));
+    let e = refused(Destination::named(&t.alpha, "beta", Some(&elsewhere)).await.expect_err("alpha's scope"));
     assert!(
         matches!(&e, Refused::ScopeElsewhere { project, destination, .. } if project == "alpha" && destination == "beta"),
         "{e}"
     );
-    let e = refused(Destination::named(&t.alpha, "beta", None).await.err().expect("beta has a scope"));
-    assert_eq!(
-        e,
-        Refused::ScopeNeeded {
-            destination: "beta".into(),
-            active: vec![(t.commons.to_base64()[..8].to_string(), "Commons".into())]
-        }
-    );
-    assert!(e.to_string().contains("--to-scope"), "{e}");
+    let lock = MoveLock::take(&t.paths, || panic!("no other move holds the lock")).await?;
+    let placed = task_move::place(&t.alpha, &[ours], to.clone(), lock).await?;
+    let e = refused(placed.make(&t.beta, t.their_daniel, None).await.unwrap_err());
+    assert_eq!(e, Refused::RunsElsewhere { project: "alpha".into() });
+    drop(placed);
     assert_eq!((everything(&t.alpha).await?, everything(&t.beta).await?, everything(&gamma).await?), before);
 
     let to_gamma = Destination::named(&t.alpha, "GAMMA", None).await?;
-    let moved = task_move::move_tasks(&t.alpha, t.daniel, &[ours], &to_gamma, None).await?.remove(0);
+    let moved = moving(&t, &t.alpha, t.daniel, &[ours], to_gamma, None).await?.remove(0);
     assert!(moved.moved && moved.worked_in.is_empty(), "{moved:?}");
     assert_eq!(project_of::<TaskView>(&t, ours).await?, "another");
+    let unscoped = task(&t.alpha, t.daniel, "Into beta, in no scope").await?;
+    let to_beta_whole = Destination::named(&t.alpha, "beta", None).await?;
+    assert_eq!(to_beta_whole.scope, None, "beta's active scope asks for nothing");
+    let moved = moving(&t, &t.alpha, t.daniel, &[unscoped], to_beta_whole, None).await?.remove(0);
+    assert!(moved.moved && moved.worked_in.is_empty(), "{moved:?}");
+    assert_eq!(project_of::<TaskView>(&t, unscoped).await?, "beta");
     Ok(())
 }
 
@@ -480,7 +520,7 @@ async fn a_moved_task_leaves_the_sources_list_and_live_query_and_joins_the_desti
     theirs.wait_initialized().await?;
     let (mut leaving, mut arriving) = (Heard::on(mine), Heard::on(theirs));
 
-    task_move::move_tasks(&t.alpha, t.daniel, &[moving], &to_beta(&t).await?, None).await?;
+    self::moving(&t, &t.alpha, t.daniel, &[moving], to_beta(&t).await?, None).await?;
 
     leaving.until(moving, false).await;
     arriving.until(moving, true).await;
@@ -497,7 +537,7 @@ async fn a_task_worked_in_the_destinations_scope_already_is_not_given_it_twice()
     let t = two().await?;
     let moving = task(&t.alpha, t.daniel, "Write the catalog").await?;
     ops::link(&t.alpha, t.daniel, RelationKind::WorkedIn, moving, t.commons, None, false, json!({})).await?;
-    let moved = task_move::move_tasks(&t.alpha, t.daniel, &[moving], &to_beta(&t).await?, None).await?.remove(0);
+    let moved = self::moving(&t, &t.alpha, t.daniel, &[moving], to_beta(&t).await?, None).await?.remove(0);
     assert_eq!(moved.worked_in, vec![t.commons]);
     let accepted = ops::relations_from(&t.beta, moving, Some(RelationKind::WorkedIn))
         .await?
@@ -505,5 +545,37 @@ async fn a_task_worked_in_the_destinations_scope_already_is_not_given_it_twice()
         .filter(|r| r.status().ok() == Some(RelationStatus::Accepted))
         .count();
     assert_eq!(accepted, 1);
+    Ok(())
+}
+
+/// A relation is its `from` end's, through every move: S, a task, is a step of P. P moves to beta,
+/// and the step stays in alpha with S; S moves to gamma, and the step goes with it; P's move run
+/// again finds P there already and takes nothing, so the step stays in gamma. P's checklist shows S
+/// throughout.
+#[tokio::test]
+async fn a_step_that_is_a_task_stays_with_that_task_through_each_move() -> Result<()> {
+    let t = two().await?;
+    let gamma = ProjectGraph::ensure(t.node.clone(), uuid::Uuid::new_v4(), "gamma").await?;
+    let p = task(&t.alpha, t.daniel, "Write the catalog").await?;
+    let s = task(&t.alpha, t.daniel, "Name the kinds").await?;
+    let step = ops::add_step(&t.alpha, t.daniel, p, s).await?;
+    let checklist = |graph: ProjectGraph| async move {
+        anyhow::Ok(ops::steps(&graph, p).await?.iter().map(View::id).collect::<Vec<_>>())
+    };
+
+    let moved = moving(&t, &t.alpha, t.daniel, &[p], to_beta(&t).await?, None).await?.remove(0);
+    assert_eq!(moved.brought, Brought::default(), "P holds nothing but itself: {moved:?}");
+    assert_eq!(project_of::<RelationView>(&t, step).await?, "alpha", "the step is S's, and S is in alpha");
+    assert_eq!(checklist(t.beta.clone()).await?, [step]);
+
+    let to_gamma = Destination::named(&t.alpha, "gamma", None).await?;
+    moving(&t, &t.alpha, t.daniel, &[s], to_gamma, None).await?;
+    assert_eq!(project_of::<RelationView>(&t, step).await?, "another", "the step went with S to gamma");
+    assert!(gamma.owns(&t.node.get::<RelationView>(step).await?));
+
+    let again = moving(&t, &t.beta, t.their_daniel, &[p], to_beta(&t).await?, None).await?.remove(0);
+    assert_eq!((again.moved, again.brought), (false, Brought::default()), "{again:?}");
+    assert!(gamma.owns(&t.node.get::<RelationView>(step).await?), "P's move takes no relation into P");
+    assert_eq!(checklist(t.beta.clone()).await?, [step]);
     Ok(())
 }

@@ -1,8 +1,9 @@
 //! `fwd task move` against a daemon hosting two projects, alpha and beta, with its one routing
 //! service running: the move tells only whom its comment tells, each once, since the records that
 //! change project are updates the service knows, and the task's next status change is routed by
-//! beta's rules; the command runs in the tasks' project and answers per task; and the MCP tool
-//! the CLI grammar gives moves a task as the calling thread.
+//! beta's rules; the command runs in the tasks' project and answers per task; one move runs at a
+//! time, so two begun at once end as two run one after the other; and the MCP tool the CLI grammar
+//! gives moves a task as the calling thread.
 
 mod common;
 
@@ -19,16 +20,18 @@ use fwd_core::ops;
 use fwd_core::project::{NamedProject, Paths};
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::query::with_id;
+use fwd_core::task_move::MoveLock;
 use serde_json::{json, Value};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// One daemon's folders, and a checkout of each of the two projects it hosts, which `dnorman`
 /// made.
 struct Daemon {
-    _scratch: Scratch,
+    scratch: Scratch,
     paths: Paths,
     alpha: PathBuf,
     beta: PathBuf,
@@ -38,23 +41,53 @@ impl Daemon {
     fn new() -> Result<Daemon> {
         let scratch = Scratch::new()?;
         let paths = scratch.paths("run", "data");
-        let checkout = |name: &str| -> Result<PathBuf> {
-            let root = scratch.path().join(name);
-            std::fs::create_dir_all(&root)?;
-            git(&root, &["init", "-q", "-b", "main"])?;
-            git(&root, &["remote", "add", "origin", &format!("git@example.com:t/{name}.git")])?;
-            Ok(root)
-        };
-        let (alpha, beta) = (checkout("alpha")?, checkout("beta")?);
-        let daemon = Daemon { paths, alpha, beta, _scratch: scratch };
-        daemon.json(&daemon.alpha, &["init", "--name", "alpha", "--handle", "dnorman"])?;
-        daemon.json(&daemon.beta, &["init", "--name", "beta", "--handle", "dnorman"])?;
+        let mut daemon = Daemon { paths, alpha: PathBuf::new(), beta: PathBuf::new(), scratch };
+        daemon.alpha = daemon.project("alpha")?;
+        daemon.beta = daemon.project("beta")?;
         Ok(daemon)
+    }
+
+    /// A checkout of a new project `name`, which `dnorman` made.
+    fn project(&self, name: &str) -> Result<PathBuf> {
+        let root = self.scratch.path().join(name);
+        std::fs::create_dir_all(&root)?;
+        git(&root, &["init", "-q", "-b", "main"])?;
+        git(&root, &["remote", "add", "origin", &format!("git@example.com:t/{name}.git")])?;
+        self.json(&root, &["init", "--name", name, "--handle", "dnorman"])?;
+        Ok(root)
     }
 
     /// `fwd --format <format> <args>` in `checkout`, reaching this daemon only, with none of the
     /// caller's settings that would choose another project, principal or scope.
     fn fwd(&self, checkout: &Path, format: &str, args: &[&str]) -> Result<std::process::Output> {
+        Ok(self.command(checkout, format, args).output()?)
+    }
+
+    /// `fwd --format json <args>` in `checkout`, started and left running: its standard output
+    /// goes to a file of its own, `out`, and each line of its standard error is read as it comes,
+    /// so that no pipe the test has not read yet holds it up.
+    fn start(&self, checkout: &Path, args: &[&str], out: &str) -> Result<Running> {
+        let out = self.scratch.path().join(out);
+        let mut child = self
+            .command(checkout, "json", args)
+            .stdout(Stdio::from(std::fs::File::create(&out)?))
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow!("no standard error"))?;
+        let (tx, said) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Running { child, out, said })
+    }
+
+    /// The command `fwd --format <format> <args>` in `checkout`, as [`Daemon::fwd`] runs it.
+    fn command(&self, checkout: &Path, format: &str, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fwd"));
         command
             .current_dir(checkout)
@@ -74,7 +107,7 @@ impl Daemon {
         ] {
             command.env_remove(name);
         }
-        Ok(command.output()?)
+        command
     }
 
     /// The JSON `fwd <args>` prints in `checkout`, and what it said on standard error beside it;
@@ -248,8 +281,11 @@ async fn the_move_tells_only_whom_its_comment_tells_and_the_next_change_is_route
 
 /// `fwd task move`, typed in beta's checkout with alpha's tasks, runs in alpha, where the tasks
 /// are, and says so; it answers per task what it moved, from which project and into which scope,
-/// as JSON and for people; run again, it reports the tasks as there already; no scope for a project
-/// that has an active one, and a project the node does not hold, are refused with what to do.
+/// as JSON and for people; run again, it reports the tasks as there already, in their scope, and
+/// run into another of beta's scopes it says that a task there already keeps its scopes, and how to
+/// change them. A move that names no scope takes a task into beta, which has an active scope, in
+/// none; a project the node does not hold is refused with what to do, and so are the tasks given
+/// before the flags.
 #[tokio::test]
 async fn the_command_runs_in_the_tasks_project_answers_per_task_and_reports_tasks_there_already() -> Result<()> {
     let daemon = Daemon::new()?;
@@ -257,7 +293,6 @@ async fn the_command_runs_in_the_tasks_project_answers_per_task_and_reports_task
     let commons = daemon.made(b, &["scope", "create", "Commons"])?;
     let first = daemon.made(a, &["task", "create", "Write the catalog"])?;
     let second = daemon.made(a, &["task", "create", "Publish the catalog", "--after", &first])?;
-    let beta_s = daemon.made(b, &["task", "create", "Beta's own"])?;
 
     let args = ["task", "move", "--to", "beta", "--to-scope", &commons[..8], &first[..8], &second];
     let (moved, said) = daemon.run(b, &args)?.map_err(|e| anyhow!("{e}"))?;
@@ -276,7 +311,7 @@ async fn the_command_runs_in_the_tasks_project_answers_per_task_and_reports_task
         (&tasks[0]["id"], &tasks[0]["from"], &tasks[0]["moved"]),
         (&json!(first), &json!("alpha"), &json!(true))
     );
-    assert_eq!(tasks[1]["brought"], json!({"messages": 0, "relations": 1, "steps": 0, "former_ids": 0}), "{moved}");
+    assert_eq!(tasks[1]["brought"], json!({"messages": 0, "relations": 1, "former_ids": 0}), "{moved}");
     assert_eq!(tasks[1]["worked_in"][0]["id"], json!(commons));
     let beta = daemon.client(b).await?;
     assert!(
@@ -288,21 +323,215 @@ async fn the_command_runs_in_the_tasks_project_answers_per_task_and_reports_task
     let printed = String::from_utf8(out.stdout)?;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(printed.starts_with("To beta, in the scope Commons:"), "{printed}");
-    assert!(printed.contains(&format!("{} \"Write the catalog\" is there already", &first[..8])), "{printed}");
+    let there = format!("{} \"Write the catalog\" is there already, in the scope Commons", &first[..8]);
+    assert!(printed.contains(&there), "{printed}");
     let messages = ops::messages_about(&beta.graph, "task", first.parse()?).await?;
     assert_eq!(messages.len(), 1, "one comment records the move, and the second run wrote none");
 
-    let third = daemon.made(a, &["task", "create", "Stays in alpha"])?;
-    let refused = daemon.run(a, &["task", "move", "--to", "beta", &third, &beta_s])?.expect_err("beta has a scope");
-    let what = format!(
-        "beta has active scopes (`Commons` {}), so a task moves into one of them: name it with --to-scope",
-        &commons[..8]
+    daemon.made(b, &["scope", "create", "Annex"])?;
+    let (kept, said) =
+        daemon.run(b, &["task", "move", "--to", "beta", "--to-scope", "Annex", &first])?.map_err(|e| anyhow!("{e}"))?;
+    assert_eq!((&kept["tasks"][0]["moved"], &kept["tasks"][0]["kept_scopes"]), (&json!(false), &json!(true)), "{kept}");
+    assert_eq!(kept["tasks"][0]["worked_in"][0]["id"], json!(commons), "{kept}");
+    let note = format!(
+        "fwd: {} \"Write the catalog\" was in beta already, and stays in the scope Commons: --to-scope `Annex` was not applied, since a move puts a task in a scope only as it arrives; `fwd link {} worked_in <scope>` adds a scope",
+        &first[..8], &first[..8]
     );
-    assert!(refused.contains(&what), "{refused}");
-    let refused = daemon.run(a, &["task", "move", "--to", "gamma", &third])?.expect_err("no project gamma");
+    assert!(said.contains(&note), "{said}");
+
+    let third = daemon.made(a, &["task", "create", "Into beta, in no scope"])?;
+    let (unscoped, _) = daemon.run(a, &["task", "move", "--to", "beta", &third])?.map_err(|e| anyhow!("{e}"))?;
+    assert_eq!(
+        (&unscoped["to"]["scope"], &unscoped["tasks"][0]["worked_in"]),
+        (&json!(null), &json!([])),
+        "{unscoped}"
+    );
+    assert!(beta.graph.get::<TaskView>(third.parse()?).await.is_ok(), "the task is beta's, worked in no scope");
+
+    let fourth = daemon.made(a, &["task", "create", "Stays in alpha"])?;
+    let refused = daemon.run(a, &["task", "move", "--to", "gamma", &fourth])?.expect_err("no project gamma");
     assert!(refused.contains("the node holds no project `gamma`; it holds `alpha`, `beta`"), "{refused}");
+    let refused = daemon.run(a, &["task", "move", &fourth, "--to", "beta"])?.expect_err("the task before the flags");
+    assert!(
+        refused.contains("`--to` comes before the tasks, which come last: an id may start with `-`, so every word after the first task is read as another task; give `fwd task move --to <project> [--to-scope <scope>] [--note <text>] <id>...`"),
+        "{refused}"
+    );
     let alpha = daemon.client(a).await?;
-    assert!(alpha.graph.get::<TaskView>(third.parse()?).await.is_ok(), "the refusals moved nothing");
+    assert!(alpha.graph.get::<TaskView>(fourth.parse()?).await.is_ok(), "the refusals moved nothing");
+    Ok(())
+}
+
+/// What a running `fwd task move` says on standard error while another move holds the node's move
+/// lock (`MOVE_WAITS` in crates/fwd/src/main.rs).
+const WAITS: &str = "fwd: another task move is running on this node; this one waits for it to end";
+
+/// A `fwd task move` left running ([`Daemon::start`]): the process, the file its standard output
+/// goes to, and the lines of its standard error as they come.
+struct Running {
+    child: Child,
+    out: PathBuf,
+    said: std::sync::mpsc::Receiver<String>,
+}
+
+impl Running {
+    /// Returns once the move has said that it waits for the lock. Fails when its standard error
+    /// ends first, as it does when the move ran without waiting.
+    fn until_waiting(&self) -> Result<()> {
+        let mut read = Vec::new();
+        for line in self.said.iter() {
+            if line.starts_with(WAITS) {
+                return Ok(());
+            }
+            read.push(line);
+        }
+        Err(anyhow!("the move ended without waiting for the lock: {}", read.join("\n")))
+    }
+
+    /// The JSON the move prints once it has ended, and what else it said; fails with what it said
+    /// when it fails.
+    fn ended(mut self) -> Result<(Value, String)> {
+        let status = self.child.wait()?;
+        let said: Vec<String> = self.said.iter().collect();
+        if !status.success() {
+            return Err(anyhow!("the move failed: {}", said.join("\n")));
+        }
+        Ok((serde_json::from_slice(&std::fs::read(&self.out)?)?, said.join("\n")))
+    }
+}
+
+/// The messages about `task` and its relations of `kind`, wherever each is, through `graph`.
+async fn about(graph: &ProjectGraph, task: EntityId) -> Result<(Vec<MessageView>, Vec<RelationView>)> {
+    let messages = ops::messages_about(graph, "task", task).await?;
+    let worked_in = ops::relations_from(graph, task, Some(RelationKind::WorkedIn)).await?;
+    Ok((messages, worked_in))
+}
+
+/// A move waits while another holds the node's move lock, and writes nothing meanwhile: the test
+/// holds the lock, the move says it waits, the task is still alpha's with nothing about it; once
+/// the test lets the lock go, the move ends, having moved the task.
+#[tokio::test]
+async fn a_move_waits_for_the_one_that_holds_the_nodes_move_lock() -> Result<()> {
+    let daemon = Daemon::new()?;
+    let (a, b) = (&daemon.alpha, &daemon.beta);
+    daemon.made(b, &["scope", "create", "Commons"])?;
+    let task = daemon.made(a, &["task", "create", "Write the catalog"])?;
+    let id: EntityId = task.parse()?;
+    let alpha = daemon.client(a).await?;
+
+    let held = MoveLock::take(&daemon.paths, || panic!("nothing else moves")).await?;
+    let moving = daemon.start(b, &["task", "move", "--to", "beta", "--to-scope", "Commons", &task], "move.json")?;
+    moving.until_waiting()?;
+    let still: TaskView = alpha.graph.get(id).await?;
+    assert!(alpha.graph.owns(&still), "the task is alpha's while the move waits");
+    assert_eq!(about(&alpha.graph, id).await?.0.len(), 0, "and the move wrote no comment");
+    drop(held);
+
+    let (moved, _) = moving.ended()?;
+    assert_eq!((&moved["tasks"][0]["moved"], &moved["tasks"][0]["from"]), (&json!(true), &json!("alpha")), "{moved}");
+    let beta = daemon.client(b).await?;
+    assert!(beta.graph.owns(&beta.graph.get::<TaskView>(id).await?));
+    Ok(())
+}
+
+/// Two moves of one task to beta, begun while the test holds the lock and so waiting together,
+/// end as two moves one after the other: one moves it, the other finds it there already, and the
+/// task has one comment that records the move and one scope.
+#[tokio::test]
+async fn two_moves_of_a_task_to_one_project_at_once_move_it_once() -> Result<()> {
+    let daemon = Daemon::new()?;
+    let (a, b) = (&daemon.alpha, &daemon.beta);
+    let commons = daemon.made(b, &["scope", "create", "Commons"])?;
+    let task = daemon.made(a, &["task", "create", "Write the catalog"])?;
+    let id: EntityId = task.parse()?;
+
+    let held = MoveLock::take(&daemon.paths, || panic!("nothing else moves")).await?;
+    let args = ["task", "move", "--to", "beta", "--to-scope", "Commons", &task];
+    let (first, second) = (daemon.start(a, &args, "first.json")?, daemon.start(b, &args, "second.json")?);
+    first.until_waiting()?;
+    second.until_waiting()?;
+    drop(held);
+    let (one, _) = first.ended()?;
+    let (other, _) = second.ended()?;
+
+    let mut moved = [&one["tasks"][0]["moved"], &other["tasks"][0]["moved"]];
+    moved.sort_by_key(|m| m.as_bool());
+    assert_eq!(moved, [&json!(false), &json!(true)], "one moved it and one found it there: {one} {other}");
+    let beta = daemon.client(b).await?;
+    let (messages, worked_in) = about(&beta.graph, id).await?;
+    assert_eq!(messages.len(), 1, "one comment records the move");
+    let accepted: Vec<EntityId> = worked_in
+        .iter()
+        .filter(|r| r.status().ok() == Some(RelationStatus::Accepted))
+        .map(|r| r.to_id())
+        .collect::<Result<_, _>>()?;
+    assert_eq!(accepted, [commons.parse::<EntityId>()?], "one scope, Commons");
+    Ok(())
+}
+
+/// Two moves of one task, one to beta's scope and one to gamma's, begun while the test holds the
+/// lock, end as two moves one after the other, in whichever order they took the lock: the second
+/// runs where the first left the task, as the caller there, and moves it on, so the task ends in
+/// one project with everything that belongs to it, two comments, one per move, and one scope, the
+/// last destination's, the first's taken off with the move as the reason.
+#[tokio::test]
+async fn two_moves_of_a_task_to_two_projects_at_once_move_it_twice_in_turn() -> Result<()> {
+    let daemon = Daemon::new()?;
+    let (a, b) = (&daemon.alpha, &daemon.beta);
+    let c = daemon.project("gamma")?;
+    let inbox = daemon.made(a, &["scope", "create", "Inbox"])?;
+    let commons = daemon.made(b, &["scope", "create", "Commons"])?;
+    let annex = daemon.made(&c, &["scope", "create", "Annex"])?;
+    let task = daemon.made(a, &["--scope", &inbox, "task", "create", "Write the catalog"])?;
+    daemon.made(a, &["comment", &task, "the catalog first"])?;
+    let id: EntityId = task.parse()?;
+
+    let held = MoveLock::take(&daemon.paths, || panic!("nothing else moves")).await?;
+    let to_beta = daemon.start(a, &["task", "move", "--to", "beta", "--to-scope", "Commons", &task], "beta.json")?;
+    let to_gamma = daemon.start(a, &["task", "move", "--to", "gamma", "--to-scope", "Annex", &task], "gamma.json")?;
+    to_beta.until_waiting()?;
+    to_gamma.until_waiting()?;
+    drop(held);
+    let (into_beta, said_beta) = to_beta.ended()?;
+    let (into_gamma, said_gamma) = to_gamma.ended()?;
+
+    // The project the task ended in names the order: the move to it ran second, from the other.
+    let (gamma, beta) = (daemon.client(&c).await?, daemon.client(b).await?);
+    let in_gamma = gamma.graph.get::<TaskView>(id).await.is_ok();
+    let (last, first, (second_answer, second_said), first_answer, last_scope, first_scope) = if in_gamma {
+        (&gamma, "beta", (&into_gamma, &said_gamma), &into_beta, &annex, &commons)
+    } else {
+        (&beta, "gamma", (&into_beta, &said_beta), &into_gamma, &commons, &annex)
+    };
+    let last_name = if in_gamma { "gamma" } else { "beta" };
+    assert_eq!(first_answer["tasks"][0]["from"], json!("alpha"), "{first_answer}");
+    assert_eq!(
+        (&second_answer["tasks"][0]["moved"], &second_answer["tasks"][0]["from"]),
+        (&json!(true), &json!(first))
+    );
+    assert!(
+        second_said.contains(&format!("NOTE: `{task}` is from project `{first}`, so this command ran there")),
+        "{second_said}"
+    );
+
+    let (messages, worked_in) = about(&last.graph, id).await?;
+    assert!(messages.iter().all(|m| last.graph.owns(m)), "every message is the last destination's");
+    let mut said: Vec<String> = messages.iter().map(|m| ops::text(m.content())).collect::<Result<_>>()?;
+    said.sort();
+    let mut expected = vec![
+        format!("Moved from alpha to {first}."),
+        format!("Moved from {first} to {last_name}."),
+        "the catalog first".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(said, expected, "two comments, one per move");
+    let status = |scope: &str| -> Result<Vec<RelationStatus>> {
+        let scope: EntityId = scope.parse()?;
+        worked_in.iter().filter(|r| r.to_id().ok() == Some(scope)).map(|r| Ok(r.status()?)).collect()
+    };
+    assert_eq!(status(&inbox)?, [RelationStatus::Retracted]);
+    assert_eq!(status(first_scope)?, [RelationStatus::Retracted], "the first destination's scope is taken off");
+    assert_eq!(status(last_scope)?, [RelationStatus::Accepted]);
+    assert!(worked_in.iter().all(|r| last.graph.owns(r)), "every relation from it is the last destination's");
     Ok(())
 }
 

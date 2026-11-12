@@ -20,6 +20,7 @@ use anyhow::{bail, Result};
 use fwd_core::former_ids::FormerIds;
 use fwd_core::model::{RelationKind, RelationView};
 use fwd_core::ops::{self, Kind};
+use fwd_core::project::Paths;
 use fwd_core::project_graph::{Followed, ProjectGraph, Whose};
 use fwd_core::rules;
 use fwd_core::task_move;
@@ -42,8 +43,8 @@ enum PlacedBy<'a> {
     /// The relations `from -kind-> to` that hold (`unlink`), which the project that made them
     /// changes, whichever projects their ends are in.
     Relations { from: &'a str, kind: RelationKind, to: &'a str },
-    /// The tasks `task move` moves to the project `to`, into its scope `to_scope`, which run in the
-    /// project of those not there already (`task_move::place`).
+    /// The tasks `task move` moves to the project `to`, into its scope `to_scope` when it names
+    /// one, which run in the project of those not there already (`task_move::place`).
     Moving { tasks: &'a [String], to: &'a str, to_scope: Option<&'a str> },
 }
 
@@ -158,6 +159,9 @@ pub(crate) struct RunsIn {
     pub(crate) because: String,
     /// The ids typed on the command that placing it resolved.
     pub(crate) typed: Vec<Typed>,
+    /// For `task move`, the move as placing it read it, holding the node's move lock until the
+    /// command ends, which makes it where it was placed (`task_move::Move`).
+    pub(crate) moving: Option<task_move::Move>,
 }
 
 /// Places `command`, which started in `graph`'s project, where it runs: in the project of the
@@ -166,12 +170,16 @@ pub(crate) struct RunsIn {
 /// names (`project_typed`), which no scope overrides, the scope being then a reference like any
 /// other; else in the project of `scope`, the scope it works in as typed (`--scope` or `FWD_SCOPE`
 /// for the CLI, `scope` for the MCP), named by its id or the start of it; otherwise where it
-/// started, the project FWD_PROJECT or the directory names, or an MCP call's `project`.
+/// started, the project FWD_PROJECT or the directory names, or an MCP call's `project`. A task
+/// move is placed under the node's move lock, which the daemon's runtime folder in `paths` holds,
+/// telling `waiting` first when another move holds it (`task_move::MoveLock`).
 pub(crate) async fn runs_in(
     graph: &ProjectGraph,
     command: &Command,
     project_typed: bool,
     scope: Option<&str>,
+    paths: &Paths,
+    waiting: impl FnOnce(),
 ) -> Result<RunsIn> {
     match placed_by(command) {
         Some(PlacedBy::Record { typed, kinds }) => {
@@ -180,6 +188,7 @@ pub(crate) async fn runs_in(
                 project: found.project,
                 because: format!("`{typed}`"),
                 typed: vec![Typed::of(typed, kinds, found.id)],
+                moving: None,
             })
         }
         Some(PlacedBy::Step { task, step }) => {
@@ -189,6 +198,7 @@ pub(crate) async fn runs_in(
                 project: relation_project(graph, edge).await?,
                 because: format!("step `{step}` of `{task}`"),
                 typed: vec![Typed::of(task, TASK, found.id)],
+                moving: None,
             })
         }
         Some(PlacedBy::Relations { from, kind, to }) => {
@@ -213,21 +223,25 @@ pub(crate) async fn runs_in(
                     several.iter().map(project_name).collect::<Vec<_>>().join(", ")
                 ),
             };
-            Ok(RunsIn { project, because: format!("`{from} {kind} {to}`"), typed })
+            Ok(RunsIn { project, because: format!("`{from} {kind} {to}`"), typed, moving: None })
         }
         Some(PlacedBy::Moving { tasks, to, to_scope }) => {
+            // Everything placing reads is read under the lock, so that a move that waited for
+            // another sees what that one did, and runs where the tasks are now.
+            let lock = task_move::MoveLock::take(paths, waiting).await?;
             let mut located = Vec::with_capacity(tasks.len());
             for task in tasks {
                 located.push((task, ops::locate(graph, task, TASK).await?));
             }
             let records: Vec<EntityId> = located.iter().map(|(_, found)| found.id).collect();
             let destination = task_move::Destination::named(graph, to, to_scope).await?;
-            let project = task_move::place(graph, &records, &destination).await?;
+            let placed = task_move::place(graph, &records, destination, lock).await?;
+            let project = placed.runs_in(graph);
             // The note names a task of the project the move runs in, the first typed.
             let first =
                 located.iter().find(|(_, found)| found.project == project).map_or(&tasks[0], |(typed, _)| *typed);
             let typed = located.iter().map(|(task, found)| Typed::of(task, TASK, found.id)).collect();
-            Ok(RunsIn { project, because: format!("`{first}`"), typed })
+            Ok(RunsIn { project, because: format!("`{first}`"), typed, moving: Some(placed) })
         }
         None => match scope.filter(|_| !project_typed) {
             Some(scope) => {
@@ -236,9 +250,10 @@ pub(crate) async fn runs_in(
                     project: found.project,
                     because: format!("the scope `{scope}`"),
                     typed: vec![Typed::of(scope, SCOPE, found.id)],
+                    moving: None,
                 })
             }
-            None => Ok(RunsIn { project: Whose::This, because: String::new(), typed: Vec::new() }),
+            None => Ok(RunsIn { project: Whose::This, because: String::new(), typed: Vec::new(), moving: None }),
         },
     }
 }

@@ -31,6 +31,7 @@ mod claude_code;
 mod dev_runner;
 mod mcp;
 mod mcp_stdio;
+mod moved;
 mod runs_in;
 mod serve;
 mod services;
@@ -966,30 +967,34 @@ enum TaskCommand {
         id: String,
     },
     /// Move tasks to another project, each with everything that belongs to it: its messages and
-    /// their replies, the relations from it and from its messages, its checklist's steps, and the
-    /// former ids of all of these. No connection is cut, copied or rewritten: what points at a
-    /// task, what it depends on, the decisions it cites and every person or agent it names go on
-    /// naming what they named, a person or an agent of the project it left shown with that
-    /// project's name. Its scopes of the project it leaves are taken off it, and it is worked in
-    /// the scope --to-scope names there, which a project with an active scope requires. Each moved
-    /// task gets a comment by you saying where it came from and went, with --note, which tells the
-    /// task's people as a comment does. The command runs in the tasks' project, as you are there,
-    /// and anyone who may amend a task there may move it. Run it again to finish a move that
-    /// stopped partway; a task already wholly there is reported so.
+    /// their replies, the relations from it and from its messages, and the former ids of all of
+    /// these. A relation stays with its `from` end, so a task or a highlight that is one of its
+    /// steps keeps its step where it is, and the checklist still shows it. No connection is cut,
+    /// copied or rewritten: what points at a task, what it depends on, the decisions it cites and
+    /// every person or agent it names go on naming what they named, a person or an agent of the
+    /// project it left shown with that project's name. Its scopes of the project it leaves are
+    /// taken off it, and it is worked in the scope --to-scope names there, or in none without it.
+    /// Each moved task gets a comment by you saying where it came from and went, with --note, which
+    /// tells the task's people as a comment does. The command runs in the tasks' project, as you
+    /// are there, and anyone who may amend a task there may move it. One move runs at a time on the
+    /// daemon's node, so a second waits for the first and sees what it did. Run it again to finish
+    /// a move that stopped partway; a task already wholly there is reported so, and keeps its
+    /// scopes. The tasks come last, after the flags.
     ///
     /// Example:
     ///   fwd task move --to Ankurah --to-scope "Ankurah Commons" --note "Commons work" brrBkooZ ZZERWe7h
+    #[command(override_usage = "fwd task move --to <project> [--to-scope <scope>] [--note <text>] <id>...")]
     Move {
         /// The tasks, by id, the start of one or a former id: all of one project, or in the
-        /// destination already. Flags go before them: an id may start with `-`, so every word after
-        /// the first id is read as another id.
-        #[arg(allow_hyphen_values = true, required = true)]
+        /// destination already. They come last, after the flags: an id may start with `-`, so every
+        /// word after the first id is read as another id.
+        #[arg(allow_hyphen_values = true, required = true, value_parser = task_after_the_flags)]
         ids: Vec<String>,
         /// The project they move to: its name, as `fwd project list` gives it, or its id.
         #[arg(long)]
         to: String,
         /// The scope of that project the tasks are worked in there: its title, its id or the start
-        /// of it.
+        /// of it. Without it they arrive in no scope.
         #[arg(long)]
         to_scope: Option<String>,
         /// Why they move, kept in the comment that records the move; `@handle` and `[[<id>]]` name
@@ -997,6 +1002,20 @@ enum TaskCommand {
         #[arg(long)]
         note: Option<String>,
     },
+}
+
+/// A task `fwd task move` takes, which comes after its flags: a flag of the command given after the
+/// first task, read as a task since an id may start with `-`, is refused with a sentence that says
+/// so, where the parser would say that `--to` was not given. An id has six characters at least,
+/// so only one that starts with `--note` could read as a flag here, and it is named by more of it.
+fn task_after_the_flags(typed: &str) -> std::result::Result<String, String> {
+    let flag = typed.split('=').next().unwrap_or(typed);
+    if ["--to", "--to-scope", "--note"].contains(&flag) {
+        return Err(format!(
+            "`{flag}` comes before the tasks, which come last: an id may start with `-`, so every word after the first task is read as another task; give `fwd task move --to <project> [--to-scope <scope>] [--note <text>] <id>...`"
+        ));
+    }
+    Ok(typed.to_string())
 }
 
 #[derive(Args, Debug)]
@@ -1593,6 +1612,9 @@ struct App {
     /// The ids typed on the command that placing it resolved before it ran ([`runs_in::runs_in`]),
     /// which [`App::id`] gives without reading every project's ids again.
     typed: Vec<runs_in::Typed>,
+    /// For `task move`, the move as placing the command read it, holding the node's move lock
+    /// until the command ends, which `task move` then makes ([`runs_in::RunsIn::moving`]).
+    moving: Option<task_move::Move>,
 }
 
 impl App {
@@ -2576,8 +2598,10 @@ async fn run_cli() -> Result<()> {
     // and says so (docs/DECISIONS.md, D181): it is placed before whom it acts as is found, so that
     // its caller is found, or made, there, and nothing is read for the caller or written where it
     // started.
-    let placing = runs_in::runs_in(&client.graph, &cli.command, project_typed, cli.scope.as_deref());
-    let placed = client.while_connected(placing).await?;
+    let placing = runs_in::runs_in(&client.graph, &cli.command, project_typed, cli.scope.as_deref(), &paths, || {
+        eprintln!("{MOVE_WAITS}")
+    });
+    let mut placed = client.while_connected(placing).await?;
     let (resolved, client) = match &placed.project {
         Whose::Other(there) => {
             let project = NamedProject { id: there.uuid, name: there.name.clone() };
@@ -2588,6 +2612,7 @@ async fn run_cli() -> Result<()> {
     };
     let calling = Calling { subject, typed_as, thread_hook, scope_typed };
     let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
+    app.moving = placed.moving.take();
     if let Whose::Other(there) = &placed.project {
         app.place_in(&placed.because, &there.name);
     }
@@ -2629,8 +2654,11 @@ async fn run_cli() -> Result<()> {
     // only brings the same notifications back at the next pop, while Claude Code drops what a
     // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
     // would reach no one.
+    // A move run again finishes what it began, so its loss says to run it again.
     let client = app.client.as_ref().expect("the CLI connected through its client");
-    let stamped = if writes && words != "inbox pop" {
+    let stamped = if words == "task move" {
+        client.while_finishing(body).await
+    } else if writes && words != "inbox pop" {
         client.while_writing(body).await
     } else {
         client.while_connected(body).await
@@ -2651,6 +2679,11 @@ pub(crate) fn refuse_before_running(command: &Command) -> Result<()> {
         _ => Ok(()),
     }
 }
+
+/// What `fwd task move` says on standard error, and its MCP tool among its notes, while another move
+/// holds the node's move lock (`task_move::MoveLock`).
+pub(crate) const MOVE_WAITS: &str =
+    "fwd: another task move is running on this node; this one waits for it to end, and then sees what it did";
 
 /// What a command whose work was made, but whose stamp of when its principal last wrote failed,
 /// ends with, so that no one runs it again and makes the work twice.
@@ -2787,6 +2820,7 @@ async fn connect(
         format,
         placed_in: None,
         typed,
+        moving: None,
     })
 }
 
@@ -3884,82 +3918,6 @@ async fn task_json(app: &App, id: EntityId) -> Result<Value> {
     ops::json_of_task(&t, Some(&r))
 }
 
-/// What `fwd task move` answers: the project the tasks went to and its scope, and for each task its
-/// id and title, the project it was in, whether this run moved it or found it there already, how
-/// many of each kind of what belongs to it the run took in, the scopes it was taken off and those
-/// it is worked in, each named as `task show` names a scope, and the comment that records the move.
-async fn moved_json(graph: &ProjectGraph, to: &task_move::Destination, moved: &[task_move::Moved]) -> Result<Value> {
-    let scope = to.scope.as_ref().map(|(id, title)| json!({"id": id.to_base64(), "title": title}));
-    let mut tasks = Vec::with_capacity(moved.len());
-    for m in moved {
-        let scopes = |ids: Vec<EntityId>| async move {
-            let mut named = Vec::with_capacity(ids.len());
-            for id in ids {
-                named.push(ops::reference_json(graph, id).await?);
-            }
-            anyhow::Ok(Value::Array(named))
-        };
-        let title = match graph.follow::<TaskView>(m.task).await? {
-            Followed::Held { found, .. } => json!(found.title()?),
-            Followed::NotHeld => Value::Null,
-        };
-        let brought = m.brought;
-        tasks.push(json!({
-            "id": m.task.to_base64(),
-            "title": title,
-            "from": m.from.name,
-            "moved": m.moved,
-            "brought": {
-                "messages": brought.messages,
-                "relations": brought.relations,
-                "steps": brought.steps,
-                "former_ids": brought.former_ids,
-            },
-            "taken_off": scopes(m.taken_off.clone()).await?,
-            "worked_in": scopes(m.worked_in.clone()).await?,
-            "comment": m.comment.map(|c| c.to_base64()),
-        }));
-    }
-    Ok(json!({"to": {"project": to.project.name, "id": to.project.uuid.to_string(), "scope": scope}, "tasks": tasks}))
-}
-
-/// `fwd task move`'s answer for people: where the tasks went, then a line per task saying what the
-/// run moved of it, or that it was there already.
-fn moved_text(v: &Value) -> String {
-    let to = v["to"]["project"].as_str().unwrap_or_default();
-    let mut lines = vec![match v["to"]["scope"]["title"].as_str() {
-        Some(scope) => format!("To {to}, in the scope {scope}:"),
-        None => format!("To {to}, in no scope:"),
-    }];
-    let count = |n: u64, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
-    for t in v["tasks"].as_array().into_iter().flatten() {
-        let id: String = t["id"].as_str().unwrap_or_default().chars().take(8).collect();
-        let task = format!("{id} \"{}\"", t["title"].as_str().unwrap_or_default());
-        let b = &t["brought"];
-        let n = |key: &str| b[key].as_u64().unwrap_or(0);
-        let brought = format!(
-            "{}, {}, {} and {}",
-            count(n("messages"), "message"),
-            count(n("relations"), "relation"),
-            count(n("steps"), "step"),
-            count(n("former_ids"), "former id")
-        );
-        let names = |key: &str| {
-            t[key].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str()).collect::<Vec<_>>().join(", ")
-        };
-        lines.push(if t["moved"] == json!(true) {
-            let off = names("taken_off");
-            let off = if off.is_empty() { String::new() } else { format!("; taken off {off}") };
-            format!("  moved {task} from {}: the task, {brought}{off}", t["from"].as_str().unwrap_or_default())
-        } else if ["messages", "relations", "steps", "former_ids"].iter().all(|k| n(k) == 0) {
-            format!("  {task} is there already")
-        } else {
-            format!("  {task} is there already; took in what was left behind: {brought}")
-        });
-    }
-    lines.join("\n")
-}
-
 /// Everything `fwd task show` prints: the task's fields, its assignee's handle and the scopes it is
 /// worked in ([`with_scopes`]), then its checklist and how much of it is checked.
 async fn task_details(app: &App, id: EntityId) -> Result<Value> {
@@ -5041,18 +4999,11 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 with_scopes(graph, &mut v, id, false).await?;
                 app.print(v)
             }
-            TaskCommand::Move { ids, to, to_scope, note } => {
-                let tasks = app.ids(&ids, &[Kind::Task]).await?;
-                let destination = task_move::Destination::named(graph, &to, to_scope.as_deref()).await?;
-                let moved = task_move::move_tasks(graph, app.me, &tasks, &destination, note.as_deref()).await?;
-                let answer = moved_json(graph, &destination, &moved).await?;
-                match app.format {
-                    Format::Text => {
-                        println!("{}", moved_text(&answer));
-                        Ok(())
-                    }
-                    _ => app.print(answer),
-                }
+            TaskCommand::Move { note, .. } => {
+                let placed =
+                    app.moving.as_ref().context("a task move is placed before it runs (`runs_in::runs_in`)")?;
+                let moved = placed.make(graph, app.me, note.as_deref()).await?;
+                moved::print(app, placed.destination(), &moved).await
             }
         },
         Command::Step { command } => match command {

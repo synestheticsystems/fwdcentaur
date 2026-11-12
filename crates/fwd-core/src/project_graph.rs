@@ -691,7 +691,8 @@ impl ProjectTransaction {
     /// belongs to it (`task_move`), so that what one project grouped another groups, every id that
     /// names the record naming it still. A record of the project already is taken as it is. Every
     /// other change to a record of another project is refused ([`ProjectTransaction::edit`]).
-    pub fn take_in<'rec, 'trx: 'rec, V: InProjectView>(
+    #[cfg(feature = "native")]
+    pub(crate) fn take_in<'rec, 'trx: 'rec, V: InProjectView>(
         &'trx self,
         view: &V,
     ) -> Result<MutableBorrow<'rec, <V::Model as Model>::Mutable>, ProjectGraphError> {

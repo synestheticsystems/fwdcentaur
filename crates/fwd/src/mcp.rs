@@ -262,7 +262,9 @@ impl Operations {
         // runs, as the CLI places a command (`crate::run_cli`). The call's `project` is where it
         // starts, which every call names, as the directory is for the CLI, so a `scope` of another
         // project places a call that acts on no one record.
-        let placed = runs_in::runs_in(&start, &command, false, scoped).await?;
+        let mut waited = false;
+        let mut placed =
+            runs_in::runs_in(&start, &command, false, scoped, self.hosting.paths(), || waited = true).await?;
         let (project, graph) = match &placed.project {
             Whose::Other(there) => self
                 .hosting
@@ -330,7 +332,11 @@ impl Operations {
             format: Format::Json,
             placed_in: None,
             typed: placed.typed,
+            moving: placed.moving.take(),
         };
+        if waited {
+            app.note(crate::MOVE_WAITS);
+        }
         if let Whose::Other(there) = &placed.project {
             app.place_in(&placed.because, &there.name);
         }

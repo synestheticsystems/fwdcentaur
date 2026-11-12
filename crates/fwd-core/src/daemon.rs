@@ -246,6 +246,13 @@ pub enum Lost {
         "the connection to the daemon on port {port} closed while this command ran, so what it wrote may not have reached the daemon; look (fwd task show, fwd message show) before writing it again"
     )]
     Unconfirmed { port: u16 },
+    /// As [`Lost::Unconfirmed`], for a command whose second run finishes what the first began, a
+    /// task's move to another project, which finds made what it made and makes the rest, so that
+    /// running it again is the way on.
+    #[error(
+        "the connection to the daemon on port {port} closed while this command ran, so what it wrote may not all have reached the daemon; run the same command again, which finishes what this one began"
+    )]
+    Unfinished { port: u16 },
 }
 
 /// The daemon the port file names now, when the socket joined through `joined` is closed and that
@@ -321,14 +328,26 @@ impl Client {
     /// [`Lost::Moved`] tell a command that reads, is left out on purpose: the next command finds
     /// the daemon wherever it is, so it changes nothing the writer does next.
     pub async fn while_writing<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
-        let port = self.pf.port;
+        self.writing(work, Lost::Unconfirmed { port: self.pf.port }).await
+    }
+
+    /// Runs `work` as [`Client::while_writing`] does, for a command whose second run finishes what
+    /// the first began (a task's move to another project), which ends with [`Lost::Unfinished`]
+    /// where that ends with [`Lost::Unconfirmed`], since running it again is safe.
+    pub async fn while_finishing<T>(&self, work: impl Future<Output = Result<T>>) -> Result<T> {
+        self.writing(work, Lost::Unfinished { port: self.pf.port }).await
+    }
+
+    /// Runs `work`, which writes, ending it with `unconfirmed` once its socket has closed at any
+    /// moment while it ran ([`Client::while_writing`]).
+    async fn writing<T>(&self, work: impl Future<Output = Result<T>>, unconfirmed: Lost) -> Result<T> {
         if self.has_closed() {
-            return Err(Lost::BeforeWriting { port }.into());
+            return Err(Lost::BeforeWriting { port: self.pf.port }.into());
         }
         match self.watching(work).await {
             Ok(done) if !self.has_closed() => done,
-            Ok(Err(error)) => Err(error.context(Lost::Unconfirmed { port })),
-            Ok(Ok(_)) | Err(_) => Err(Lost::Unconfirmed { port }.into()),
+            Ok(Err(error)) => Err(error.context(unconfirmed)),
+            Ok(Ok(_)) | Err(_) => Err(unconfirmed.into()),
         }
     }
 
