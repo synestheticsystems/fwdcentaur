@@ -585,6 +585,31 @@ async fn a_write_through_another_projects_id_is_made_there_by_the_caller_there_a
     Ok(())
 }
 
+/// A command typed in alpha whose record is beta's, refused in beta for its caller, an agent alpha
+/// holds and beta does not, says that it ran in beta, and each command the refusal suggests carries
+/// beta, since run in alpha's checkout it would run in alpha: a comment, and a move of beta's task.
+#[tokio::test]
+async fn a_refusal_in_the_project_a_command_ran_in_names_it_and_what_it_suggests_runs_there() -> Result<()> {
+    let Two { daemon, a: _, b, alpha: _, beta: _ } = Two::new().await?;
+    daemon.json(&daemon.alpha, &["--as", "lead-alba", "principal", "add", "lead-alba", "--role", "lead"])?;
+    let named = &b.retry[..8];
+    for args in [
+        vec!["--as", "lead-alba", "comment", named, "from alpha's lead"],
+        vec!["--as", "lead-alba", "task", "move", "--to", "alpha", named],
+    ] {
+        let refused = daemon.output(&daemon.alpha, &args)?.expect_err("beta holds no lead-alba");
+        let ran = format!("`{named}` is from project `beta`, so this command ran there: no principal of this project is named `lead-alba`");
+        assert!(refused.contains(&ran), "fwd {}: {refused}", args.join(" "));
+        assert!(
+            refused.contains("`fwd --project 'beta' principal add lead-alba --role ")
+                && refused.contains("`fwd --project 'beta' init`"),
+            "fwd {}: {refused}",
+            args.join(" ")
+        );
+    }
+    Ok(())
+}
+
 /// A notification of beta's, named in alpha by its whole id as by the start of it, is read in beta,
 /// by its recipient there.
 #[tokio::test]

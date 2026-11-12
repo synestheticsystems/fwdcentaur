@@ -9,7 +9,6 @@
 //! they lead. One project's graph changes none of the other's records.
 
 use ankurah::changes::ChangeSet;
-use ankurah::error::RetrievalError;
 use ankurah::property::{Json, Ref};
 use ankurah::signals::{Get, Subscribe};
 use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, LiveQuery, Node, PermissiveAgent, View};
@@ -306,10 +305,14 @@ async fn one_projects_graph_changes_none_of_the_others_records() -> Result<()> {
     let a = populate(&alpha).await?;
     let b = populate(&beta).await?;
 
-    // Read by its id through alpha's graph, beta's record is not alpha's to change: a command whose
-    // subject it is runs in beta.
+    // Read by its id through alpha's graph, beta's record is not alpha's to change, and the refusal
+    // names beta: a command whose subject it is runs in beta.
     let refused = alpha.get::<TaskView>(b.retry).await.expect_err("beta's task");
-    assert!(matches!(refused, RetrievalError::EntityNotFound(id) if id == b.retry), "{refused:?}");
+    assert!(
+        matches!(&refused, ProjectGraphError::InAnotherProject { record, project, here }
+            if *record == b.retry && project == "beta" && here == "alpha"),
+        "{refused:?}"
+    );
     let theirs: TaskView = beta.get(b.retry).await?;
     let trx = alpha.begin();
     let edited = trx.edit(&theirs).map(|_| ()).expect_err("alpha's transaction edits none of beta's records");

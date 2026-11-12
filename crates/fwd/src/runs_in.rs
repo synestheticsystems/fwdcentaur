@@ -17,11 +17,12 @@ use crate::{
 };
 use ankurah::EntityId;
 use anyhow::{bail, Result};
+use fwd_core::daemon;
 use fwd_core::former_ids::FormerIds;
 use fwd_core::model::{RelationKind, RelationView};
 use fwd_core::ops::{self, Kind};
 use fwd_core::project::Paths;
-use fwd_core::project_graph::{Followed, ProjectGraph, Whose};
+use fwd_core::project_graph::{Followed, ProjectGraph, ProjectGraphError, Whose};
 use fwd_core::rules;
 use fwd_core::task_move;
 
@@ -162,6 +163,96 @@ pub(crate) struct RunsIn {
     /// For `task move`, the move as placing it read it, holding the node's move lock until the
     /// command ends, which makes it where it was placed (`task_move::Move`).
     pub(crate) moving: Option<task_move::Move>,
+}
+
+impl RunsIn {
+    /// What a failure of the command, once placed, says of where it ran ([`RanIn::failure`]).
+    pub(crate) fn ran_in(&self) -> RanIn {
+        RanIn {
+            elsewhere: match &self.project {
+                Whose::Other(there) => Some(there.name.clone()),
+                Whose::This => None,
+            },
+            because: self.because.clone(),
+            found: self.typed.iter().map(|t| (t.text.clone(), t.record)).collect(),
+        }
+    }
+}
+
+/// Where a command ran, as a failure of it once placed says it ([`RanIn::failure`]).
+pub(crate) struct RanIn {
+    /// The project the command ran in, when placing it put it in another than the one it started
+    /// in.
+    elsewhere: Option<String>,
+    /// What placed it there, as its note names it ([`RunsIn::because`]).
+    because: String,
+    /// The records placing it found, each with what was typed for it.
+    found: Vec<(String, EntityId)>,
+}
+
+impl RanIn {
+    /// `error`, which ended the command once it was placed, as whoever ran it reads it, so that
+    /// nothing it says sends them to the wrong project: when a record the command acts on moved to
+    /// another project while it ran (`ProjectGraph::get` refusing it,
+    /// `ProjectGraphError::InAnotherProject`), it names where the record is now and says to run the
+    /// command again, which runs there; when the command ran in another project than the one it
+    /// started in, it names that project, and every `fwd` command it suggests carries `--project`
+    /// naming it, since run where the caller is it would run in the project the caller started in.
+    /// A lost connection to the daemon (`daemon::Lost`) is left as it is: it says what to do
+    /// itself, and its exit code tells it.
+    pub(crate) fn failure(&self, error: anyhow::Error) -> anyhow::Error {
+        if error.chain().any(|e| e.is::<daemon::Lost>()) {
+            return error;
+        }
+        let moved = error.chain().find_map(|e| match e.downcast_ref::<ProjectGraphError>() {
+            Some(ProjectGraphError::InAnotherProject { record, project, here }) => {
+                let (typed, _) = self.found.iter().find(|(_, found)| found == record)?;
+                Some(Failed::Moved { typed: typed.clone(), now: project.clone(), ran: here.clone() })
+            }
+            _ => None,
+        });
+        match (moved, &self.elsewhere) {
+            (Some(moved), _) => moved.into(),
+            (None, Some(project)) => Failed::There {
+                because: self.because.clone(),
+                project: project.clone(),
+                failure: suggesting_project(&format!("{error:#}"), project),
+            }
+            .into(),
+            (None, None) => error,
+        }
+    }
+}
+
+/// How a command failed once it was placed, as [`RanIn::failure`] says it.
+#[derive(Debug, thiserror::Error)]
+enum Failed {
+    /// A record it acts on, `typed` on its command line, moved to the project `now` while it ran in
+    /// `ran`.
+    #[error("`{typed}` moved to project `{now}` while this command ran in `{ran}`; run the command again, and it runs there")]
+    Moved { typed: String, now: String, ran: String },
+    /// It ran in `project`, because `because` is from there, and `failure`, its whole chain with
+    /// every command it suggests carrying that project, says why it failed.
+    #[error("{because} is from project `{project}`, so this command ran there: {failure}")]
+    There { because: String, project: String, failure: String },
+}
+
+/// `text` with each `fwd` command it suggests in backticks run in `project`: `--project` naming it
+/// put after `fwd`, unless the command names a project already.
+fn suggesting_project(text: &str, project: &str) -> String {
+    let flag = format!("--project '{}' ", project.replace('\'', r"'\''"));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("`fwd ") {
+        let (before, after) = rest.split_at(at + "`fwd ".len());
+        out.push_str(before);
+        if !after.starts_with("--project") {
+            out.push_str(&flag);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Places `command`, which started in `graph`'s project, where it runs: in the project of the
@@ -341,5 +432,52 @@ pub(crate) async fn scope_named(graph: &ProjectGraph, typed: &[Typed], scope: &s
     match typed_record(typed, scope, SCOPE) {
         Some(record) => Ok(record),
         None => ops::resolve_id(graph, scope, SCOPE).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The refusal `ProjectGraph::get` gives for `record`, a record of Fwd Centaur read through
+    /// Personal's graph, as a command's own context wraps it.
+    fn read_in_personal(record: EntityId) -> anyhow::Error {
+        let (project, here) = ("Fwd Centaur".into(), "Personal".into());
+        anyhow::Error::new(ProjectGraphError::InAnotherProject { record, project, here })
+            .context("the task being amended")
+    }
+
+    /// A record placing the command found that moved to another project while the command ran
+    /// ends it saying where the record is now and to run it again, whether the command ran where
+    /// it started or in another project; a refusal for a record placing did not find is left as
+    /// it is where the command ran where it started.
+    #[test]
+    fn a_record_that_moved_while_the_command_ran_is_named_with_where_it_is_now() {
+        let task = EntityId::random();
+        for elsewhere in [None, Some("Personal".to_string())] {
+            let ran_in = RanIn { elsewhere, because: "`1K30VkQg`".into(), found: vec![("1K30VkQg".into(), task)] };
+            assert_eq!(
+                ran_in.failure(read_in_personal(task)).to_string(),
+                "`1K30VkQg` moved to project `Fwd Centaur` while this command ran in `Personal`; run the command again, and it runs there"
+            );
+        }
+        let ran_in = RanIn { elsewhere: None, because: String::new(), found: vec![("1K30VkQg".into(), task)] };
+        let unchanged = ran_in.failure(read_in_personal(EntityId::random()));
+        assert!(unchanged.downcast_ref::<ProjectGraphError>().is_some(), "{unchanged:#}");
+    }
+
+    /// A failure of a command that ran in another project names it, and each `fwd` command it
+    /// suggests runs there, unless it names its project already; a lost connection to the daemon
+    /// is left as it is, for its exit code.
+    #[test]
+    fn a_failure_where_the_command_ran_elsewhere_names_it_and_suggests_commands_that_run_there() {
+        let ran_in = RanIn { elsewhere: Some("Ankurah's".into()), because: "`1K30VkQg`".into(), found: Vec::new() };
+        let failed = anyhow::anyhow!("run `fwd init`, or `fwd --project 'x' scope list`; fwd: a note");
+        assert_eq!(
+            ran_in.failure(failed).to_string(),
+            r"`1K30VkQg` is from project `Ankurah's`, so this command ran there: run `fwd --project 'Ankurah'\''s' init`, or `fwd --project 'x' scope list`; fwd: a note"
+        );
+        let lost = ran_in.failure(daemon::Lost::Closed { port: 1 }.into());
+        assert!(lost.downcast_ref::<daemon::Lost>().is_some(), "{lost:#}");
     }
 }

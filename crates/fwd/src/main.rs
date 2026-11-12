@@ -2602,72 +2602,79 @@ async fn run_cli() -> Result<()> {
         eprintln!("{MOVE_WAITS}")
     });
     let mut placed = client.while_connected(placing).await?;
-    let (resolved, client) = match &placed.project {
-        Whose::Other(there) => {
-            let project = NamedProject { id: there.uuid, name: there.name.clone() };
-            let client = daemon::ensure_daemon(&paths, &project, autostart(&cli)?).await?;
-            (Resolved { project, ..resolved }, client)
-        }
-        Whose::This => (resolved, client),
-    };
-    let calling = Calling { subject, typed_as, thread_hook, scope_typed };
-    let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
-    app.moving = placed.moving.take();
-    if let Whose::Other(there) = &placed.project {
-        app.place_in(&placed.because, &there.name);
-    }
-    // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
-    // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
-    // after it, as a question a retired triage agent never heard of reaches the next one (task
-    // Wbkkwpyq; docs/design/agents-and-inbox.md, rule 5 of the routing rules).
-    if hooked.is_some() {
-        let active = match app.acting {
-            Some(me) => app.graph().get::<PrincipalView>(me).await?.active()?,
-            None => false,
+    // A failure once the command is placed says where it ran, and what it suggests runs there
+    // (`runs_in::RanIn::failure`).
+    let ran_in = placed.ran_in();
+    let ran = async move {
+        let (resolved, client) = match &placed.project {
+            Whose::Other(there) => {
+                let project = NamedProject { id: there.uuid, name: there.name.clone() };
+                let client = daemon::ensure_daemon(&paths, &project, autostart(&cli)?).await?;
+                (Resolved { project, ..resolved }, client)
+            }
+            Whose::This => (resolved, client),
         };
-        if !active {
-            return Ok(());
+        let calling = Calling { subject, typed_as, thread_hook, scope_typed };
+        let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
+        app.moving = placed.moving.take();
+        if let Whose::Other(there) = &placed.project {
+            app.place_in(&placed.because, &there.name);
         }
-    }
-    let words = command_words(&matches).0;
-    let writes = joining || WRITES_TOO.contains(&words.as_str());
-    let stamping = stamps(joining, &words);
-    refuse_by_identity(&app, &cli.command, writes).await?;
-    // The watch takes the connection for itself, to open it again when the daemon restarts; it
-    // writes nothing, so it makes no one belong.
-    if let Command::Watch { for_handle, timeout, count } = cli.command {
-        let who = principal_for(&app, for_handle.as_deref()).await?;
-        if let Some(guidance) = lead_guidance(app.graph(), who, app.scope).await? {
-            eprintln!("{guidance}");
+        // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
+        // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
+        // after it, as a question a retired triage agent never heard of reaches the next one (task
+        // Wbkkwpyq; docs/design/agents-and-inbox.md, rule 5 of the routing rules).
+        if hooked.is_some() {
+            let active = match app.acting {
+                Some(me) => app.graph().get::<PrincipalView>(me).await?.active()?,
+                None => false,
+            };
+            if !active {
+                return Ok(());
+            }
         }
-        say_unbound(&app).await?;
-        // The watch ends the process itself, after its last line or an error (`watch::run`).
-        match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
+        let words = command_words(&matches).0;
+        let writes = joining || WRITES_TOO.contains(&words.as_str());
+        let stamping = stamps(joining, &words);
+        refuse_by_identity(&app, &cli.command, writes).await?;
+        // The watch takes the connection for itself, to open it again when the daemon restarts; it
+        // writes nothing, so it makes no one belong.
+        if let Command::Watch { for_handle, timeout, count } = cli.command {
+            let who = principal_for(&app, for_handle.as_deref()).await?;
+            if let Some(guidance) = lead_guidance(app.graph(), who, app.scope).await? {
+                eprintln!("{guidance}");
+            }
+            say_unbound(&app).await?;
+            // The watch ends the process itself, after its last line or an error (`watch::run`).
+            match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
+        }
+        let command = cli.command;
+        let body = run_as_caller(&app, command, joining, stamping);
+        // A command whose daemon goes away while it runs ends within a bound and says so, rather than
+        // with Ankurah's words for a read that found no daemon (`Client::while_connected`). One that
+        // writes also ends so whenever its socket closed while it ran, even when it succeeded, since
+        // a commit its node made meanwhile reached no daemon (`Client::while_writing`). `inbox pop`
+        // writes, marking what it prints as read, but runs as a read: a mark that reached no daemon
+        // only brings the same notifications back at the next pop, while Claude Code drops what a
+        // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
+        // would reach no one.
+        // A move run again finishes what it began, so its loss says to run it again.
+        let client = app.client.as_ref().expect("the CLI connected through its client");
+        let stamped = if words == "task move" {
+            client.while_finishing(body).await
+        } else if writes && words != "inbox pop" {
+            client.while_writing(body).await
+        } else {
+            client.while_connected(body).await
+        }?;
+        // A stamp the daemon never got ended the command above as a lost write does. One that failed
+        // with the socket open failed after the command's work was made, and a bare error would invite
+        // running the command again, which would make the work twice: the error says that the work
+        // is recorded.
+        stamped.context(STAMP_FAILED)
     }
-    let command = cli.command;
-    let body = run_as_caller(&app, command, joining, stamping);
-    // A command whose daemon goes away while it runs ends within a bound and says so, rather than
-    // with Ankurah's words for a read that found no daemon (`Client::while_connected`). One that
-    // writes also ends so whenever its socket closed while it ran, even when it succeeded, since
-    // a commit its node made meanwhile reached no daemon (`Client::while_writing`). `inbox pop`
-    // writes, marking what it prints as read, but runs as a read: a mark that reached no daemon
-    // only brings the same notifications back at the next pop, while Claude Code drops what a
-    // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
-    // would reach no one.
-    // A move run again finishes what it began, so its loss says to run it again.
-    let client = app.client.as_ref().expect("the CLI connected through its client");
-    let stamped = if words == "task move" {
-        client.while_finishing(body).await
-    } else if writes && words != "inbox pop" {
-        client.while_writing(body).await
-    } else {
-        client.while_connected(body).await
-    }?;
-    // A stamp the daemon never got ended the command above as a lost write does. One that failed
-    // with the socket open failed after the command's work was made, and a bare error would invite
-    // running the command again, which would make the work twice: the error says that the work
-    // is recorded.
-    stamped.context(STAMP_FAILED)
+    .await;
+    ran.map_err(|error| ran_in.failure(error))
 }
 
 /// Refuses, before anything is read or written, a command the CLI refuses for its arguments alone:

@@ -135,6 +135,12 @@ pub enum ProjectGraphError {
         .project.to_base64()
     )]
     OfAnotherProject { record: EntityId, project: EntityId },
+    /// A record read by its id through the graph of the project named `here`
+    /// ([`ProjectGraph::get`]) is a record of the project named `project`: a command that acts on
+    /// a record runs in the record's project, so a command whose record moved there while it ran
+    /// ends with this, and runs there when it is run again.
+    #[error("{} is a record of project `{project}`, not of `{here}`, whose graph read it by its id", .record.to_base64())]
+    InAnotherProject { record: EntityId, project: String, here: String },
     #[error(transparent)]
     Retrieval(Box<RetrievalError>),
     #[error(transparent)]
@@ -319,15 +325,23 @@ impl ProjectGraph {
         self.ctx.query(self.everything())
     }
 
-    /// The project's record `id`, read as `V`. A record of another project is not found here, as
-    /// an id that names nothing is not: a command that acts on a record of another project runs in
-    /// that project's graph, and an id a record holds is followed
-    /// ([`ProjectGraph::follow`]).
-    pub async fn get<V: InProjectView>(&self, id: EntityId) -> Result<V, RetrievalError> {
+    /// The project's record `id`, read as `V`. A record of another project is refused, naming
+    /// that project ([`ProjectGraphError::InAnotherProject`]): a command that acts on a record of
+    /// another project runs in that project's graph, and an id a record holds is followed
+    /// ([`ProjectGraph::follow`]). A record that names a project the node holds no record of is
+    /// not found here, as an id that names nothing is not.
+    pub async fn get<V: InProjectView>(&self, id: EntityId) -> Result<V, ProjectGraphError> {
         let view: V = self.ctx.get(id).await?;
-        match view.project_id() {
-            Ok(project) if project == self.project => Ok(view),
-            _ => Err(RetrievalError::EntityNotFound(id)),
+        let project = view.project_id()?;
+        if project == self.project {
+            return Ok(view);
+        }
+        match self.whose(project).await? {
+            Some(Whose::Other(there)) => {
+                let here: ProjectView = self.ctx.get(self.project).await?;
+                Err(ProjectGraphError::InAnotherProject { record: id, project: there.name, here: here.name()? })
+            }
+            Some(Whose::This) | None => Err(RetrievalError::EntityNotFound(id).into()),
         }
     }
 
