@@ -243,6 +243,11 @@ async fn a_typed_id_a_held_id_and_a_records_relations_reach_the_other_project_an
         assert_eq!(found.id, record, "`{named}` names beta's record");
         beta_named(&found.project);
     }
+    // A notification's whole id, as `read`, `dismiss` and `reply` take it, names beta's too.
+    let told = ops::inbox(&beta, b.alice, false).await?.first().map(View::id).expect("her question's notification");
+    let found = ops::locate(&alpha, &told.to_base64(), &[Kind::Message, Kind::Notification]).await?;
+    assert_eq!(found.id, told);
+    beta_named(&found.project);
     assert_eq!(ops::locate(&alpha, &start(a.retry), ops::ANY).await?.project, Whose::This);
     assert_eq!(ops::resolve_id(&alpha, "D1", &[Kind::Decision]).await?, a.decision, "D1 is alpha's own D1");
     assert_eq!(ops::resolve_id(&alpha, &a.cited.to_base64(), ops::ANY).await?, a.retry, "alpha's own former id");

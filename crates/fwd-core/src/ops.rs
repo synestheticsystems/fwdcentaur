@@ -8,7 +8,7 @@
 use crate::former_ids::FormerIds;
 use crate::model::*;
 use crate::naming;
-use crate::project_graph::{Followed, ProjectGraph, ProjectTransaction, Referent, Whose};
+use crate::project_graph::{Followed, InProjectView, ProjectGraph, ProjectTransaction, Referent, Whose};
 use crate::query::{with_id, with_ids, with_string};
 use crate::references::Named;
 use crate::rules::{self, DecisionMove, Edge, Readiness, TaskSnapshot, Verb};
@@ -4738,6 +4738,28 @@ impl Kind {
             Kind::Principal => graph.ids_in_every_project::<PrincipalView>().await?,
         })
     }
+
+    /// The record of this kind that the whole id `id` names, wherever in the node it is
+    /// (`ProjectGraph::follow`, which reads an id the record had before it was renumbered as its
+    /// id): its id now and its project; none when the node holds no record of this kind by it.
+    async fn follow(self, graph: &ProjectGraph, id: EntityId) -> Result<Option<(EntityId, Whose)>> {
+        async fn held<V: InProjectView>(graph: &ProjectGraph, id: EntityId) -> Result<Option<(EntityId, Whose)>> {
+            Ok(match graph.follow::<V>(id).await? {
+                Followed::Held { record, project, .. } => Some((record, project)),
+                Followed::NotHeld => None,
+            })
+        }
+        match self {
+            Kind::Task => held::<TaskView>(graph, id).await,
+            Kind::Message => held::<MessageView>(graph, id).await,
+            Kind::Decision => held::<DecisionView>(graph, id).await,
+            Kind::Scope => held::<ScopeView>(graph, id).await,
+            Kind::Anchor => held::<CodeAnchorView>(graph, id).await,
+            Kind::Relation => held::<RelationView>(graph, id).await,
+            Kind::Notification => held::<NotificationView>(graph, id).await,
+            Kind::Principal => held::<PrincipalView>(graph, id).await,
+        }
+    }
 }
 
 /// Every kind of entity a command line names by id.
@@ -4765,19 +4787,22 @@ pub struct Located {
 /// least six characters of the id of exactly one entity among `kinds`, of this project when one
 /// of its entities has an id that starts so, else of any project. An id the entity had before it
 /// was renumbered (`former_ids`), kept by any project, counts as its id, whole or as a prefix,
-/// beside its current one. A full id is taken as it is (the command then says
-/// whether it can use it), or for a former id as the entity it names now; a prefix that matches
-/// several entities is refused with each of them listed, with its project when that is another,
-/// and one that matches none is refused plainly. `D<number>` is read as a decision's number first.
+/// beside its current one. A full id names the entity among `kinds` that has it, or had it before
+/// it was renumbered, in whichever project that is; one that names none is taken as it is, in this
+/// project, and the command then says whether it can use it. A prefix that matches several
+/// entities is refused with each of them listed, with its project when that is another, and one
+/// that matches none is refused plainly. `D<number>` is read as a decision's number first.
 /// With five digits or more it is also long enough to be the start of an id, and it is tried as
 /// one when no decision has that number; while one has, it names that decision, which a command
 /// that takes no decision refuses.
 pub async fn locate(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result<Located> {
     if let Ok(id) = s.parse::<EntityId>() {
-        return Ok(match graph.follow_any(id).await? {
-            Followed::Held { record, project, .. } => Located { id: record, project },
-            Followed::NotHeld => Located { id, project: Whose::This },
-        });
+        for kind in kinds {
+            if let Some((record, project)) = kind.follow(graph, id).await? {
+                return Ok(Located { id: record, project });
+            }
+        }
+        return Ok(Located { id, project: Whose::This });
     }
     let numbered: Vec<EntityId> = match rules::decision_number(s) {
         Some(n) => decisions(graph).await?.iter().filter(|d| d.number().ok() == Some(n)).map(|d| d.id()).collect(),
