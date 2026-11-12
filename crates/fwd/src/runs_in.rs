@@ -196,9 +196,9 @@ impl RanIn {
     /// another project while it ran (`ProjectGraph::get` refusing it,
     /// `ProjectGraphError::InAnotherProject`), it names where the record is now and says to run the
     /// command again, which runs there; when the command ran in another project than the one it
-    /// started in, it names that project, and ends saying that the commands it suggests are for
-    /// that project too and how to run one there, since run where the caller is one would run in
-    /// the project the caller started in. A lost connection to the daemon (`daemon::Lost`) is left
+    /// started in, it names that project, and ends saying that any command it suggests is for that
+    /// project too and how to run it there, since such a command, run where the caller is, would
+    /// run in the project the caller started in. A lost connection to the daemon (`daemon::Lost`) is left
     /// as it is, with the error it caused as its source, for `main` to end the command with its exit
     /// code at once: the daemon's client attaches it to that error as its context
     /// (`Client::while_connected`), which anyhow's typed check finds and a walk of the error's
@@ -234,9 +234,9 @@ enum Failed {
     #[error("`{typed}` moved to project `{now}` while this command ran in `{ran}`; run the command again, and it runs there")]
     Moved { typed: String, now: String, ran: String },
     /// It ran in `project`, because `because` is from there, and failed for `why`, its error's
-    /// whole chain, whose suggestions are for that project too.
+    /// whole chain, whose suggestions, if it makes any, are for that project too.
     #[error(
-        "{because} is from project `{project}`, so this command ran there: {why}. The commands this suggests are for project `{project}` too: run one there with `--project '{quoted}'`, or from one of its checkouts",
+        "{because} is from project `{project}`, so this command ran there: {why}. Any command suggested above is for project `{project}` too: run it there with `--project '{quoted}'`, or from one of its checkouts",
         quoted = .project.replace('\'', r"'\''")
     )]
     There { because: String, project: String, why: String },
@@ -454,8 +454,8 @@ mod tests {
     }
 
     /// A failure of a command that ran in another project names it, keeps what it says as it is,
-    /// and ends saying that the commands it suggests are for that project too and how to run one
-    /// there.
+    /// and ends saying that any command it suggests is for that project too and how to run it
+    /// there, which holds as well of a failure that suggests none.
     #[test]
     fn a_failure_where_the_command_ran_elsewhere_names_it_and_says_its_suggestions_are_for_it_too() {
         let ran_in = RanIn { elsewhere: Some("Ankurah's".into()), because: "`1K30VkQg`".into(), found: Vec::new() };
@@ -463,7 +463,12 @@ mod tests {
             .context("the task being amended");
         assert_eq!(
             ran_in.failure(failed).to_string(),
-            r"`1K30VkQg` is from project `Ankurah's`, so this command ran there: the task being amended: run `fwd init --project beta`, or name `fwd x` as it was typed. The commands this suggests are for project `Ankurah's` too: run one there with `--project 'Ankurah'\''s'`, or from one of its checkouts"
+            r"`1K30VkQg` is from project `Ankurah's`, so this command ran there: the task being amended: run `fwd init --project beta`, or name `fwd x` as it was typed. Any command suggested above is for project `Ankurah's` too: run it there with `--project 'Ankurah'\''s'`, or from one of its checkouts"
+        );
+        let suggests_nothing = anyhow::anyhow!("the task is done already");
+        assert_eq!(
+            ran_in.failure(suggests_nothing).to_string(),
+            r"`1K30VkQg` is from project `Ankurah's`, so this command ran there: the task is done already. Any command suggested above is for project `Ankurah's` too: run it there with `--project 'Ankurah'\''s'`, or from one of its checkouts"
         );
     }
 
