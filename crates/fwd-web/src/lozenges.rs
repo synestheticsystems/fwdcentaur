@@ -644,7 +644,7 @@ pub fn follow(target: Target) {
     if revealed(target) {
         return;
     }
-    match far_project(target) {
+    match elsewhere(target) {
         None => {
             if let Some(to) = destination(target) {
                 route::go(to);
@@ -663,14 +663,14 @@ pub fn follow(target: Target) {
 /// the writes of this page, made in its own project, would not reach. Nothing for one of the page's
 /// own, or on a page pinned to its project.
 pub fn open_in_its_project(target: Target) {
-    if far_project(target).is_some() {
+    if elsewhere(target).is_some() {
         follow(target);
     }
 }
 
 /// The project of the record `target` names, when it is another than the page's: a link to it
 /// leads to that project's page.
-fn far_project(target: Target) -> Option<ProjectRecord> {
+fn elsewhere(target: Target) -> Option<ProjectRecord> {
     match target {
         Target::Task(id) => store::task(id).and_then(|v| store::elsewhere(&v)),
         Target::Decision(id) => store::decision(id).and_then(|v| store::elsewhere(&v)),
@@ -687,7 +687,7 @@ fn far_project(target: Target) -> Option<ProjectRecord> {
 /// project on a page pinned to its own (the VS Code webview).
 pub fn href(target: Target) -> Option<String> {
     let to = destination(target)?;
-    match far_project(target) {
+    match elsewhere(target) {
         None => Some(to.hash()),
         Some(project) => session::url_in(&project.uuid.to_string(), &to),
     }
