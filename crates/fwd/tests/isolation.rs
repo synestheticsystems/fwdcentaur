@@ -461,8 +461,9 @@ async fn renumbered(client: &Client, former: &str, record: EntityId) -> Result<(
 /// An id a record of alpha's had before it was renumbered names that record wherever a command takes
 /// an id, whole or as a prefix: `--as` for a principal, a scope by name or id, a checklist step by
 /// its relation or by what it is, any record's argument, and the scope a checkout is bound to.
-/// Typed in beta as a record's argument, it names alpha's record, where the command runs; as a
-/// principal's, a scope's or a step's name, which are each project's own, it names nothing in beta.
+/// Typed in beta as a record's argument, it names alpha's record, where the command runs, and as a
+/// scope's id it names alpha's scope, which a ruling of beta's may govern; as a principal's name or
+/// a step of beta's checklist, which are each project's own, it names nothing in beta.
 #[tokio::test]
 async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_and_as_a_records_argument_in_any_project(
 ) -> Result<()> {
@@ -517,15 +518,15 @@ async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_and_as_a_re
         "the checkout's binding names its scope through the former id: {here}"
     );
 
-    for args in [
-        vec!["--as", as_alice.as_str(), "whoami"],
-        vec!["decision", "attach", "D1", &as_scope],
-        vec!["decision", "list", "--attached", &as_scope],
-        vec!["step", "check", &b.retry, &as_step],
-    ] {
+    for args in [vec!["--as", as_alice.as_str(), "whoami"], vec!["step", "check", &b.retry, &as_step]] {
         let refused = daemon.output(&daemon.beta, &args)?;
         assert!(refused.is_err(), "fwd {} in beta found what alpha's former id names: {refused:?}", args.join(" "));
     }
+    let attached = daemon.json(&daemon.beta, &["decision", "attach", "D1", &as_scope])?;
+    assert_eq!((&attached["scope"], &attached["scope_title"]), (&json!(a.scope), &json!("Replication in alpha")));
+    let listed = daemon.json(&daemon.beta, &["decision", "list", "--attached", &as_scope[..8]])?;
+    let refs: Vec<&Value> = listed.as_array().into_iter().flatten().map(|d| &d["ref"]).collect();
+    assert_eq!(refs, vec!["D1"], "beta's D1, attached to alpha's scope: {listed}");
     for (args, record) in
         [(vec!["task", "show", &as_cap], &a.cap), (vec!["message", "show", &as_question[..8]], &a.question)]
     {

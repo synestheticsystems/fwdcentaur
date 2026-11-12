@@ -3105,7 +3105,7 @@ fn a_scope_is_named_by_its_title_or_its_id_among_scopes_in_hand() {
     assert!(ops::scope_by_name(&gone.to_base64(), &scopes, &FormerIds::default())
         .unwrap_err()
         .to_string()
-        .starts_with("no scope of this project"));
+        .starts_with("no scope has the id"));
 }
 
 /// A start never moves a task out of the scope someone chose for it (docs/DECISIONS.md, D87,
@@ -3960,14 +3960,14 @@ async fn a_decision_is_attached_to_the_scope_it_governs_and_detached_to_govern_t
     // A scope that does not exist, or that is something else, is refused, and nothing is written.
     let nowhere = EntityId::random();
     let err = ops::attach_decision(&graph, c.daniel, billed, nowhere).await.unwrap_err().to_string();
-    assert_eq!(err, format!("no scope of this project has the id {nowhere}, so no ruling can be attached to it"));
+    assert_eq!(err, format!("no scope has the id {nowhere}, so no ruling can be attached to it"));
     let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
     assert!(ops::attach_decision(&graph, c.daniel, billed, t).await.is_err(), "a task is not a scope");
     assert_eq!(governs(&graph, billed).await?, Some(hosting), "the refusals change nothing");
     let filed = ops::decisions(&graph).await?.len();
     let astray = ops::CreateDecision { scope: Some(nowhere), ..ruling("Nowhere to govern") };
     let err = ops::create_decision(&graph, c.daniel, astray).await.unwrap_err().to_string();
-    assert!(err.contains("no scope of this project has the id"), "{err}");
+    assert!(err.contains("no scope has the id"), "{err}");
     assert_eq!(ops::decisions(&graph).await?.len(), filed, "no decision is filed");
     Ok(())
 }
@@ -3989,7 +3989,7 @@ async fn a_scope_is_named_by_its_title_or_its_id() -> Result<()> {
     // A whole id is refused too when it names no scope, or names something else.
     let nowhere = EntityId::random();
     let err = ops::resolve_scope(&graph, &nowhere.to_base64()).await.unwrap_err().to_string();
-    assert_eq!(err, format!("no scope of this project has the id {nowhere}"));
+    assert_eq!(err, format!("no scope has the id {nowhere}"));
     let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
     assert!(ops::resolve_scope(&graph, &t.to_base64()).await.is_err(), "a task is not a scope");
     let twin = ops::create_scope(&graph, c.implementer, named_scope("cloud hosting")).await?;

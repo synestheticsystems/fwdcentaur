@@ -4,18 +4,20 @@
 //! weighs a dependency wherever it leads, a cycle through two projects is refused, and a relation is
 //! changed in the project that made it, whichever projects its ends are in.
 
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateScope, CreateTask, MessageContext};
-use fwd_core::project_graph::{ProjectGraph, ProjectGraphError};
+use fwd_core::project_graph::{ProjectGraph, ProjectGraphError, Whose};
 use fwd_core::rules::{NotReadyReason, Readiness, Verb};
 use serde_json::json;
 use std::sync::Arc;
 
-/// alpha and beta, each with the person and an implementer of the same handles, over one store.
+/// alpha and beta, each with the person and an implementer of the same handles, over one store,
+/// and the node's context, through which a test adds a third project.
 struct Two {
+    node: Context,
     alpha: ProjectGraph,
     beta: ProjectGraph,
     daniel: EntityId,
@@ -31,7 +33,7 @@ async fn two() -> Result<Two> {
     node.system.create().await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
-    let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
+    let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;
     let people = |graph: ProjectGraph| async move {
         let daniel = ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
         let alice =
@@ -40,7 +42,7 @@ async fn two() -> Result<Two> {
     };
     let (daniel, alice) = people(alpha.clone()).await?;
     let (their_daniel, their_alice) = people(beta.clone()).await?;
-    Ok(Two { alpha, beta, daniel, alice, their_daniel, their_alice })
+    Ok(Two { node: ctx, alpha, beta, daniel, alice, their_daniel, their_alice })
 }
 
 async fn task(graph: &ProjectGraph, by: EntityId, title: &str) -> Result<EntityId> {
@@ -254,5 +256,132 @@ async fn a_decision_cites_and_is_made_in_the_context_of_another_projects_records
     let ours = task(&t.alpha, t.daniel, "Cap the retry delay").await?;
     ops::cite(&t.alpha, t.daniel, ours, far, None).await?;
     assert_eq!(ops::describe(&t.alpha, far).await?.map(|(_, name)| name), Some("D1 (Theirs) in beta".into()));
+    Ok(())
+}
+
+/// Records, through `graph`, that `record` once had the id `former`, as the move that renumbers
+/// records writes it.
+async fn renumbered(graph: &ProjectGraph, former: &str, record: EntityId) -> Result<()> {
+    let trx = graph.begin();
+    trx.create(&FormerId { project: graph.project(), former: former.into(), record }).await?;
+    trx.commit().await?;
+    Ok(())
+}
+
+/// An id that starts with `start`, as a former id people cited might.
+fn starting(start: &str) -> String {
+    format!("{start}{}", &EntityId::random().to_base64()[start.len()..])
+}
+
+/// A start of an id that begins records of two projects, neither of them the command's, by a
+/// record's id in one and a former id in the other, is refused as a start two records of one
+/// project share is, each named with its project; more of the id names one.
+#[tokio::test]
+async fn a_start_two_other_projects_records_share_by_a_former_id_is_refused_naming_each_project() -> Result<()> {
+    let t = two().await?;
+    let gamma = ProjectGraph::ensure(t.node.clone(), uuid::Uuid::new_v4(), "gamma").await?;
+    let person = ops::ensure_principal(&gamma, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let in_beta = task(&t.beta, t.their_daniel, "Retry on disconnect").await?;
+    let in_gamma = task(&gamma, person, "Cap the retry delay").await?;
+    let shared = in_beta.to_base64()[..8].to_string();
+    let cited = starting(&shared);
+    renumbered(&gamma, &cited, in_gamma).await?;
+
+    let refused = ops::locate(&t.alpha, &shared, ops::ANY).await.expect_err("two projects' tasks start so");
+    let said = refused.to_string();
+    assert!(said.starts_with(&format!("`{shared}` starts the ids of 2 entities")), "{said}");
+    assert!(said.contains(&format!("task {} in beta", &in_beta.to_base64()[..12])), "{said}");
+    assert!(said.contains(&format!("(formerly {}) in gamma", &cited[..12])), "{said}");
+    let found = ops::locate(&t.alpha, &cited[..12], ops::ANY).await?;
+    assert_eq!(found.id, in_gamma, "more of the former id names gamma's task");
+    assert!(matches!(found.project, Whose::Other(p) if p.name == "gamma"));
+    Ok(())
+}
+
+/// A scope of beta's is named in alpha by its whole id, its start and a former id, as any id typed
+/// is, while a title names a scope of alpha's alone, a title being its project's own; a ruling of
+/// alpha's governs beta's scope once it is attached to it.
+#[tokio::test]
+async fn a_scope_of_another_project_is_named_by_its_id_and_a_title_names_this_projects_scope_alone() -> Result<()> {
+    let t = two().await?;
+    let scope = |title: &str| CreateScope { title: title.into(), ..Default::default() };
+    let theirs = ops::create_scope(&t.beta, t.their_daniel, scope("Replication")).await?;
+    let cited = EntityId::random().to_base64();
+    renumbered(&t.beta, &cited, theirs).await?;
+    for named in [theirs.to_base64(), theirs.to_base64()[..8].to_string(), cited.clone(), cited[..8].to_string()] {
+        assert_eq!(ops::resolve_scope(&t.alpha, &named).await?, theirs, "`{named}` names beta's scope");
+    }
+    let refused = ops::resolve_scope(&t.alpha, "replication").await.expect_err("beta's title").to_string();
+    assert_eq!(refused, "no scope has the title `replication` or an id starting with it");
+    let ours = ops::create_scope(&t.alpha, t.daniel, scope("Replication")).await?;
+    assert_eq!(ops::resolve_scope(&t.alpha, "replication").await?, ours);
+
+    let ruling = ops::CreateDecision { title: "Cap retries".into(), decided_by: Some(t.daniel), ..Default::default() };
+    let decision = ops::create_decision(&t.alpha, t.daniel, ruling).await?;
+    ops::attach_decision(&t.alpha, t.daniel, decision, theirs).await?;
+    assert_eq!(ops::governs(&t.alpha.get::<DecisionView>(decision).await?)?, Some(theirs));
+    Ok(())
+}
+
+/// A highlight on the whole of a file of `graph`'s project, made by `by`, in a repository of its
+/// own.
+async fn whole_file(graph: &ProjectGraph, by: EntityId) -> Result<EntityId> {
+    let trx = graph.begin();
+    let repo = trx
+        .create(&Repo {
+            project: graph.project(),
+            name: "fwdcentaur".into(),
+            remote_urls: ankurah::property::Json::new(json!(["git@github.com:synestheticsystems/fwdcentaur.git"])),
+            default_branch: "main".into(),
+        })
+        .await?
+        .id();
+    let anchor = trx
+        .create(&CodeAnchor {
+            project: graph.project(),
+            repo: ankurah::property::Ref::new(repo),
+            path: "src/net/ws.rs".into(),
+            anchor_key: Some("fwd-anchor:1:00".into()),
+            span_key: None,
+            basis_blob: None,
+            head_blob: None,
+            index_blob: None,
+            nearest_blob: None,
+            basis_patch: None,
+            blob_sha: None,
+            commit_sha: None,
+            side: DiffSide::Worktree,
+            start_line: 0,
+            end_line: 0,
+            whole_file: Some(true),
+            anchored_text: String::new(),
+            context_before: String::new(),
+            context_after: String::new(),
+            pieces: ankurah::property::Json::new(json!([])),
+            symbol_path: None,
+            created_by: ankurah::property::Ref::new(by),
+            created: fwd_core::now_ms(),
+        })
+        .await?
+        .id();
+    trx.commit().await?;
+    Ok(anchor)
+}
+
+/// A whole-file highlight of beta's, named at a version in a text written in alpha by the start of
+/// its id, is the highlight the text mentions, as any id written in a text names a record of any
+/// project, and a reader names it with beta.
+#[tokio::test]
+async fn a_highlight_of_another_project_named_at_a_version_in_a_text_is_mentioned_and_named_with_its_project(
+) -> Result<()> {
+    let t = two().await?;
+    let highlight = whole_file(&t.beta, t.their_daniel).await?;
+    let text = format!("see [[{}@worktree]]", &highlight.to_base64()[..8]);
+    let posted = ops::post_message(&t.alpha, t.daniel, &text, Priority::Next, MessageContext::default()).await?;
+    let stored = ops::text(t.alpha.get::<MessageView>(posted).await?.content())?;
+    assert_eq!(stored, format!("see [[{}@worktree]]", highlight.to_base64()));
+    assert_eq!(ops::render_references(&t.alpha, &stored).await?, "see [src/net/ws.rs on disk in beta]");
+    let mentioned = ops::relations_from(&t.alpha, posted, Some(RelationKind::Mention)).await?;
+    assert_eq!(mentioned.iter().map(|r| r.to_id()).collect::<Result<Vec<_>, _>>()?, vec![highlight]);
     Ok(())
 }

@@ -187,7 +187,7 @@ async fn a_scope_is_named_by_a_former_id_and_a_start_two_scopes_share_names_neit
     assert_eq!(ops::resolve_scope(&graph, &cited[..8]).await?, hosting, "a start two of its former ids share");
     renumbered(&graph, &starting(&docs.to_base64()[..8]), hosting).await?;
     let refused = ops::resolve_scope(&graph, &docs.to_base64()[..8]).await.expect_err("two scopes start so");
-    assert!(refused.to_string().contains("starts the ids of 2 scopes"), "{refused}");
+    assert!(refused.to_string().contains("starts the ids of 2 entities (scope "), "{refused}");
     // A former id of a task is no scope's.
     let task =
         ops::create_task(&graph, daniel, CreateTask { title: "Not a scope".into(), ..Default::default() }).await?;

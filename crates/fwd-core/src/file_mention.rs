@@ -151,8 +151,9 @@ pub fn stored_version(version: &str) -> Result<Version> {
 }
 
 /// The whole-file highlight named by `id` (all of it, or its start) at `version`, as a stored file
-/// mention names it ([`Bracketed::Highlight`]): refused unless `id` names a highlight on a whole
-/// file and `version` is one a stored mention writes.
+/// mention names it ([`Bracketed::Highlight`]), in whichever project it is, since an id someone
+/// types names a record of any project (docs/DECISIONS.md, D181): refused unless `id` names a
+/// highlight on a whole file and `version` is one a stored mention writes.
 pub async fn highlight_at(
     graph: &crate::project_graph::ProjectGraph,
     id: &str,
@@ -160,16 +161,19 @@ pub async fn highlight_at(
 ) -> Result<(ankurah::EntityId, Version)> {
     use crate::model::CodeAnchorView;
     use crate::ops::{self, Kind};
+    use crate::project_graph::Followed;
     let version = stored_version(version)?;
     if id.is_empty() {
         bail!("no highlight's id comes before the at-sign");
     }
     let id = ops::resolve_id(graph, id, &[Kind::Anchor]).await?;
-    let anchor: CodeAnchorView = graph.get(id).await.map_err(|_| anyhow!("no highlight has that id"))?;
+    let Followed::Held { record, found: anchor, .. } = graph.follow::<CodeAnchorView>(id).await? else {
+        bail!("no highlight has that id");
+    };
     if !anchor.whole_file()?.unwrap_or(false) {
         bail!("a version goes with a whole file, and this highlight is on lines of one");
     }
-    Ok((id, version))
+    Ok((record, version))
 }
 
 #[cfg(feature = "native")]

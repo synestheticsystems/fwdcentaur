@@ -4168,13 +4168,14 @@ pub async fn detach_decision(graph: &ProjectGraph, _by: EntityId, decision: Enti
     set_decision_scope(graph, decision, None).await
 }
 
-/// Refuses, with a sentence, a scope that a decision cannot be attached to because it does not
-/// exist.
+/// Refuses, with a sentence, a scope that a decision cannot be attached to because the node holds
+/// no scope by that id. A scope of another project is one a ruling may govern, as any id a record
+/// holds names a record of any project (docs/DECISIONS.md, D176).
 async fn scope_to_attach_to(graph: &ProjectGraph, scope: EntityId) -> Result<()> {
-    if graph.get::<ScopeView>(scope).await.is_err() {
-        bail!("no scope of this project has the id {scope}, so no ruling can be attached to it");
+    match graph.follow::<ScopeView>(scope).await? {
+        Followed::Held { record, .. } if record == scope => Ok(()),
+        _ => bail!("no scope has the id {scope}, so no ruling can be attached to it"),
     }
-    Ok(())
 }
 
 /// Sets the scope a decision governs, none for the whole project, unless it has that one already.
@@ -4889,7 +4890,7 @@ pub fn name_to_id(
     }
     match matching(s, kinds, found, former).as_slice() {
         [(id, _, _)] => Ok(*id),
-        [] => bail!("no {} has an id starting with `{s}`", wanted()),
+        [] => Err(UnmatchedPrefix { kinds: wanted(), typed: s.to_string() }.into()),
         several => {
             let start = |id: &str| id.chars().take(s.len() + 4).collect::<String>();
             let listed: Vec<String> = several
@@ -4910,6 +4911,16 @@ pub fn name_to_id(
             bail!("`{s}` starts the ids of {} entities ({}); give more of the id", several.len(), listed.join(", "))
         }
     }
+}
+
+/// A start of an id that starts the id of no entity among the kinds a command takes, as
+/// [`name_to_id`] refuses it: told apart from a start several ids share, so that a reader of names
+/// that are not all ids, such as [`resolve_scope`], says what else the name could have been.
+#[derive(Debug, thiserror::Error)]
+#[error("no {kinds} has an id starting with `{typed}`")]
+pub struct UnmatchedPrefix {
+    kinds: String,
+    typed: String,
 }
 
 /// Each entity of `found` among `kinds` whose id, or one of whose former ids among `former`,
@@ -4934,27 +4945,62 @@ fn matching<'a>(
     matches
 }
 
-/// The scope a command line names: its whole id, its title (without regard to case or to the
-/// spaces around it), or the first six characters or more of its id, an id it had before it was
-/// renumbered (`former_ids`) counting as its id, for a command that takes a
-/// scope a person names by its title as often as by its id (`fwd decision attach D12 "Cloud
-/// Hosting"`). A title several scopes share, and a start several ids share, are refused with
-/// each of those scopes listed; a name that fits no scope is refused saying so, a whole id among
-/// them, so that `fwd decision list --attached` given a mistyped id says so rather than listing
-/// nothing.
+/// The scope a command line names, for a command that takes a scope a person names by its title as
+/// often as by its id (`fwd decision attach D12 "Cloud Hosting"`): its title, without regard to
+/// case or to the spaces around it, among this project's scopes, since a title is its project's
+/// own; else its whole id, the first six characters or more of it, or an id it had before it was
+/// renumbered (`former_ids`), naming a scope of any project, as every id someone types does
+/// (docs/DECISIONS.md, D181; [`locate`]). A title several scopes share, and a start several ids
+/// share, are refused with each of those scopes listed; a name that fits no scope is refused
+/// saying so, a whole id among them, so that `fwd decision list --attached` given a mistyped id
+/// says so rather than listing nothing.
 pub async fn resolve_scope(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
+    let wanted = name.trim();
     let scopes: Vec<ScopeView> = graph.all().await?;
     let held: Vec<(EntityId, String)> = scopes.iter().map(|s| (s.id(), s.title().unwrap_or_default())).collect();
-    let former = if may_start_an_id(name.trim()) { FormerIds::of(graph).await? } else { FormerIds::default() };
-    scope_by_name(name, &held, &former)
+    if let Some(scope) = scope_titled(wanted, &held)? {
+        return Ok(scope);
+    }
+    let unnamed = || anyhow!("no scope has the title `{wanted}` or an id starting with it");
+    if wanted.parse::<EntityId>().is_err() && !may_start_an_id(wanted) {
+        return Err(unnamed());
+    }
+    let found = match locate(graph, wanted, &[Kind::Scope]).await {
+        Err(e) if e.is::<UnmatchedPrefix>() => return Err(unnamed()),
+        found => found?,
+    };
+    match graph.follow::<ScopeView>(found.id).await? {
+        Followed::Held { record, .. } => Ok(record),
+        Followed::NotHeld => bail!("no scope has the id {}", found.id),
+    }
 }
 
-/// The scope `name` names among `scopes`, each scope's id and title, by [`resolve_scope`]'s rule,
-/// so that the page's box for a task's scopes reads a name as the command line does: its whole id,
-/// its title (without regard to case or to the spaces around it), or the first six characters or
-/// more of its id, a scope's former id among `former` counting as its id; a title several share, a
-/// start several scopes' ids share and a name that fits none are refused with the sentence the
-/// command line gives.
+/// The scope among `scopes`, each scope's id and title, whose title is `wanted` without regard to
+/// case or to the spaces around it; none when no title is, a title that could not be read being
+/// held as a blank, which names nothing. A title several scopes share is refused, listing them.
+fn scope_titled(wanted: &str, scopes: &[(EntityId, String)]) -> Result<Option<EntityId>> {
+    let titled: Vec<EntityId> = scopes
+        .iter()
+        .filter(|(_, title)| !title.trim().is_empty() && title.trim().eq_ignore_ascii_case(wanted))
+        .map(|(id, _)| *id)
+        .collect();
+    match titled.as_slice() {
+        [one] => Ok(Some(*one)),
+        [] => Ok(None),
+        several => bail!(
+            "{} scopes have the title `{wanted}` ({}); give one's id or its first characters",
+            several.len(),
+            several.iter().map(|id| short_id(*id)).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// The scope `name` names among `scopes`, each scope's id and title, as the page's box for a
+/// task's scopes reads it among the project's scopes, by the rule the command line reads a scope
+/// by ([`resolve_scope`]): its whole id, its title (without regard to case or to the spaces around
+/// it), or the first six characters or more of its id, a scope's former id among `former` counting
+/// as its id; a title several share, a start several scopes' ids share and a name that fits none
+/// are refused with the sentence the command line gives.
 pub fn scope_by_name(name: &str, scopes: &[(EntityId, String)], former: &FormerIds) -> Result<EntityId> {
     let held = |id: EntityId| scopes.iter().any(|(s, _)| *s == id);
     if let Ok(id) = name.parse::<EntityId>() {
@@ -4963,7 +5009,7 @@ pub fn scope_by_name(name: &str, scopes: &[(EntityId, String)], former: &FormerI
         }
         match former.named(name) {
             Some(record) if held(record) => return Ok(record),
-            _ => bail!("no scope of this project has the id {id}"),
+            _ => bail!("no scope has the id {id}"),
         }
     }
     let wanted = name.trim();
@@ -4977,19 +5023,8 @@ pub fn scope_by_name(name: &str, scopes: &[(EntityId, String)], former: &FormerI
             .collect::<Vec<_>>()
             .join(", ")
     };
-    // A title that could not be read is held as a blank, which names nothing.
-    let titled: Vec<&(EntityId, String)> = scopes
-        .iter()
-        .filter(|(_, title)| !title.trim().is_empty() && title.trim().eq_ignore_ascii_case(wanted))
-        .collect();
-    match titled.as_slice() {
-        [(one, _)] => return Ok(*one),
-        [] => {}
-        several => bail!(
-            "{} scopes have the title `{wanted}` ({}); give one's id or its first characters",
-            several.len(),
-            listed(several, 8)
-        ),
+    if let Some(scope) = scope_titled(wanted, scopes)? {
+        return Ok(scope);
     }
     let started: Vec<&(EntityId, String)> = if may_start_an_id(wanted) {
         let by_former: Vec<EntityId> = former.starting(wanted).map(|(_, record)| record).collect();
