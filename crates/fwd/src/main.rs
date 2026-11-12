@@ -5949,6 +5949,11 @@ mod tests {
             ),
             ("dismiss".into(), vec![A, B], vec![("ids", format!("[{A:?}, {B:?}]"))]),
             (
+                "task move".into(),
+                vec!["--to", "Ankurah", "--to-scope", B, A, B],
+                vec![("ids", format!("[{A:?}, {B:?}]")), ("to_scope", some(B))],
+            ),
+            (
                 "task create".into(),
                 vec!["t", "--after", A, "--under", B, "--from", A, "--motivated-by", B],
                 vec![("after", format!("[{A:?}]")), ("under", some(B)), ("from", some(A)), ("motivated_by", some(B))],
