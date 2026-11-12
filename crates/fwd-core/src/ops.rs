@@ -1947,11 +1947,16 @@ pub async fn first_thread(graph: &ProjectGraph, anchor: EntityId) -> Result<Opti
 }
 
 /// The messages on the highlight `anchor` and its `step_of` relations: what moves together when one
-/// of them moves. A step another project made, of the highlight on one of that project's tasks, is
-/// left out: only the project that made a relation changes it, so it stays as it is.
+/// of them moves. A step another project made, of the highlight on one of that project's tasks,
+/// and a message another project wrote on the highlight, are left out: only the project that made
+/// a record changes it, so they stay as they are.
 async fn highlight_parts(graph: &ProjectGraph, anchor: EntityId) -> Result<(Vec<MessageView>, Vec<RelationView>)> {
     let steps = graph.relations_from(anchor, Some(RelationKind::StepOf)).await?;
-    Ok((messages_about(graph, "anchor", anchor).await?, steps.into_iter().filter(|r| graph.owns(r)).collect()))
+    let messages = messages_about(graph, "anchor", anchor).await?;
+    Ok((
+        messages.into_iter().filter(|m| graph.owns(m)).collect(),
+        steps.into_iter().filter(|r| graph.owns(r)).collect(),
+    ))
 }
 
 /// Writes `changes` in one transaction: each message it resolves gets `by` and the time as who
@@ -3890,12 +3895,13 @@ async fn move_message(graph: &ProjectGraph, by: EntityId, message: EntityId, res
 }
 
 /// Messages whose `field` (`task`, `anchor`, `scope`, `decision`, `thread` or `reply_to`) points
-/// at `id`, oldest first.
+/// at `id`, oldest first, whichever project wrote them (`ProjectGraph::messages_about`): a message
+/// about a record is a connection to it. A list of a project's messages is that project's alone.
 pub async fn messages_about(graph: &ProjectGraph, field: &str, id: EntityId) -> Result<Vec<MessageView>> {
     if !matches!(field, "task" | "anchor" | "scope" | "decision" | "thread" | "reply_to") {
         bail!("messages are looked up by task, anchor, scope, decision, thread or reply_to, not `{field}`");
     }
-    let mut found: Vec<MessageView> = graph.fetch(with_id(&format!("{field} = ?"), id)?).await?;
+    let mut found = graph.messages_about(field, id).await?;
     found.sort_by_key(|m| m.created().unwrap_or(0));
     Ok(found)
 }

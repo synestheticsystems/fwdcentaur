@@ -11,8 +11,8 @@
 //!   ([`ProjectTransaction`]) makes and changes only the project's records.
 //! - What connects records is read wherever in the node it is. The relations that touch a record
 //!   are read by that record's id ([`ProjectGraph::relations_from`], `relations_to`, `relation`),
-//!   whichever project made them, so a relation made in another project shows on the record it
-//!   points at, and a command that changes a relation runs in the project that made it, as any
+//!   and so are the messages about it ([`ProjectGraph::messages_about`]), whichever project made
+//!   them, so a relation made in another project shows on the record it points at, and a command that changes a relation runs in the project that made it, as any
 //!   command that acts on a record of another project does. An id a record holds (a relation's
 //!   end, a message's author, a task's assignee or scope, a cited decision) is followed wherever
 //!   its record is ([`ProjectGraph::follow`]), and the record comes with its project, which a
@@ -328,6 +328,14 @@ impl ProjectGraph {
         kind: Option<RelationKind>,
     ) -> Result<Vec<RelationView>, RetrievalError> {
         self.ctx.fetch(touching("to_id", to, kind)).await
+    }
+
+    /// The messages whose `field`, one of the fields that say what a message is about (`task`,
+    /// `anchor`, `scope`, `decision`) or which thread it is in (`thread`, `reply_to`), holds the
+    /// record `about`, whichever project wrote them: a message about a record is a connection to it,
+    /// as a relation is, so it shows on the record wherever it was written (D176).
+    pub async fn messages_about(&self, field: &str, about: EntityId) -> Result<Vec<MessageView>, RetrievalError> {
+        self.ctx.fetch(selecting(equals(field, Value::EntityId(about)))).await
     }
 
     /// The relation `id`, whichever project made it, as a record's relations hold it

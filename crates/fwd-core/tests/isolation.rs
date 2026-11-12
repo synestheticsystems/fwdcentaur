@@ -620,7 +620,11 @@ async fn a_record_moved_to_the_other_project_leaves_the_first_and_appears_in_the
         assert!(!held.contains(&task) && !held.contains(&comment), "alpha's {} still holds what moved", opened.name);
     }
     assert!(alpha.get::<TaskView>(task).await.is_err() && alpha.get::<MessageView>(comment).await.is_err());
-    assert!(ops::messages_about(&alpha, "task", task).await?.is_empty());
+    assert_eq!(
+        ids_of(&ops::messages_about(&alpha, "task", task).await?),
+        vec![comment],
+        "a message about a record is found by the record's id from any project"
+    );
     let typed = ops::locate(&alpha, &task.to_base64()[..8], ops::ANY).await?;
     assert_eq!(typed.id, task, "its id, typed in alpha, names it in beta");
     beta_named(&typed.project);
