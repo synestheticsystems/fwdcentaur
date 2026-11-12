@@ -12,8 +12,9 @@
 //! - What connects records is read wherever in the node it is. The relations that touch a record
 //!   are read by that record's id ([`ProjectGraph::relations_from`], `relations_to`, `relation`),
 //!   and so are the messages about it ([`ProjectGraph::messages_about`]), whichever project made
-//!   them, so a relation made in another project shows on the record it points at, and a command that changes a relation runs in the project that made it, as any
-//!   command that acts on a record of another project does. An id a record holds (a relation's
+//!   them, so a relation made in another project shows on the record it points at, and a command
+//!   that changes a relation runs in the project that made it, as any command that acts on a
+//!   record of another project does. An id a record holds (a relation's
 //!   end, a message's author, a task's assignee or scope, a cited decision) is followed wherever
 //!   its record is ([`ProjectGraph::follow`]), and the record comes with its project, which a
 //!   reader names beside it.
