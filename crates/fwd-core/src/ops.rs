@@ -3709,9 +3709,16 @@ async fn resolve_reference(graph: &ProjectGraph, written: &crate::references::Wr
             [one] => Ok(one.id()),
             [] => match handle.parse::<EntityId>() {
                 Ok(id) if kind_of(graph, id).await?.is_some() => Ok(id),
+                // Only a name that names nothing is a handle no one has; a start several ids share,
+                // with each of them listed, and a read that failed reach the writer as they are.
+                Err(_) if !may_start_an_id(handle) && rules::decision_number(handle).is_none() => {
+                    bail!("no one has the handle `{handle}`, and no id starts with it")
+                }
                 _ => match resolve_id(graph, handle, MENTIONABLE).await {
-                    Ok(id) => Ok(id),
-                    Err(_) => bail!("no one has the handle `{handle}`, and no id starts with it"),
+                    Err(e) if e.is::<UnmatchedPrefix>() => {
+                        bail!("no one has the handle `{handle}`, and no id starts with it")
+                    }
+                    found => found,
                 },
             },
             several => Err(naming::refused(graph, handle, several, false).await?.into()),
@@ -4819,14 +4826,16 @@ pub struct Located {
 /// An entity named on a command line, in whichever project it is (docs/DECISIONS.md, D181: an id
 /// someone types is never declined for being another project's): its full id; `D<number>` for a
 /// decision of this project, since a decision's number is its own project's; or a prefix of at
-/// least six characters of the id of exactly one entity among `kinds`, of this project when one
-/// of its entities has an id that starts so, else of any project. An id the entity had before it
-/// was renumbered (`former_ids`), kept by any project, counts as its id, whole or as a prefix,
-/// beside its current one. A full id names the entity among `kinds` that has it, or had it before
-/// it was renumbered, in whichever project that is; one that names none is taken as it is, in this
-/// project, and the command then says whether it can use it. A prefix that matches several
-/// entities is refused with each of them listed, with its project when that is another, and one
-/// that matches none is refused plainly. `D<number>` is read as a decision's number first.
+/// least six characters of the id of exactly one entity among `kinds`: of this project when one
+/// of its entities has an id that starts so, and of another project only when none does, so that
+/// a start an entity here shares with one elsewhere names the one here. An id the entity had
+/// before it was renumbered (`former_ids`), kept by any project, counts as its id, whole or as a
+/// prefix, beside its current one. A full id names the entity among `kinds` that has it, or had it
+/// before it was renumbered, in whichever project that is; one that names none is taken as it is,
+/// in this project, and the command then says whether it can use it. A prefix that matches several
+/// entities of this project is refused with each of them listed, and one that matches none here and
+/// several elsewhere with each of those listed with its project; one that matches none anywhere is
+/// refused plainly. `D<number>` is read as a decision's number first.
 /// With five digits or more it is also long enough to be the start of an id, and it is tried as
 /// one when no decision has that number; while one has, it names that decision, which a command
 /// that takes no decision refuses.
@@ -4849,11 +4858,12 @@ pub async fn locate(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result<Loc
     }
     // The former ids that start with the name, of every project, which are few.
     let former = FormerIds::from_views(&graph.former_ids_starting(s).await?);
-    // The project's own entities are searched first, and every project's only when none of them
-    // matches, because reading every project's ids costs every command that names a record
-    // seconds, and a prefix that starts the ids of records of two projects does not occur. This
-    // order is for speed alone: it goes once the store finds the ids that start with a prefix
-    // itself, which Ankurah is gaining.
+    // A start of an id names an entity of the command's project when one of its entities starts
+    // so, and one of another project only when none does: the command runs where its caller
+    // works, and with short starts of ids, collisions across projects are ordinary, so one here
+    // and one elsewhere name the one here, and two here are refused as two, whatever starts so
+    // elsewhere. Every project's ids are read only when none of this project's matches, which
+    // also keeps a typed id of this project cheap.
     let mut here: Vec<(EntityId, Kind)> = Vec::new();
     for kind in kinds {
         here.extend(kind.ids(graph).await?.into_iter().map(|id| (id, *kind)));

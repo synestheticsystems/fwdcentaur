@@ -1596,6 +1596,43 @@ async fn an_inline_reference_is_stored_as_an_id_and_shadowed_by_a_mention() -> R
     Ok(())
 }
 
+/// An at-sign that names no one by handle names a record by the start of its id, as the brackets
+/// do, and says why it names nothing only when nothing matches: a start two records share is
+/// refused listing both, and a handle too short to start an id, or a start no id has, is a handle
+/// no one has.
+#[tokio::test]
+async fn an_at_sign_that_names_no_handle_keeps_why_its_id_names_nothing() -> Result<()> {
+    let graph = project().await?;
+    let c = cast(&graph).await?;
+    let (one, two) = (
+        ops::create_task(&graph, c.daniel, task("Retry")).await?,
+        ops::create_task(&graph, c.daniel, task("Cap")).await?,
+    );
+    // Two former ids that start alike, one of each task's, so that the start names both.
+    let shared = "Zq9xYwVu";
+    let trx = graph.begin();
+    for (n, record) in [one, two].into_iter().enumerate() {
+        let former = format!("{shared}{n}{}", &EntityId::random().to_base64()[9..]);
+        trx.create(&FormerId { project: graph.project(), former, record }).await?;
+    }
+    trx.commit().await?;
+    let refused = |text: String| {
+        let graph = graph.clone();
+        async move {
+            let posted = ops::post_message(&graph, c.daniel, &text, Priority::Next, MessageContext::default()).await;
+            posted.map(|_| ()).unwrap_err().to_string()
+        }
+    };
+
+    let shared_start = refused(format!("see @{shared}")).await;
+    assert!(shared_start.contains(&format!("`{shared}` starts the ids of 2 entities")), "{shared_start}");
+    let nobody = refused("ask @nobod".into()).await;
+    assert!(nobody.contains("(no one has the handle `nobod`, and no id starts with it)"), "{nobody}");
+    let unmatched = refused("ask @Qq0Qq0Qq".into()).await;
+    assert!(unmatched.contains("(no one has the handle `Qq0Qq0Qq`, and no id starts with it)"), "{unmatched}");
+    Ok(())
+}
+
 /// Routing reads the mention relations a message was posted with, not its text: a message that
 /// holds `@handle` with no relation behind it (as one written before mentions were relations)
 /// tells no one it names.

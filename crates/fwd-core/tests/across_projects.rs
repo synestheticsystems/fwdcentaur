@@ -298,6 +298,32 @@ async fn a_start_two_other_projects_records_share_by_a_former_id_is_refused_nami
     Ok(())
 }
 
+/// A start of an id names a record of the command's project when one starts so, and a record of
+/// another project only when none does: a start alpha's task and beta's share names alpha's, typed
+/// in alpha, and beta's, typed in beta; a start two of alpha's tasks share is refused in alpha
+/// naming those two alone, though beta's starts so too.
+#[tokio::test]
+async fn a_start_of_an_id_names_a_record_of_the_commands_project_before_one_of_another() -> Result<()> {
+    let t = two().await?;
+    let ours = task(&t.alpha, t.daniel, "Retry on disconnect").await?;
+    let theirs = task(&t.beta, t.their_daniel, "Retry on disconnect").await?;
+    let shared = ours.to_base64()[..8].to_string();
+    renumbered(&t.beta, &starting(&shared), theirs).await?;
+    assert_eq!(ops::locate(&t.alpha, &shared, ops::ANY).await?, ops::Located { id: ours, project: Whose::This });
+    assert_eq!(ops::locate(&t.beta, &shared, ops::ANY).await?, ops::Located { id: theirs, project: Whose::This });
+
+    let second = task(&t.alpha, t.daniel, "Cap the retry delay").await?;
+    let cited = starting(&shared);
+    renumbered(&t.alpha, &cited, second).await?;
+    let refused =
+        ops::locate(&t.alpha, &shared, ops::ANY).await.expect_err("two of alpha's tasks start so").to_string();
+    assert!(refused.starts_with(&format!("`{shared}` starts the ids of 2 entities")), "{refused}");
+    assert!(refused.contains(&format!("task {}", &ours.to_base64()[..12])), "{refused}");
+    assert!(refused.contains(&format!("(formerly {})", &cited[..12])), "{refused}");
+    assert!(!refused.contains(" in beta"), "beta's is named only when alpha holds none: {refused}");
+    Ok(())
+}
+
 /// A scope of beta's is named in alpha by its whole id, its start and a former id, as any id typed
 /// is, while a title names a scope of alpha's alone, a title being its project's own; a ruling of
 /// alpha's governs beta's scope once it is attached to it.
