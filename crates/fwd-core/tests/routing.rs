@@ -186,3 +186,23 @@ async fn a_message_that_names_another_projects_principal_tells_it_in_its_inbox()
     assert!(said.contains("does D1 in alpha hold"), "{said}");
     Ok(())
 }
+
+/// A step that alpha adds to a task of beta's tells the task's creator and its assignee, beta's
+/// principals, whose checklist it is on, in beta's inboxes.
+#[tokio::test]
+async fn a_step_added_to_another_projects_task_tells_its_creator_and_assignee_there() -> Result<()> {
+    let (a, b) = two().await?;
+    let theirs = task(&b.graph, b.daniel, "Review: the retry loop").await?;
+    ops::assign(&b.graph, b.daniel, theirs, Some(b.alice)).await?;
+    let step = ops::add_step(&a.graph, a.alice, theirs, EntityId::random()).await?;
+    let planned = routing::plan_for_relation(&a.graph, &a.graph.relation(step).await?).await?;
+    let mut expected = vec![(b.daniel, NotificationType::StepAdded), (b.alice, NotificationType::StepAdded)];
+    expected.sort();
+    assert_eq!(told(&planned), expected);
+    routing::apply(&a.graph, &planned).await?;
+    for who in [b.daniel, b.alice] {
+        assert_eq!(inbox(&b.graph, who).await?, vec![NotificationType::StepAdded], "in beta's inbox");
+    }
+    assert!(a.graph.all::<NotificationView>().await?.is_empty(), "nothing in alpha's");
+    Ok(())
+}
