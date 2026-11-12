@@ -1,9 +1,10 @@
 //! The live reads of a page that shows one project (`ProjectGraph::follow_live`,
-//! `relations_made_elsewhere_live`, `query_projects`), over two projects of one node: a page lists
-//! alpha's records and names what they hold the ids of, which may be beta's. Each read holds the
-//! records of the ids it is given, in either project, follows a change made in the other project,
-//! and gives up an id it is no longer given; the relations beta made that point at an alpha record
-//! are read by that record's id, and alpha's own relations are not among them.
+//! `relations_made_elsewhere_live`, `query_messages_about`, `query_projects`), over two projects of
+//! one node: a page lists alpha's records and names what they hold the ids of, which may be beta's.
+//! Each read holds the records of the ids it is given, in either project, follows a change made in
+//! the other project, and gives up an id it is no longer given; the relations beta made that point
+//! at an alpha record are read by that record's id, and alpha's own relations are not among them;
+//! and the conversation about a beta record is read by its id.
 
 use ankurah::signals::Peek;
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, LiveQuery, Node, PermissiveAgent, View};
@@ -116,6 +117,24 @@ async fn the_relations_another_project_made_that_touch_a_record_are_read_live_by
     elsewhere.follow_ids(&ids(&[theirs]))?;
     elsewhere.live().wait_initialized().await?;
     assert_eq!(held(elsewhere.live()), ids(&[made_there, later, another]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_conversation_about_a_record_is_read_live_by_its_id_whichever_project_wrote_it() -> Result<()> {
+    let t = two().await?;
+    let far = task(&t.beta, t.their_daniel, "Ship the connector").await?;
+    let comment = |graph: &ProjectGraph, by: EntityId, text: &str| {
+        let context = ops::MessageContext { task_id: Some(far), ..Default::default() };
+        let (graph, text) = (graph.clone(), text.to_string());
+        async move { ops::post_message(&graph, by, &text, Priority::Next, context).await }
+    };
+    let there = comment(&t.beta, t.their_daniel, "Shipped behind a flag").await?;
+    let about = t.alpha.query_messages_about("task", far)?;
+    about.wait_initialized().await?;
+    assert_eq!(held(&about), ids(&[there]), "beta's comment on beta's task, read from alpha's graph");
+    let later = comment(&t.beta, t.their_daniel, "The flag is gone").await?;
+    assert_eq!(held(&about), ids(&[there, later]));
     Ok(())
 }
 

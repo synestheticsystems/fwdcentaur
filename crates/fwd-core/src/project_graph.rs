@@ -30,9 +30,9 @@
 //!
 //! - A page shows one project's lists from live queries that carry the project, and names what
 //!   their records hold the ids of through live reads that carry none ([`ProjectGraph::follow_live`],
-//!   [`ProjectGraph::relations_made_elsewhere_live`], [`ProjectGraph::query_projects`]): each holds
-//!   the records whose ids a reader names, so a record of another project is shown with its project,
-//!   and no list reads through them.
+//!   [`ProjectGraph::relations_made_elsewhere_live`], [`ProjectGraph::query_messages_about`],
+//!   [`ProjectGraph::query_projects`]): each holds what a reader names by id, so a record of another
+//!   project is shown with its project and its conversation, and no list reads through them.
 //!
 //! - A record changes project in one write alone, [`ProjectTransaction::take_in`], which a task's
 //!   move to another project makes (`task_move`); every other write of a project's graph makes and
@@ -633,6 +633,14 @@ impl ProjectGraph {
     ) -> Result<LiveFollow<RelationView>, RetrievalError> {
         let reads = Reads::RelationsMadeElsewhere { here: self.project };
         Ok(LiveFollow { query: self.ctx.query(selecting(reads.predicate(ids)))?, reads })
+    }
+
+    /// A live query on the messages whose `field` holds the record `about`, whichever project wrote
+    /// them: the conversation a page shows beneath a record, read live as
+    /// [`ProjectGraph::messages_about`] reads it, so that a record of another project shows with its
+    /// own conversation.
+    pub fn query_messages_about(&self, field: &str, about: EntityId) -> Result<LiveQuery<MessageView>, RetrievalError> {
+        self.ctx.query(selecting(equals(field, Value::EntityId(about))))
     }
 
     /// A live query on every project of the node: the names by which a page names a record of
