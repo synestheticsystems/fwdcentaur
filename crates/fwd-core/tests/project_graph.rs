@@ -3,8 +3,8 @@
 //! index gives; a client finds it by the project's UUID, and a UUID the store holds no record of is
 //! refused. And the reads a project's graph makes beyond its own records: an id a record holds,
 //! followed into whichever project its record is in; the relations that touch a record, whichever
-//! project made them, which only that project changes; and the ids of every project, which an id
-//! someone types may name.
+//! project made them, which only that project changes; and the ids of every project, and the former
+//! ids that start with what someone types, which an id someone types may name.
 
 use ankurah::{policy::DEFAULT_CONTEXT, Context, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
@@ -145,5 +145,44 @@ async fn the_ids_a_typed_id_may_name_are_every_projects_with_their_project() -> 
     let named = alpha.projects_named(&[alpha_record, beta_record]).await?;
     assert_eq!(named[0], (alpha_record, Whose::This));
     assert!(matches!(&named[1], (record, Whose::Other(p)) if *record == beta_record && p.name == "beta"));
+    Ok(())
+}
+
+/// The former ids a typed prefix may name are read as a range of their text, from the prefix to
+/// the text whose last character comes after the prefix's, which holds exactly the former ids that
+/// start with the prefix, in either project, whichever character of an id's alphabet the prefix ends
+/// with: the store orders text by its bytes, where `-` comes before the digits, the digits before
+/// the capitals, `_` after them and the small letters last.
+#[tokio::test]
+async fn the_former_ids_a_prefix_may_name_are_those_of_every_project_that_start_with_it() -> Result<()> {
+    use fwd_core::model::FormerId;
+    let (alpha, beta) = two().await?;
+    let formers = [
+        "Retry-a", "Retry_b", "Retryz", "RetryZ", "Retry9", "Retrz", "Retra", "RetrY", "Retr-", "Retr_", "Retr9x",
+        "Retr0",
+    ];
+    for (i, former) in formers.iter().enumerate() {
+        let graph = if i % 2 == 0 { &alpha } else { &beta };
+        let trx = graph.begin();
+        let kept =
+            FormerId { project: graph.project(), former: former.to_string(), record: ankurah::EntityId::random() };
+        trx.create(&kept).await?;
+        trx.commit().await?;
+    }
+    for (prefix, expected) in [
+        ("Retry", vec!["Retry-a", "Retry9", "RetryZ", "Retry_b", "Retryz"]),
+        ("Retrz", vec!["Retrz"]),
+        ("Retr_", vec!["Retr_"]),
+        ("Retr-", vec!["Retr-"]),
+        ("Retr9", vec!["Retr9x"]),
+        ("RetrY", vec!["RetrY"]),
+        ("Retq", vec![]),
+    ] {
+        let mut found =
+            alpha.former_ids_starting(prefix).await?.iter().map(|f| f.former()).collect::<Result<Vec<_>, _>>()?;
+        found.sort();
+        assert_eq!(found, expected, "the former ids that start with `{prefix}`");
+    }
+    assert!(alpha.former_ids_starting("Retré").await?.is_empty(), "no id's text holds a character outside ASCII");
     Ok(())
 }

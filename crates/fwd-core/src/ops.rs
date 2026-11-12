@@ -4697,6 +4697,24 @@ impl Kind {
         }
     }
 
+    /// The id of every record of this kind in `graph`'s project, where [`locate`] looks for a
+    /// typed id first.
+    async fn ids(self, graph: &ProjectGraph) -> Result<Vec<EntityId>> {
+        fn ids<V: ankurah::model::View>(found: Vec<V>) -> Vec<EntityId> {
+            found.iter().map(|v| v.id()).collect()
+        }
+        Ok(match self {
+            Kind::Task => ids::<TaskView>(graph.all().await?),
+            Kind::Message => ids::<MessageView>(graph.all().await?),
+            Kind::Decision => ids::<DecisionView>(graph.all().await?),
+            Kind::Scope => ids::<ScopeView>(graph.all().await?),
+            Kind::Anchor => ids::<CodeAnchorView>(graph.all().await?),
+            Kind::Relation => ids::<RelationView>(graph.all().await?),
+            Kind::Notification => ids::<NotificationView>(graph.all().await?),
+            Kind::Principal => ids::<PrincipalView>(graph.all().await?),
+        })
+    }
+
     /// The id of every record of this kind in the node, with the record of its project: what a
     /// typed id may name (`ProjectGraph::ids_in_every_project`).
     async fn ids_in_every_project(self, graph: &ProjectGraph) -> Result<Vec<(EntityId, EntityId)>> {
@@ -4735,9 +4753,10 @@ pub struct Located {
 /// An entity named on a command line, in whichever project it is (docs/DECISIONS.md, D181: an id
 /// someone types is never declined for being another project's): its full id; `D<number>` for a
 /// decision of this project, since a decision's number is its own project's; or a prefix of at
-/// least six characters of the id of exactly one entity among `kinds`, of any project. An id the
-/// entity had before it was renumbered (`former_ids`), kept by any project, counts as its id, whole
-/// or as a prefix, beside its current one. A full id is taken as it is (the command then says
+/// least six characters of the id of exactly one entity among `kinds`, of this project when one
+/// of its entities has an id that starts so, else of any project. An id the entity had before it
+/// was renumbered (`former_ids`), kept by any project, counts as its id, whole or as a prefix,
+/// beside its current one. A full id is taken as it is (the command then says
 /// whether it can use it), or for a former id as the entity it names now; a prefix that matches
 /// several entities is refused with each of them listed, with its project when that is another,
 /// and one that matches none is refused plainly. `D<number>` is read as a decision's number first.
@@ -4755,19 +4774,32 @@ pub async fn locate(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result<Loc
         Some(n) => decisions(graph).await?.iter().filter(|d| d.number().ok() == Some(n)).map(|d| d.id()).collect(),
         None => Vec::new(),
     };
-    // The entities of `kinds` and the former ids of every project, read only when the name can
-    // start an id and no decision's number took it.
+    if !numbered.is_empty() || !may_start_an_id(s) {
+        let id = name_to_id(s, kinds, &numbered, &[], &FormerIds::default(), &|_| None)?;
+        return Ok(Located { id, project: Whose::This });
+    }
+    // The former ids that start with the name, of every project, which are few.
+    let former = FormerIds::from_views(&graph.former_ids_starting(s).await?);
+    // The project's own entities are searched first, and every project's only when none of them
+    // matches, because reading every project's ids costs every command that names a record
+    // seconds, and a prefix that starts the ids of records of two projects does not occur. This
+    // order is for speed alone: it goes once the store finds the ids that start with a prefix
+    // itself, which Ankurah is gaining.
+    let mut here: Vec<(EntityId, Kind)> = Vec::new();
+    for kind in kinds {
+        here.extend(kind.ids(graph).await?.into_iter().map(|id| (id, *kind)));
+    }
+    if !matching(s, kinds, &here, &former).is_empty() {
+        let id = name_to_id(s, kinds, &numbered, &here, &former, &|_| None)?;
+        return Ok(Located { id, project: Whose::This });
+    }
     let mut found: Vec<(EntityId, Kind)> = Vec::new();
     let mut project_of: std::collections::HashMap<EntityId, EntityId> = std::collections::HashMap::new();
-    let mut former = FormerIds::default();
-    if numbered.is_empty() && may_start_an_id(s) {
-        for kind in kinds {
-            for (id, project) in kind.ids_in_every_project(graph).await? {
-                found.push((id, *kind));
-                project_of.insert(id, project);
-            }
+    for kind in kinds {
+        for (id, project) in kind.ids_in_every_project(graph).await? {
+            found.push((id, *kind));
+            project_of.insert(id, project);
         }
-        former = FormerIds::from_views(&graph.former_ids_in_every_project().await?);
     }
     let mut projects: Vec<EntityId> = project_of.values().copied().collect();
     projects.sort();
@@ -4820,20 +4852,7 @@ pub fn name_to_id(
     if !may_start_an_id(s) {
         bail!("`{s}` is not an entity id: give the whole id, its first {MIN_PREFIX} characters or more, or D<number> for a decision");
     }
-    // Each entity whose id, or one of whose former ids, starts with `s`, once, with the former id
-    // that matched when its own id did not.
-    let mut matches: Vec<(EntityId, Kind, Option<&str>)> = found
-        .iter()
-        .filter(|(id, kind)| kinds.contains(kind) && id.to_base64().starts_with(s))
-        .map(|(id, kind)| (*id, *kind, None))
-        .collect();
-    for (cited, record) in former.starting(s) {
-        let Some((_, kind)) = found.iter().find(|(id, kind)| *id == record && kinds.contains(kind)) else { continue };
-        if !matches.iter().any(|(id, _, _)| *id == record) {
-            matches.push((record, *kind, Some(cited)));
-        }
-    }
-    match matches.as_slice() {
+    match matching(s, kinds, found, former).as_slice() {
         [(id, _, _)] => Ok(*id),
         [] => bail!("no {} has an id starting with `{s}`", wanted()),
         several => {
@@ -4856,6 +4875,28 @@ pub fn name_to_id(
             bail!("`{s}` starts the ids of {} entities ({}); give more of the id", several.len(), listed.join(", "))
         }
     }
+}
+
+/// Each entity of `found` among `kinds` whose id, or one of whose former ids among `former`,
+/// starts with `s`, once, with the former id that matched when its own id did not.
+fn matching<'a>(
+    s: &'a str,
+    kinds: &[Kind],
+    found: &[(EntityId, Kind)],
+    former: &'a FormerIds,
+) -> Vec<(EntityId, Kind, Option<&'a str>)> {
+    let mut matches: Vec<(EntityId, Kind, Option<&str>)> = found
+        .iter()
+        .filter(|(id, kind)| kinds.contains(kind) && id.to_base64().starts_with(s))
+        .map(|(id, kind)| (*id, *kind, None))
+        .collect();
+    for (cited, record) in former.starting(s) {
+        let Some((_, kind)) = found.iter().find(|(id, kind)| *id == record && kinds.contains(kind)) else { continue };
+        if !matches.iter().any(|(id, _, _)| *id == record) {
+            matches.push((record, *kind, Some(cited)));
+        }
+    }
+    matches
 }
 
 /// The scope a command line names: its whole id, its title (without regard to case or to the

@@ -16,9 +16,11 @@
 //!   id a record holds (a relation's end, a message's author, a task's assignee or scope, a cited
 //!   decision) is followed wherever its record is ([`ProjectGraph::follow`]), and the record comes
 //!   with its project, which a reader names beside it.
-//! - An id someone types names a record of any project (D181): the resolver reads every project's
-//!   ids ([`ProjectGraph::ids_in_every_project`]), and a command whose subject is a record of
-//!   another project runs in that project, as if it had been run there.
+//! - An id someone types names a record of any project (D181): the resolver reads the former ids
+//!   that start with it ([`ProjectGraph::former_ids_starting`]) and, when no record of the
+//!   project has an id that starts with it, every project's ids
+//!   ([`ProjectGraph::ids_in_every_project`]), and a command whose subject is a record of another
+//!   project runs in that project, as if it had been run there.
 //!
 //! The Ankurah context the graph wraps never leaves this module, so an operation that left the
 //! project out of a list would not compile. A record's project is read each time and never
@@ -130,14 +132,32 @@ fn ids(records: &[EntityId]) -> String {
     records.iter().map(EntityId::to_base64).collect::<Vec<_>>().join(", ")
 }
 
-/// `<field> = <value>`, with the value a typed literal: a string literal compared with a `Ref`
-/// field misses live updates (Ankurah issue #259).
-fn equals(field: &str, value: Value) -> Predicate<Parsed> {
+/// `<field> <operator> <value>`, with the value a typed literal: a string literal compared with a
+/// `Ref` field misses live updates (Ankurah issue #259).
+fn comparing(field: &str, operator: ComparisonOperator, value: Value) -> Predicate<Parsed> {
     Predicate::Comparison {
         left: Box::new(Expr::Path(PathExpr { component: None, steps: vec![field.to_string()] })),
-        operator: ComparisonOperator::Equal,
+        operator,
         right: Box::new(Expr::Literal(value)),
     }
+}
+
+/// `<field> = <value>` ([`comparing`]).
+fn equals(field: &str, value: Value) -> Predicate<Parsed> {
+    comparing(field, ComparisonOperator::Equal, value)
+}
+
+/// The values of the text `field` that start with `prefix`, an ASCII text: from `prefix` up to,
+/// not including, the text whose last character is the one after `prefix`'s. The store compares
+/// text by its bytes (SQLite's binary collation), as Ankurah does where it reads a predicate
+/// itself, and in that order the texts that start with `prefix` are exactly those of that range.
+fn starting(field: &str, prefix: &str) -> Predicate<Parsed> {
+    let Some((&last, rest)) = prefix.as_bytes().split_last() else { return Predicate::True };
+    let rest = std::str::from_utf8(rest).expect("an ASCII text's bytes before its last are ASCII");
+    let after = format!("{rest}{}", char::from(last + 1));
+    let from = comparing(field, ComparisonOperator::GreaterThanOrEqual, Value::String(prefix.to_string()));
+    let before = comparing(field, ComparisonOperator::LessThan, Value::String(after));
+    Predicate::And(Box::new(from), Box::new(before))
 }
 
 /// Every record a selection with this predicate is made from.
@@ -443,10 +463,15 @@ impl ProjectGraph {
         Ok(every.iter().map(|v| Ok((v.id(), v.project_id()?))).collect::<Result<_, PropertyError>>()?)
     }
 
-    /// Every project's former ids, as [`ProjectGraph::ids_in_every_project`] reads the ids: what a
-    /// typed id may be the start of.
-    pub async fn former_ids_in_every_project(&self) -> Result<Vec<FormerIdView>, RetrievalError> {
-        self.ctx.fetch(selecting(Predicate::True)).await
+    /// The former ids, of every project, that start with `prefix`, the start of an id someone
+    /// typed: the former ids it may name, read as one range of their text ([`starting`]) rather
+    /// than every former id the node keeps, which are tens of thousands.
+    pub async fn former_ids_starting(&self, prefix: &str) -> Result<Vec<FormerIdView>, RetrievalError> {
+        // An id's text is ASCII, so no former id starts with any other character.
+        if !prefix.is_ascii() {
+            return Ok(Vec::new());
+        }
+        self.ctx.fetch(selecting(starting("former", prefix))).await
     }
 
     /// The project of each of `projects`, project records as [`ProjectGraph::ids_in_every_project`]

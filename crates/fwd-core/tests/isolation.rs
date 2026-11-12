@@ -275,6 +275,24 @@ async fn a_typed_id_a_held_id_and_a_records_relations_reach_the_other_project_an
     Ok(())
 }
 
+/// A prefix that starts the id of a record of the command's project names that record, though a
+/// record of the other project starts so too, here by a former id, since an id someone types is
+/// looked for in the command's project first; typed in the other project, it names that project's.
+#[tokio::test]
+async fn a_typed_prefix_names_the_commands_projects_record_before_the_others() -> Result<()> {
+    let (alpha, beta) = two_projects().await?;
+    let a = populate(&alpha).await?;
+    let b = populate(&beta).await?;
+    let shared = a.cap.to_base64()[..8].to_string();
+    let cited = format!("{shared}{}", &EntityId::random().to_base64()[8..]);
+    let trx = beta.begin();
+    trx.create(&FormerId { project: beta.project(), former: cited, record: b.cap }).await?;
+    trx.commit().await?;
+    assert_eq!(ops::locate(&alpha, &shared, ops::ANY).await?, ops::Located { id: a.cap, project: Whose::This });
+    assert_eq!(ops::locate(&beta, &shared, ops::ANY).await?, ops::Located { id: b.cap, project: Whose::This });
+    Ok(())
+}
+
 #[tokio::test]
 async fn one_projects_graph_changes_none_of_the_others_records() -> Result<()> {
     let (alpha, beta) = two_projects().await?;
