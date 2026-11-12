@@ -12,7 +12,7 @@
 //! project's graph over the daemon's own durable node, by the same operations the CLI's commands
 //! run. Every project's socket joins the one node, and its path names the project its client
 //! works in (`fwd_core::daemon_socket`); nothing at the socket keeps a client to that project yet,
-//! which Ankurah's policy hooks are to do (docs/design/daemon.md, "Keeping projects apart"). A
+//! which Ankurah's policy hooks are to do (docs/design/daemon.md, "Projects in one node"). A
 //! client built for the daemons that kept a store per project, whose reads name no project, is
 //! refused at the path those daemons served their sockets at.
 //!
