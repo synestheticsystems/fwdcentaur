@@ -26,7 +26,7 @@ use caller::Caller;
 use clap::{CommandFactory, FromArgMatches};
 use fwd_core::ops;
 use fwd_core::project::{NamedProject, Paths};
-use fwd_core::project_graph::ProjectGraph;
+use fwd_core::project_graph::{ProjectGraph, Whose};
 use fwd_core::subject;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, InitializeResult,
@@ -221,9 +221,11 @@ impl Operations {
     }
 
     /// Runs the CLI command `spec` stands for, for `caller`, as the CLI runs it after connecting
-    /// (`crate::run_cli`): the command parsed by the CLI's parser, the principal the caller acts as
-    /// found (and made when the command needs one), the CLI's refusals, the command, and its
-    /// bookkeeping; its answer captured.
+    /// (`crate::run_cli`): the command parsed by the CLI's parser, run in the project the call's
+    /// `project` names, or in the project of the command's subject when that is a record of
+    /// another, as the CLI moves it (`crate::subject_of`, docs/DECISIONS.md, D181); the principal
+    /// the caller acts as there found (and made when the command needs one), the CLI's refusals,
+    /// the command, and its bookkeeping; its answer captured.
     /// What the command printed and said goes in `out`, whether it ran or failed.
     async fn command(
         &self,
@@ -232,7 +234,7 @@ impl Operations {
         args: &Map<String, Value>,
         out: &mut Captured,
     ) -> Result<()> {
-        let (project, graph) = self.project(args.get(tools::PROJECT).unwrap_or(&Value::Null))?;
+        let (started_in, start) = self.project(args.get(tools::PROJECT).unwrap_or(&Value::Null))?;
         let argv = spec.argv(args).map_err(|e| anyhow!(e))?;
         // The CLI's grammar with no argument read from the environment: the daemon's FWD_AS,
         // FWD_PROJECT or FWD_SCOPE, inherited from whichever command started it, mean nothing to a
@@ -248,6 +250,20 @@ impl Operations {
         }
         let command = crate::Cli::from_arg_matches(&matches)?.command;
         crate::refuse_before_running(&command)?;
+        let located = match crate::subject_of(&command) {
+            Some((typed, kinds)) => Some((typed.to_string(), ops::locate(&start, typed, kinds).await?)),
+            None => None,
+        };
+        let (project, graph, moved) = match &located {
+            Some((typed, ops::Located { project: Whose::Other(there), .. })) => {
+                let (project, graph) = self
+                    .hosting
+                    .open(there.uuid)
+                    .with_context(|| format!("the daemon does not have the project {} open", there.name))?;
+                (project, graph, Some((typed.clone(), there.name.clone())))
+            }
+            _ => (started_in, start, None),
+        };
         let joining = crate::joins(&matches);
         let writes = joining || crate::WRITES_TOO.contains(&spec.words);
         let stamping = crate::stamps(joining, spec.words);
@@ -285,10 +301,10 @@ impl Operations {
             None => subject::principal_of(&graph, &caller.subject).await?.map(|p| p.id()),
         };
         let me_handle = match acting {
-            Some(p) => crate::handle_of(&graph, p).await,
+            Some(p) => ops::handle_of(&graph, p).await?,
             None => String::new(),
         };
-        let app = App {
+        let mut app = App {
             paths: self.hosting.paths().clone(),
             root: self.hosting.paths().storage_dir(&project),
             project: project.clone(),
@@ -311,7 +327,12 @@ impl Operations {
             scope_typed: scope.is_some(),
             several: None,
             format: Format::Json,
+            subject_project: None,
+            located: located.map(|(typed, found)| (typed, found.id)),
         };
+        if let Some((typed, there)) = &moved {
+            app.moved_to(typed, there);
+        }
         crate::refuse_by_identity(&app, &command, writes).await?;
         let stamped = crate::run_as_caller(&app, command, joining, stamping).await;
         *out = match app.out {

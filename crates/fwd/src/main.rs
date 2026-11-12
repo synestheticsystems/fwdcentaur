@@ -17,7 +17,7 @@ use fwd_core::naming;
 use fwd_core::not_before;
 use fwd_core::ops::{self, Amend, CreateDecision, CreateScope, CreateTask, EditScope, Kind, MessageContext};
 use fwd_core::project::{self, Checkout, InitOptions, NamedProject, Paths, Resolved};
-use fwd_core::project_graph::ProjectGraph;
+use fwd_core::project_graph::{Followed, ProjectGraph, Whose};
 use fwd_core::rules::{self, DecisionMove, Verb};
 use fwd_core::subject;
 use serde::{Deserialize, Serialize};
@@ -1548,9 +1548,25 @@ struct App {
     /// ([`App::needed_scope`]).
     several: Option<(Option<String>, Vec<EntityId>)>,
     format: Format,
+    /// The name of the project the command moved to because its subject is a record of that
+    /// project (docs/DECISIONS.md, D181; [`App::moved_to`]), which its answer names; none for a
+    /// command that runs in the project it started in.
+    subject_project: Option<String>,
+    /// The command's subject as it was typed and the record it names, found before the command
+    /// ran ([`subject_of`]), so that [`App::id`] gives it without reading every project's ids
+    /// again.
+    located: Option<(String, EntityId)>,
 }
 
 impl App {
+    /// Records that the command runs in `project`, the project of its subject `typed`, rather than
+    /// the one it started in, as if it had been run there, and says so beside its answer; a JSON
+    /// answer names the project as `from_project` ([`App::print`]).
+    fn moved_to(&mut self, typed: &str, project: &str) {
+        self.note(format!("NOTE: `{typed}` is from project `{project}`, so this command ran there"));
+        self.subject_project = Some(project.to_string());
+    }
+
     /// Anchors are made from files, so this needs a checkout of one of the project's repositories:
     /// its upstream claimed by the project in the index, or its root marker naming the project.
     fn checkout_root(&self) -> Result<&Path> {
@@ -1612,10 +1628,14 @@ impl App {
         self.scope.map(|scope| if self.scope_typed { ops::Serves::Scope(scope) } else { ops::Serves::Found(scope) })
     }
 
-    /// An entity named on the command line among `kinds`: its id, `D<number>` for a decision, or
-    /// the first six or more characters of its id (`ops::resolve_id`).
+    /// An entity named on the command line among `kinds`, in any project: its id, `D<number>` for
+    /// a decision of this project, or the first six or more characters of its id
+    /// (`ops::resolve_id`); the command's subject as it was found before the command ran.
     async fn id(&self, s: &str, kinds: &[Kind]) -> Result<EntityId> {
-        ops::resolve_id(self.graph(), s, kinds).await
+        match &self.located {
+            Some((typed, record)) if typed == s => Ok(*record),
+            _ => ops::resolve_id(self.graph(), s, kinds).await,
+        }
     }
 
     async fn opt_id(&self, s: Option<&str>, kinds: &[Kind]) -> Result<Option<EntityId>> {
@@ -1644,7 +1664,14 @@ impl App {
         }
     }
 
-    fn print(&self, value: Value) -> Result<()> {
+    /// Prints `value`, the command's answer: as JSON, an object names the project the command
+    /// moved to as `from_project` when its subject is another project's record ([`App::moved_to`]).
+    fn print(&self, mut value: Value) -> Result<()> {
+        if let (Some(project), Some(answer), false) =
+            (&self.subject_project, value.as_object_mut(), self.format == Format::Text)
+        {
+            answer.insert("from_project".into(), json!(project));
+        }
         if let Output::Captured(captured) = &self.out {
             captured.lock().expect("captured output").values.push(value);
             return Ok(());
@@ -1787,11 +1814,11 @@ async fn roles_changed(app: &App, principal: EntityId, before: Option<ops::Servi
     if let Some(before) = before {
         let principals = ops::principals(graph).await?;
         for &scope in before.scopes.iter().filter(|s| !after.serves_scope(**s)) {
-            let named = scope_words(graph, scope).await;
+            let named = scope_words(graph, scope).await?;
             match ops::front_line(&principals, Some(scope)) {
                 Some(f) => app.note(format!(
                     "fwd: @{}, which serves the whole project, answers first for the scope {named} now",
-                    handle_of(graph, f.agent).await
+                    ops::handle_of(graph, f.agent).await?
                 )),
                 None => app.note(format!(
                     "fwd: the scope {named} has no triage agent now: the questions asked of it wait on the Questions page and reach the next agent that serves it{unread}; its comments, proposals and reviews reach no triage agent meanwhile"
@@ -1830,7 +1857,7 @@ async fn principal_json(graph: &ProjectGraph, p: &PrincipalView) -> Result<Value
         let mut named = Vec::with_capacity(scopes.len());
         for id in scopes.iter().filter_map(Value::as_str) {
             let title = match id.parse::<EntityId>() {
-                Ok(scope) => scope_title(graph, Some(scope)).await,
+                Ok(scope) => scope_title(graph, Some(scope)).await?,
                 Err(_) => None,
             };
             named.push(json!({"id": id, "title": title}));
@@ -2493,7 +2520,22 @@ async fn run_cli() -> Result<()> {
         Some(subject) => Some(subject.clone()),
         None => subject_here()?,
     };
-    let app = connect(&cli, paths, format, subject, typed_as, thread_hook, scope_typed).await?;
+    let resolved = resolve_project(&cli, &paths)?;
+    let mut app =
+        connect(&cli, paths, resolved, format, subject.clone(), typed_as.clone(), thread_hook, scope_typed).await?;
+    // A command whose subject is a record of another project runs in that project, as if
+    // `--project` had named it, whoever the caller is there, and says so (docs/DECISIONS.md, D181).
+    if let Some((typed, kinds)) = subject_of(&cli.command) {
+        let client = app.client.as_ref().expect("the CLI connected through its client");
+        let found = client.while_connected(ops::locate(app.graph(), typed, kinds)).await?;
+        if let Whose::Other(there) = found.project {
+            let resolved = project::resolve(&app.paths, &std::env::current_dir()?, Some(&there.uuid.to_string()))?;
+            let paths = app.paths.clone();
+            app = connect(&cli, paths, resolved, format, subject, typed_as, thread_hook, scope_typed).await?;
+            app.moved_to(typed, &there.name);
+        }
+        app.located = Some((typed.to_string(), found.id));
+    }
     // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
     // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
     // after it, as a question a retired triage agent never heard of reaches the next one (task
@@ -2555,6 +2597,94 @@ pub(crate) fn refuse_before_running(command: &Command) -> Result<()> {
     }
 }
 
+/// The record a command acts on, as typed on its command line, with the kinds it may be: the
+/// command runs in the project that record is in, wherever it started, as the page switches to
+/// the project of a record it opens (docs/DECISIONS.md, D181). Every other id the command takes is
+/// a reference, which names a record of any project and moves nothing: `fwd link <from> <kind>
+/// <to>` runs in the project of `from`, and `to` may be a record of another. None for a command
+/// that acts on no one record: one that makes a record (`task create`), lists, or reads the
+/// caller's own inbox.
+pub(crate) fn subject_of(command: &Command) -> Option<(&str, &'static [Kind])> {
+    const TASK: &[Kind] = &[Kind::Task];
+    const SCOPE: &[Kind] = &[Kind::Scope];
+    const DECISION: &[Kind] = &[Kind::Decision];
+    const MESSAGE: &[Kind] = &[Kind::Message];
+    const MESSAGE_OR_NOTIFICATION: &[Kind] = &[Kind::Message, Kind::Notification];
+    const DISCUSSED: &[Kind] = &[Kind::Task, Kind::Anchor, Kind::Scope, Kind::Decision];
+    match command {
+        Command::Task { command } => match command {
+            TaskCommand::Show { id, .. }
+            | TaskCommand::Assign { id, .. }
+            | TaskCommand::Unassign { id }
+            | TaskCommand::Approve { id, .. }
+            | TaskCommand::Reject { id, .. }
+            | TaskCommand::Start { id }
+            | TaskCommand::Submit { id, .. }
+            | TaskCommand::Accept { id, .. }
+            | TaskCommand::Return { id, .. }
+            | TaskCommand::Done { id, .. }
+            | TaskCommand::Cancel { id, .. }
+            | TaskCommand::Reopen { id, .. }
+            | TaskCommand::Rejustify { id, .. }
+            | TaskCommand::Hold { id, .. }
+            | TaskCommand::Release { id }
+            | TaskCommand::Explain { id } => Some((id, TASK)),
+            TaskCommand::Amend(a) => Some((&a.id, TASK)),
+            TaskCommand::Create(_) | TaskCommand::List { .. } | TaskCommand::Next { .. } => None,
+        },
+        Command::Step { command } => match command {
+            StepCommand::Add { task, .. }
+            | StepCommand::List { task }
+            | StepCommand::Check { task, .. }
+            | StepCommand::Uncheck { task, .. }
+            | StepCommand::Remove { task, .. } => Some((task, TASK)),
+        },
+        Command::Link { from, .. } | Command::Unlink { from, .. } => Some((from, ops::ANY)),
+        Command::Relations { id, .. } => Some((id, ops::ANY)),
+        Command::Relation { command: RelationCommand::Approve { id } | RelationCommand::Reject { id, .. } } => {
+            Some((id, &[Kind::Relation]))
+        }
+        Command::Scope { command } => match command {
+            ScopeCommand::Branches { id, .. }
+            | ScopeCommand::AttachDir { id, .. }
+            | ScopeCommand::Show { id }
+            | ScopeCommand::Rename { id, .. }
+            | ScopeCommand::Intention { id, .. }
+            | ScopeCommand::Status { id, .. } => Some((id, SCOPE)),
+            ScopeCommand::Create { .. } | ScopeCommand::List => None,
+        },
+        Command::Comment { first, text: Some(_), .. } => Some((first, DISCUSSED)),
+        Command::Anchor { command: AnchorCommand::Show { id, .. } | AnchorCommand::Resolve { id, .. } } => {
+            Some((id, &[Kind::Anchor]))
+        }
+        Command::Ask { about: Some(about), .. } => Some((about, &[Kind::Task, Kind::Decision])),
+        Command::Reply { id, .. } | Command::Forward { id, .. } => Some((id, MESSAGE_OR_NOTIFICATION)),
+        Command::Message { command } => match command {
+            MessageCommand::List { on: Some(on), .. } => Some((on, DISCUSSED)),
+            MessageCommand::Show { id } | MessageCommand::Resolve { id } | MessageCommand::Unresolve { id } => {
+                Some((id, MESSAGE))
+            }
+            MessageCommand::Edit { id, .. } => Some((id, MESSAGE_OR_NOTIFICATION)),
+            MessageCommand::List { on: None, .. } => None,
+        },
+        Command::Decision { command } => match command {
+            DecisionCommand::Show { id }
+            | DecisionCommand::Attach { id, .. }
+            | DecisionCommand::Detach { id }
+            | DecisionCommand::Accept { id, .. }
+            | DecisionCommand::Reject { id, .. }
+            | DecisionCommand::Repeal { id, .. } => Some((id, DECISION)),
+            DecisionCommand::Supersede { old, .. } => Some((old, DECISION)),
+            DecisionCommand::Create(_) | DecisionCommand::List { .. } | DecisionCommand::Export => None,
+        },
+        Command::Cite { entity, .. } => Some((entity, &[Kind::Task, Kind::Message, Kind::Decision])),
+        Command::Read { ids } | Command::Dismiss { ids } => {
+            ids.first().map(|id| (id.as_str(), &[Kind::Notification][..]))
+        }
+        _ => None,
+    }
+}
+
 /// What a command whose work was made, but whose stamp of when its principal last wrote failed,
 /// ends with, so that no one runs it again and makes the work twice.
 pub(crate) const STAMP_FAILED: &str = "the command's work is recorded, so do not run it again: only stamping when the principal it acts as last wrote failed, which the pickers read to list an agent as dormant";
@@ -2573,7 +2703,9 @@ pub(crate) async fn run_as_caller(app: &App, command: Command, joining: bool, st
     if joining {
         refuse_without_role(app.graph(), app.me).await?;
     }
-    let ran = fwd_core::file_mention::reading_files_in(files_in, run(app, command)).await;
+    // On the heap: the dispatcher's future holds every command's state, which in a debug build
+    // outgrows the 2 MiB stack of the tokio worker the daemon runs an MCP call on.
+    let ran = fwd_core::file_mention::reading_files_in(files_in, Box::pin(run(app, command))).await;
     // A triage agent that serves nothing is told so after each of its commands, the command
     // that binds it among them, which is why this reads the graph once the command has run.
     say_unbound(app).await?;
@@ -2638,19 +2770,20 @@ async fn person(graph: &ProjectGraph, paths: &Paths) -> Result<(EntityId, String
     Ok((me, identity.handle))
 }
 
-/// Connects to the project's daemon and finds whom the command acts as, and the scope it works in
-/// ([`caller`]), reading them from the daemon while it stays connected
+/// Connects to the daemon for the project `resolved` names and finds whom the command acts as, and
+/// the scope it works in ([`caller`]), reading them from the daemon while it stays connected
 /// (`Client::while_connected`).
+#[allow(clippy::too_many_arguments)]
 async fn connect(
     cli: &Cli,
     paths: Paths,
+    resolved: Resolved,
     format: Format,
     subject: Option<String>,
     typed_as: Option<String>,
     thread_hook: bool,
     scope_typed: bool,
 ) -> Result<App> {
-    let resolved = resolve_project(cli, &paths)?;
     let client = daemon::ensure_daemon(&paths, &resolved.project, autostart(cli)?).await?;
     let Caller { me, me_handle, acting, scope, several } = client
         .while_connected(caller(cli, &paths, &client, &resolved, subject.as_deref(), typed_as.as_deref(), thread_hook))
@@ -2674,6 +2807,8 @@ async fn connect(
         scope_typed,
         several,
         format,
+        subject_project: None,
+        located: None,
     })
 }
 
@@ -2729,7 +2864,7 @@ async fn caller(
                 subject::caller(graph, subject, typed_as).await?
             };
             match bound {
-                Some(p) => (p, handle_of(graph, p).await, Some(p)),
+                Some(p) => (p, ops::handle_of(graph, p).await?, Some(p)),
                 None => {
                     let (person, handle) = person(graph, paths).await?;
                     (person, handle, None)
@@ -2753,7 +2888,7 @@ async fn caller(
             let (me, me_handle) = match cli.act_as.as_deref().filter(|_| !names_itself) {
                 Some(handle) => {
                     let me = act_as(graph, handle).await?;
-                    (me, handle_of(graph, me).await)
+                    (me, ops::handle_of(graph, me).await?)
                 }
                 None => person(graph, paths).await?,
             };
@@ -3316,7 +3451,9 @@ async fn refuse_retired(graph: &ProjectGraph, principal: EntityId, typed_as: boo
         }
     };
     let succeeded = match p.succeeded_by()?.map(EntityId::from) {
-        Some(successor) => format!(", succeeded by @{}, which carries on its job", handle_of(graph, successor).await),
+        Some(successor) => {
+            format!(", succeeded by @{}, which carries on its job", ops::handle_of(graph, successor).await?)
+        }
         None => String::new(),
     };
     let as_it = if typed_as { format!("--as {handle} ") } else { String::new() };
@@ -3345,7 +3482,7 @@ async fn triage_guidance(graph: &ProjectGraph, scope: Option<EntityId>) -> Resul
         return Ok(None);
     }
     let named = match scope {
-        Some(scope) => Some((scope_title(graph, Some(scope)).await.unwrap_or_default(), short_id(&scope.to_base64()))),
+        Some(scope) => Some((scope_title(graph, Some(scope)).await?.unwrap_or_default(), short_id(&scope.to_base64()))),
         None => None,
     };
     Ok(Some(fwd_core::guidance::triage_subagent(named.as_ref().map(|(t, id)| (t.as_str(), id.as_str())))))
@@ -3353,8 +3490,8 @@ async fn triage_guidance(graph: &ProjectGraph, scope: Option<EntityId>) -> Resul
 
 /// A scope as the sentences on standard error name it: its title in quotes and the first eight
 /// characters of its id, `"Replication" (Ab3dEf12)`.
-async fn scope_words(graph: &ProjectGraph, scope: EntityId) -> String {
-    format!("\"{}\" ({})", scope_title(graph, Some(scope)).await.unwrap_or_default(), short_id(&scope.to_base64()))
+async fn scope_words(graph: &ProjectGraph, scope: EntityId) -> Result<String> {
+    Ok(format!("\"{}\" ({})", scope_title(graph, Some(scope)).await?.unwrap_or_default(), short_id(&scope.to_base64())))
 }
 
 /// What `fwd ask` and `fwd forward` say on standard error once they have asked no one in
@@ -3371,7 +3508,7 @@ async fn say_waiting(app: &App, message: EntityId) -> Result<()> {
     let scope = fwd_core::routing::asked_scope(graph, &mc).await?;
     let Some(guidance) = triage_guidance(graph, scope).await? else { return Ok(()) };
     let whom = match scope {
-        Some(scope) => format!("of the scope {}", scope_words(graph, scope).await),
+        Some(scope) => format!("of the scope {}", scope_words(graph, scope).await?),
         None => "of the project".to_string(),
     };
     app.note(format!(
@@ -3446,10 +3583,10 @@ async fn show_message(app: &App, id: EntityId) -> Result<()> {
     match app.format {
         Format::Text => {
             let author_id: EntityId = m.author()?.into();
-            let author = handle_of(graph, author_id).await;
+            let author = ops::handle_of(graph, author_id).await?;
             let status = v["status"].as_str().unwrap_or("");
             let by = match m.edited_by()?.map(EntityId::from).filter(|by| *by != author_id) {
-                Some(by) => format!(" by @{}", handle_of(graph, by).await),
+                Some(by) => format!(" by @{}", ops::handle_of(graph, by).await?),
                 None => String::new(),
             };
             let edited = m.edited()?.map(|t| format!(", edited {}{by}", fwd_core::reason::ago(t))).unwrap_or_default();
@@ -3499,24 +3636,16 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Adds `author_handle` to message JSON so UIs can show who wrote it without a second lookup, and
-/// the `references` its text makes ([`message_json`]).
-async fn with_authors(graph: &ProjectGraph, messages: Vec<Value>) -> Vec<Value> {
+/// Adds `author_handle` to message JSON so UIs can show who wrote it without a second lookup, the
+/// author followed wherever in the node it is (`ops::handle_of`), and the `references` its text makes
+/// ([`message_json`]).
+async fn with_authors(graph: &ProjectGraph, messages: Vec<Value>) -> Result<Vec<Value>> {
     let mut cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(messages.len());
     for mut m in messages {
         if let Some(author) = m["author"].as_str().map(str::to_string) {
             if !cache.contains_key(&author) {
-                let handle = match author.parse::<EntityId>() {
-                    Ok(id) => graph
-                        .get::<PrincipalView>(id)
-                        .await
-                        .ok()
-                        .and_then(|p| p.handle().ok())
-                        .unwrap_or_else(|| short(&author)),
-                    Err(_) => short(&author),
-                };
-                cache.insert(author.clone(), handle);
+                cache.insert(author.clone(), ops::handle_of(graph, ops::parse_id(&author)?).await?);
             }
             m["author_handle"] = json!(cache[&author]);
         }
@@ -3525,16 +3654,7 @@ async fn with_authors(graph: &ProjectGraph, messages: Vec<Value>) -> Vec<Value> 
         }
         out.push(m);
     }
-    out
-}
-
-fn short(id: &str) -> String {
-    id.chars().take(6).collect()
-}
-
-/// A principal's handle, or the start of its id when it cannot be found.
-async fn handle_of(graph: &ProjectGraph, id: EntityId) -> String {
-    graph.get::<PrincipalView>(id).await.ok().and_then(|p| p.handle().ok()).unwrap_or_else(|| short(&id.to_base64()))
+    Ok(out)
 }
 
 /// A few words of prose on one line, for naming a message where it is listed.
@@ -3556,23 +3676,29 @@ async fn decision_json(app: &App, id: EntityId) -> Result<Value> {
     let mut v = ops::json_of_decision(&d)?;
     for key in ["author", "decided_by", "closed_by"] {
         if let Some(principal) = v[key].as_str().and_then(|s| s.parse::<EntityId>().ok()) {
-            v[format!("{key}_handle")] = json!(handle_of(app.graph(), principal).await);
+            v[format!("{key}_handle")] = json!(ops::handle_of(app.graph(), principal).await?);
         }
     }
-    v["scope_title"] = json!(scope_title(app.graph(), ops::governs(&d)?).await);
+    v["scope_title"] = json!(scope_title(app.graph(), ops::governs(&d)?).await?);
     v["closing_note"] = json!(decision_log::why_closed(app.graph(), &d).await?);
     Ok(v)
 }
 
-/// The title of the scope a decision governs, when it governs one and the scope can be read.
-async fn scope_title(graph: &ProjectGraph, scope: Option<EntityId>) -> Option<String> {
-    graph.get::<ScopeView>(scope?).await.ok()?.title().ok()
+/// The title of `scope`, when there is one and the node holds it, followed wherever in the node it
+/// is, with its project's name after it when that is another (`Replication in beta`).
+async fn scope_title(graph: &ProjectGraph, scope: Option<EntityId>) -> Result<Option<String>> {
+    let Some(scope) = scope else { return Ok(None) };
+    Ok(match graph.follow::<ScopeView>(scope).await? {
+        Followed::Held { project, found, .. } => Some(ops::in_project(found.title()?, &project)),
+        Followed::NotHeld => None,
+    })
 }
 
 /// Puts in `v`, a task `task` as a command prints it, the scopes the task is worked in, any number
 /// since D136 ("A task may be worked in several scopes", 2026-10-03), in the order it came to be
-/// worked in them (`ops::worked_in`): `scopes`, each its id, and with `named` its `title` too (null
-/// for a scope that cannot be read) as `fwd task show` prints them, else its id alone. `worked_in`,
+/// worked in them (`ops::worked_in`): `scopes`, each its id, and with `named` its `title` too, a
+/// scope of another project with that project's name after its title and as `project` (null for a
+/// scope the node does not hold), as `fwd task show` prints them, else its id alone. `worked_in`,
 /// the first of them or null, which was the task's one scope until then, is kept for one release
 /// for readers that read one, beside `worked_in_title` when `named` (docs/design/cli.md, "Tasks").
 async fn with_scopes(graph: &ProjectGraph, v: &mut Value, task: EntityId, named: bool) -> Result<()> {
@@ -3580,7 +3706,14 @@ async fn with_scopes(graph: &ProjectGraph, v: &mut Value, task: EntityId, named:
     let mut listed = Vec::with_capacity(scopes.len());
     for scope in &scopes {
         listed.push(if named {
-            json!({"id": scope.to_base64(), "title": scope_title(graph, Some(*scope)).await})
+            let mut v = json!({"id": scope.to_base64(), "title": null});
+            if let Followed::Held { project, found, .. } = graph.follow::<ScopeView>(*scope).await? {
+                if let Whose::Other(p) = &project {
+                    v["project"] = json!(p.name);
+                }
+                v["title"] = json!(ops::in_project(found.title()?, &project));
+            }
+            v
         } else {
             json!(scope.to_base64())
         });
@@ -3589,26 +3722,39 @@ async fn with_scopes(graph: &ProjectGraph, v: &mut Value, task: EntityId, named:
     let first = scopes.first().copied();
     v["worked_in"] = json!(first.map(|s| s.to_base64()));
     if named && first.is_some() {
-        v["worked_in_title"] = json!(scope_title(graph, first).await);
+        v["worked_in_title"] = json!(scope_title(graph, first).await?);
     }
     Ok(())
 }
 
-/// The far end of a `cites` or `supersedes` relation, named: what it is and a few words of it.
+/// The other end of a `cites` or `supersedes` relation, followed wherever in the node it is and
+/// named: what it is and a few words of it, with `project`, the name of its project, when that is
+/// another, after its name too, since a decision's number names another decision there; an end the
+/// node does not hold is named as one that cannot be followed here.
 async fn end_json(graph: &ProjectGraph, relation: &RelationView, other: EntityId) -> Result<Value> {
-    let (kind, name, status) = if let Ok(d) = graph.get::<DecisionView>(other).await {
-        ("decision", format!("D{} {}", d.number()?, d.title()?), Some(d.status()?.to_string()))
-    } else if let Ok(t) = graph.get::<TaskView>(other).await {
-        ("task", t.title()?, Some(t.status()?.to_string()))
-    } else if let Ok(m) = graph.get::<MessageView>(other).await {
-        let author = handle_of(graph, m.author()?.into()).await;
-        ("message", format!("{author}: {}", snippet(&ops::text(m.content())?, 80)), Some(m.status()?.to_string()))
-    } else {
-        ("unknown", short(&other.to_base64()), None)
-    };
-    Ok(
-        json!({"relation": relation.id().to_base64(), "id": other.to_base64(), "kind": kind, "name": name, "status": status}),
-    )
+    let (kind, named, status) =
+        if let Followed::Held { project, found: d, .. } = graph.follow::<DecisionView>(other).await? {
+            ("decision", Some((format!("D{} {}", d.number()?, d.title()?), project)), Some(d.status()?.to_string()))
+        } else if let Followed::Held { project, found: t, .. } = graph.follow::<TaskView>(other).await? {
+            ("task", Some((t.title()?, project)), Some(t.status()?.to_string()))
+        } else if let Followed::Held { project, found: m, .. } = graph.follow::<MessageView>(other).await? {
+            let author = ops::handle_of(graph, m.author()?.into()).await?;
+            let words = format!("{author}: {}", snippet(&ops::text(m.content())?, 80));
+            ("message", Some((words, project)), Some(m.status()?.to_string()))
+        } else {
+            ("unknown", None, None)
+        };
+    let mut v = json!({"relation": relation.id().to_base64(), "id": other.to_base64(), "kind": kind, "status": status});
+    match named {
+        Some((name, project)) => {
+            if let Whose::Other(p) = &project {
+                v["project"] = json!(p.name);
+            }
+            v["name"] = json!(ops::in_project(name, &project));
+        }
+        None => v["name"] = json!(ops::not_followed(&other.to_base64())),
+    }
+    Ok(v)
 }
 
 /// Everything `fwd decision show` prints: the record, what cites it and what it cites (the
@@ -3640,7 +3786,7 @@ async fn decision_details(app: &App, id: EntityId) -> Result<Value> {
     ends("superseded_by", superseded_by);
     let comments: Vec<Value> =
         ops::messages_about(graph, "decision", id).await?.iter().map(ops::json_of_message).collect::<Result<_>>()?;
-    v["comments"] = Value::Array(with_authors(graph, comments).await);
+    v["comments"] = Value::Array(with_authors(graph, comments).await?);
     Ok(v)
 }
 
@@ -3660,11 +3806,12 @@ fn decision_head(d: &Value) -> String {
     format!("{:<5} {:<10} {:<12} {}", field("ref"), field("status"), area, field("title"))
 }
 
-/// The scope a decision's JSON says it governs, by title, or by the start of its id when its
-/// title could not be read; none for a project-wide ruling.
+/// The scope a decision's JSON says it governs, by title, or, when the node does not hold it, by
+/// the start of its id, said to be one that cannot be followed here; none for a project-wide
+/// ruling.
 fn governed(d: &Value) -> Option<String> {
     let id = d["scope"].as_str()?;
-    Some(d["scope_title"].as_str().map(str::to_string).unwrap_or_else(|| short(id)))
+    Some(d["scope_title"].as_str().map(str::to_string).unwrap_or_else(|| ops::not_followed(id)))
 }
 
 /// A decision for people: its line, who ruled and when, its prose, where why it closed is
@@ -3767,7 +3914,7 @@ async fn task_details(app: &App, id: EntityId) -> Result<Value> {
     let graph = app.graph();
     let mut v = task_json(app, id).await?;
     if let Some(a) = v["assignee"].as_str().and_then(|s| s.parse::<EntityId>().ok()) {
-        v["assignee_handle"] = json!(handle_of(graph, a).await);
+        v["assignee_handle"] = json!(ops::handle_of(graph, a).await?);
     }
     with_scopes(graph, &mut v, id, true).await?;
     let steps = steps_json(graph, id).await?;
@@ -3777,10 +3924,11 @@ async fn task_details(app: &App, id: EntityId) -> Result<Value> {
     Ok(v)
 }
 
-/// Each of `relations`, oldest first, as `fwd relations` prints it, with `other`, the thing at the
-/// end that is not the task (its `to` for a relation `out` of the task, else its `from`), named as
-/// a message's references name things (`ops::reference_json`: its id, kind and name), as `fwd task
-/// show --include relations` gives them.
+/// Each of `relations`, oldest first, with `other`, the thing at the end that is not the record
+/// they touch (its `to` for a relation `out` of it, else its `from`), followed wherever in the node
+/// it is and named as a message's references name things (`ops::reference_json`: its id, kind and
+/// name, and `project` for a record of another project), as `fwd relations`, `fwd task explain` and
+/// `fwd task show --include relations` give them.
 async fn relations_named(graph: &ProjectGraph, mut relations: Vec<RelationView>, out: bool) -> Result<Vec<Value>> {
     relations.sort_by_key(|r| r.created().unwrap_or(0));
     let mut named = Vec::with_capacity(relations.len());
@@ -3799,13 +3947,13 @@ async fn relations_named(graph: &ProjectGraph, mut relations: Vec<RelationView>,
 async fn task_messages(graph: &ProjectGraph, task: EntityId) -> Result<Vec<Value>> {
     let messages: Vec<Value> =
         ops::messages_about(graph, "task", task).await?.iter().map(ops::json_of_message).collect::<Result<_>>()?;
-    let mut messages = with_authors(graph, messages).await;
+    let mut messages = with_authors(graph, messages).await?;
     for m in &mut messages {
         // `to` holds the id of the principal it asks, or a handle, which routing reads too
         // (`ops::MessageContext`).
         if let Some(to) = m["context"]["to"].as_str().map(str::to_string) {
             m["to_handle"] = json!(match to.parse::<EntityId>() {
-                Ok(id) => handle_of(graph, id).await,
+                Ok(id) => ops::handle_of(graph, id).await?,
                 Err(_) => to,
             });
         }
@@ -3823,25 +3971,23 @@ async fn steps_json(graph: &ProjectGraph, task: EntityId) -> Result<Vec<Value>> 
 }
 
 /// One step as JSON: its number in the checklist (`n`), its relation (`edge`), what the step is
-/// (`id`, `kind`, `name`), whether it is checked and by whom, and, for a highlight, its file, its
-/// lines (1-based, inclusive), the version it was made on, its first characters (`excerpt`), the
-/// first line its name shows (`first_line`, fwd-core's `anchor_name`) and the first thread on it
-/// (`thread`: its first message's `id` and `status`, or null while it has none), which moves with
-/// the step; for a task or a decision, its status.
+/// (`id`, `kind`, `name`, followed wherever in the node it is as a reference is: `ops::reference_json`,
+/// with `project` for a record of another project), whether it is checked and by whom, and, for a
+/// highlight, its file, its lines (1-based, inclusive), the version it was made on, its first
+/// characters (`excerpt`), the first line its name shows (`first_line`, fwd-core's `anchor_name`)
+/// and the first thread on it (`thread`: its first message's `id` and `status`, or null while it has
+/// none), which moves with the step; for a task or a decision, its status.
 async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Result<Value> {
     let step: EntityId = edge.from_id()?;
     let checked = edge.status()? == RelationStatus::Resolved;
-    let (kind, name) = match ops::describe(graph, step).await {
-        Some((kind, name)) => (kind.name(), name),
-        None => ("unknown", step.to_base64()),
-    };
+    let what = ops::reference_json(graph, step).await;
     let checked_by = edge.closed_by()?.map(EntityId::from).filter(|_| checked);
     let mut v = json!({
         "n": n,
         "edge": edge.id().to_base64(),
         "id": step.to_base64(),
-        "kind": kind,
-        "name": name,
+        "kind": what["kind"],
+        "name": what["name"],
         "checked": checked,
         "checked_by": checked_by.map(|p| p.to_base64()),
         "checked_at": edge.closed()?.filter(|_| checked),
@@ -3849,10 +3995,13 @@ async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Resul
         "created_by": EntityId::from(edge.created_by()?).to_base64(),
         "created": edge.created()?,
     });
-    if let Some(p) = checked_by {
-        v["checked_by_handle"] = json!(handle_of(graph, p).await);
+    if let Some(project) = what.get("project") {
+        v["project"] = project.clone();
     }
-    if let Ok(a) = graph.get::<CodeAnchorView>(step).await {
+    if let Some(p) = checked_by {
+        v["checked_by_handle"] = json!(ops::handle_of(graph, p).await?);
+    }
+    if let Followed::Held { found: a, .. } = graph.follow::<CodeAnchorView>(step).await? {
         // The version the highlight was made on: its basis blob, or on an anchor of the first
         // cut the HEAD blob it was mapped onto; one of the first cut made on a dirty file recorded
         // none (`worktree`). A whole-file highlight has no lines.
@@ -3869,9 +4018,9 @@ async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Resul
             Some(m) => json!({"id": m.id().to_base64(), "status": m.status()?.to_string()}),
             None => Value::Null,
         };
-    } else if let Ok(t) = graph.get::<TaskView>(step).await {
+    } else if let Followed::Held { found: t, .. } = graph.follow::<TaskView>(step).await? {
         v["status"] = json!(t.status()?.to_string());
-    } else if let Ok(d) = graph.get::<DecisionView>(step).await {
+    } else if let Followed::Held { found: d, .. } = graph.follow::<DecisionView>(step).await? {
         v["status"] = json!(d.status()?.to_string());
     }
     Ok(v)
@@ -3927,12 +4076,13 @@ fn task_text(t: &Value) -> String {
         Some(handle) => about.push(format!("assigned to @{handle}")),
         None => about.push("unassigned".into()),
     }
-    // Each scope by its name, or the start of its id when it cannot be read.
+    // Each scope by its name, or, when the node does not hold it, the start of its id, said to be
+    // one that cannot be followed here.
     let scopes: Vec<String> = t["scopes"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|s| s["title"].as_str().map_or_else(|| short_id(s["id"].as_str().unwrap_or("")), str::to_string))
+        .map(|s| s["title"].as_str().map_or_else(|| ops::not_followed(s["id"].as_str().unwrap_or("")), str::to_string))
         .collect();
     match scopes.as_slice() {
         [] => {}
@@ -4129,7 +4279,7 @@ async fn remove_step(app: &App, task: &str, step: &str, reason: &str, retire: bo
     let graph = app.graph();
     let task = app.id(task, &[Kind::Task]).await?;
     let (n, edge) = step_at(&ops::steps(graph, task).await?, step, &former_ids_for(graph, step).await?)?;
-    let mut removed = step_json(graph, &graph.get::<RelationView>(edge).await?, n).await?;
+    let mut removed = step_json(graph, &graph.relation(edge).await?, n).await?;
     let retired = ops::remove_step(graph, app.me, task, edge, reason, retire).await?;
     removed["reason"] = json!(reason.trim());
     let mut resolved = Vec::with_capacity(retired.messages.len());
@@ -4175,7 +4325,10 @@ async fn moved_steps_json(graph: &ProjectGraph, moved: &[(EntityId, RelationStat
         let n = ops::steps(graph, task).await?.iter().position(|s| s.id() == *edge).map_or(0, |i| i + 1);
         let mut v = step_json(graph, &r, n).await?;
         v["task"] = json!(task.to_base64());
-        v["task_title"] = json!(graph.get::<TaskView>(task).await.ok().and_then(|t| t.title().ok()));
+        v["task_title"] = match graph.follow::<TaskView>(task).await? {
+            Followed::Held { project, found, .. } => json!(ops::in_project(found.title()?, &project)),
+            Followed::NotHeld => Value::Null,
+        };
         out.push(v);
     }
     Ok(out)
@@ -4460,8 +4613,8 @@ async fn listed_json(graph: &ProjectGraph, batch: &fwd_core::routing::Batch) -> 
     use fwd_core::reason::{self, BatchEntry, Held};
     let mut said = std::collections::HashMap::new();
     for message in batch.messages() {
-        if let Ok(m) = graph.get::<MessageView>(message).await {
-            said.insert(message, m);
+        if let Followed::Held { found, .. } = graph.follow::<MessageView>(message).await? {
+            said.insert(message, found);
         }
     }
     let on = |message: EntityId| {
@@ -4476,12 +4629,12 @@ async fn listed_json(graph: &ProjectGraph, batch: &fwd_core::routing::Batch) -> 
                 for m in comments.iter().filter_map(|c| said.get(c)) {
                     texts.push(message_json(graph, m).await?);
                 }
-                let texts = with_authors(graph, texts).await;
+                let texts = with_authors(graph, texts).await?;
                 out.push(json!({"step": ops::reference_json(graph, step).await, "comments": texts}));
             }
             BatchEntry::Comment { message, on } => {
                 let Some(m) = said.get(&message) else { continue };
-                let comment = with_authors(graph, vec![message_json(graph, m).await?]).await;
+                let comment = with_authors(graph, vec![message_json(graph, m).await?]).await?;
                 let mut listed = json!({"comment": comment.into_iter().next()});
                 if let Some(highlight) = on {
                     listed["on"] = ops::reference_json(graph, highlight).await;
@@ -4509,10 +4662,11 @@ async fn notification_with_message(
     if let Some(batch) = fwd_core::reason::listed(&nj["originator"]) {
         nj["listed"] = listed_json(graph, &batch).await?;
     }
+    // The message behind it, followed wherever in the node it is.
     let message = match nj["originator"]["message_id"].as_str().and_then(|s| s.parse::<EntityId>().ok()) {
-        Some(mid) => match graph.get::<MessageView>(mid).await {
-            Ok(m) => Some(message_json(graph, &m).await?),
-            Err(_) => None,
+        Some(mid) => match graph.follow::<MessageView>(mid).await? {
+            Followed::Held { found, .. } => Some(message_json(graph, &found).await?),
+            Followed::NotHeld => None,
         },
         None => None,
     };
@@ -4640,9 +4794,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 let caller = app.acting.context(
                     "a principal renames itself, and this command acts as none: name yourself, `fwd principal add <name> --role <role>`",
                 )?;
-                let old = handle_of(graph, caller).await;
+                let old = ops::handle_of(graph, caller).await?;
                 ops::rename_principal(graph, caller, &name).await?;
-                let new = handle_of(graph, caller).await;
+                let new = ops::handle_of(graph, caller).await?;
                 if new != old {
                     app.note(format!(
                         "fwd: @{old} is @{new} now, with the same id: a --as, FWD_AS or fwd.as setting that gives `{old}` names no principal now, so give it `{new}`"
@@ -4806,7 +4960,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     .iter()
                     .map(ops::json_of_message)
                     .collect::<Result<_>>()?;
-                v["messages"] = Value::Array(with_authors(graph, messages).await);
+                v["messages"] = Value::Array(with_authors(graph, messages).await?);
                 v["claimed"] = json!(claim);
                 app.print(v)
             }
@@ -4870,16 +5024,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
             TaskCommand::Explain { id } => {
                 let id = app.id(&id, &[Kind::Task]).await?;
                 let mut v = task_json(app, id).await?;
-                let out: Vec<Value> = ops::relations_from(graph, id, None)
-                    .await?
-                    .iter()
-                    .map(ops::json_of_relation)
-                    .collect::<Result<_>>()?;
-                let inc: Vec<Value> = ops::relations_to(graph, id, None)
-                    .await?
-                    .iter()
-                    .map(ops::json_of_relation)
-                    .collect::<Result<_>>()?;
+                let out = relations_named(graph, ops::relations_from(graph, id, None).await?, true).await?;
+                let inc = relations_named(graph, ops::relations_to(graph, id, None).await?, false).await?;
                 let messages: Vec<Value> = ops::messages_about(graph, "task", id)
                     .await?
                     .iter()
@@ -4887,7 +5033,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     .collect::<Result<_>>()?;
                 v["relations_out"] = Value::Array(out);
                 v["relations_in"] = Value::Array(inc);
-                v["messages"] = Value::Array(with_authors(graph, messages).await);
+                v["messages"] = Value::Array(with_authors(graph, messages).await?);
                 with_scopes(graph, &mut v, id, false).await?;
                 app.print(v)
             }
@@ -4953,7 +5099,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     "task": task.to_base64(),
                     "title": graph.get::<TaskView>(*task).await.ok().and_then(|t| t.title().ok()),
                     "assignee": who.to_base64(),
-                    "assignee_handle": handle_of(graph, *who).await,
+                    "assignee_handle": ops::handle_of(graph, *who).await?,
                     "scope": scope.to_base64(),
                     "scope_title": graph.get::<ScopeView>(*scope).await.ok().and_then(|s| s.title().ok()),
                 }));
@@ -4961,26 +5107,27 @@ async fn run(app: &App, command: Command) -> Result<()> {
             let ids = |list: &[EntityId]| list.iter().map(|id| json!(id.to_base64())).collect::<Vec<_>>();
             let roles = ops::migrate_roles(graph).await?;
             // A principal by its id, with its handle to read it by.
-            let named =
-                |id: EntityId| async move { json!({"id": id.to_base64(), "handle": handle_of(graph, id).await}) };
+            let named = |id: EntityId| async move {
+                anyhow::Ok(json!({"id": id.to_base64(), "handle": ops::handle_of(graph, id).await?}))
+            };
             let mut principals = serde_json::Map::new();
             for (key, list) in
                 [("roles_cleared", &roles.roles_cleared), ("members", &roles.members), ("readers", &roles.readers)]
             {
                 let mut out = Vec::new();
                 for id in list {
-                    out.push(named(*id).await);
+                    out.push(named(*id).await?);
                 }
                 principals.insert(key.to_string(), Value::Array(out));
             }
             let mut visitors = Vec::new();
             for (id, written) in &roles.visitors {
-                let mut v = named(*id).await;
+                let mut v = named(*id).await?;
                 v["messages"] = json!(written);
                 visitors.push(v);
             }
             let triage = match roles.triage {
-                Some(id) => named(id).await,
+                Some(id) => named(id).await?,
                 None => Value::Null,
             };
             let scopes = ops::migrate_scopes(graph).await?;
@@ -4995,7 +5142,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     "task": task.to_base64(),
                     "title": graph.get::<TaskView>(task).await.ok().and_then(|t| t.title().ok()),
                     "scope": scope.to_base64(),
-                    "scope_title": scope_title(graph, Some(scope)).await,
+                    "scope_title": scope_title(graph, Some(scope)).await?,
                 }));
             }
             let mut v = json!({
@@ -5041,9 +5188,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
         }
         Command::Relations { id, kind } => {
             let id = app.id(&id, ops::ANY).await?;
-            let mut all = ops::relations_from(graph, id, kind).await?;
-            all.extend(ops::relations_to(graph, id, kind).await?);
-            app.print(Value::Array(all.iter().map(ops::json_of_relation).collect::<Result<_>>()?))
+            let mut all = relations_named(graph, ops::relations_from(graph, id, kind).await?, true).await?;
+            all.extend(relations_named(graph, ops::relations_to(graph, id, kind).await?, false).await?);
+            app.print(Value::Array(all))
         }
         Command::Relation { command } => {
             let (id, approve, reason) = match command {
@@ -5120,13 +5267,23 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 let id = app.id(&id, &[Kind::Scope]).await?;
                 let s: ScopeView = graph.get(id).await?;
                 let mut v = ops::json_of_scope(&s)?;
+                // The tasks worked in it, whichever project each is in: a task of another project with
+                // that project's name as `project`.
                 let assigned: Vec<Value> = {
                     let rels = ops::relations_to(graph, id, Some(RelationKind::WorkedIn)).await?;
                     let mut out = Vec::new();
-                    for r in rels {
-                        if r.status()? == RelationStatus::Accepted {
-                            out.push(task_json(app, r.from_id()?).await?);
-                        }
+                    for r in rels.iter().filter(|r| r.status().ok() == Some(RelationStatus::Accepted)) {
+                        let task = r.from_id()?;
+                        out.push(match graph.follow::<TaskView>(task).await? {
+                            Followed::Held { project, found, .. } => {
+                                let mut v = ops::json_of_task(&found, Some(&ops::readiness(graph, &found).await?))?;
+                                if let Whose::Other(p) = project {
+                                    v["project"] = json!(p.name);
+                                }
+                                v
+                            }
+                            Followed::NotHeld => ops::reference_json(graph, task).await,
+                        });
                     }
                     out
                 };
@@ -5217,7 +5374,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     .iter()
                     .map(ops::json_of_message)
                     .collect::<Result<_>>()?;
-                v["messages"] = Value::Array(with_authors(graph, messages).await);
+                v["messages"] = Value::Array(with_authors(graph, messages).await?);
                 app.print(v)
             }
             AnchorCommand::List { path, against } => {
@@ -5245,7 +5402,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         .iter()
                         .map(ops::json_of_message)
                         .collect::<Result<_>>()?;
-                    v["messages"] = Value::Array(with_authors(graph, messages).await);
+                    v["messages"] = Value::Array(with_authors(graph, messages).await?);
                     out.push(v);
                 }
                 app.print(Value::Array(out))
@@ -5387,7 +5544,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         continue;
                     }
                     let mut v = ops::json_of_decision(&d)?;
-                    v["scope_title"] = json!(scope_title(graph, governs).await);
+                    v["scope_title"] = json!(scope_title(graph, governs).await?);
                     out.push(v);
                 }
                 if app.format == Format::Text {
@@ -5512,7 +5669,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         let named = for_handle.as_deref().unwrap_or_default();
                         bail!(
                             "`--for {named}` names @{}'s inbox, not @{}'s, and `fwd inbox pop` marks what it prints read, which a principal does only to its own notifications, as the page marks no card of another's read: nothing was printed or marked; `fwd inbox --for {named}` lists that inbox and marks nothing",
-                            handle_of(graph, who).await,
+                            ops::handle_of(graph, who).await?,
                             app.me_handle,
                         );
                     }
@@ -5596,15 +5753,23 @@ async fn run(app: &App, command: Command) -> Result<()> {
             let relations: Vec<RelationView> = graph.fetch("status = 'accepted' OR status = 'proposed'").await?;
             let ids: std::collections::HashSet<String> =
                 nodes.iter().filter_map(|n| n["id"].as_str().map(str::to_string)).collect();
-            let edges: Vec<Value> = relations
-                .iter()
-                .map(ops::json_of_relation)
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|e| {
-                    ids.contains(e["from"].as_str().unwrap_or("")) || ids.contains(e["to"].as_str().unwrap_or(""))
-                })
-                .collect();
+            // The project's relations that touch a task listed, each end that is not one of them
+            // named as `other`, followed wherever in the node it is (`ops::reference_json`).
+            let mut edges: Vec<Value> = Vec::new();
+            for r in &relations {
+                let mut e = ops::json_of_relation(r)?;
+                let listed = |end: &str| ids.contains(e[end].as_str().unwrap_or(""));
+                let other = match (listed("from"), listed("to")) {
+                    (false, false) => continue,
+                    (true, true) => None,
+                    (true, false) => Some(r.to_id()?),
+                    (false, true) => Some(r.from_id()?),
+                };
+                if let Some(other) = other {
+                    e["other"] = ops::reference_json(graph, other).await;
+                }
+                edges.push(e);
+            }
             let scopes: Vec<ScopeView> = graph.fetch("status = 'active'").await?;
             app.print(json!({
                 "tasks": nodes,
@@ -5617,8 +5782,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
         Command::Prime => {
             let mut v = json!({"principal": app.me_handle, "project": app.project.name});
             if let Some(scope) = app.scope {
-                if let Ok(s) = graph.get::<ScopeView>(scope).await {
-                    v["scope"] = ops::json_of_scope(&s)?;
+                if let Followed::Held { found, .. } = graph.follow::<ScopeView>(scope).await? {
+                    v["scope"] = ops::json_of_scope(&found)?;
                 }
             }
             let ready: Vec<Value> = ops::ready_tasks(graph, Some(app.me))

@@ -1,9 +1,12 @@
 //! Two projects in one daemon, as it keeps every project in one node and one store
 //! (docs/DECISIONS.md, D135), filled through the CLI with look-alike records: the same person and
 //! agents by the same handles, a scope, tasks and a ruling under the same names, the same question
-//! and comment. No command run in one project prints a record of the other, whole or by the start
-//! of its id, nor finds one by its id or its number; and what a command writes in one, and what the
-//! daemon's routing makes of it, changes nothing in the other (D38).
+//! and comment. A project is a grouping and the filter of every list, not a wall (D176, D181):
+//! every command that lists, and every watch, run in one project prints that project's records
+//! alone, and what a command writes in one, and what the daemon's routing makes of it, changes
+//! nothing in the other; while a record of the other project, named by its id or the start of it,
+//! is found there, the command runs there and says so, and a record held by one project's record
+//! is shown with its project's name, through the CLI and through the MCP tools alike.
 
 mod common;
 
@@ -20,7 +23,7 @@ use fwd_core::project::{NamedProject, Paths};
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::query::with_id;
 use fwd_core::{naming, ops};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,14 +58,13 @@ impl Daemon {
         Ok(daemon)
     }
 
-    /// What `fwd <args>` exits with in `checkout`, reaching this daemon only, with none of the
-    /// caller's settings that would choose another project, principal or scope: its standard output
-    /// when it succeeds, its standard error when it fails.
-    fn output(&self, checkout: &Path, args: &[&str]) -> Result<Result<String, String>> {
+    /// `fwd --format <format> <args>` in `checkout`, reaching this daemon only, with none of the
+    /// caller's settings that would choose another project, principal or scope.
+    fn fwd(&self, checkout: &Path, format: &str, args: &[&str]) -> Result<std::process::Output> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fwd"));
         command
             .current_dir(checkout)
-            .args(["--format", "json"])
+            .args(["--format", format])
             .args(args)
             .env("FWD_RUNTIME_DIR", &self.paths.runtime_dir)
             .env("FWD_DATA_DIR", &self.paths.data_dir);
@@ -78,12 +80,38 @@ impl Daemon {
         ] {
             command.env_remove(name);
         }
-        let out = command.output()?;
+        Ok(command.output()?)
+    }
+
+    /// What `fwd <args>` exits with in `checkout`, as JSON: its standard output when it succeeds,
+    /// its standard error when it fails.
+    fn output(&self, checkout: &Path, args: &[&str]) -> Result<Result<String, String>> {
+        let out = self.fwd(checkout, "json", args)?;
         Ok(if out.status.success() {
             Ok(String::from_utf8(out.stdout)?)
         } else {
             Err(String::from_utf8_lossy(&out.stderr).into_owned())
         })
+    }
+
+    /// The JSON `fwd <args>` prints in `checkout`, which must succeed, and what it said on standard
+    /// error beside it.
+    fn json_and_said(&self, checkout: &Path, args: &[&str]) -> Result<(Value, String)> {
+        let out = self.fwd(checkout, "json", args)?;
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        if !out.status.success() {
+            return Err(anyhow!("fwd {} failed: {said}", args.join(" ")));
+        }
+        Ok((serde_json::from_slice(&out.stdout)?, said))
+    }
+
+    /// The text `fwd <args>` prints for people in `checkout`, which must succeed.
+    fn text(&self, checkout: &Path, args: &[&str]) -> Result<String> {
+        let out = self.fwd(checkout, "text", args)?;
+        if !out.status.success() {
+            return Err(anyhow!("fwd {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(String::from_utf8(out.stdout)?)
     }
 
     /// The JSON `fwd <args>` prints in `checkout`, which must succeed.
@@ -253,8 +281,17 @@ fn prints_its_own(wanted: &str, command: &[&str], printed: &str) {
     );
 }
 
+/// Fails unless `fwd <args>`, run in alpha, ran in beta, the project of its subject: it said so on
+/// standard error, and its JSON names beta as `from_project`. Returns the JSON.
+fn ran_in_beta(daemon: &Daemon, args: &[&str]) -> Result<Value> {
+    let (printed, said) = daemon.json_and_said(&daemon.alpha, args)?;
+    assert!(said.contains("is from project `beta`, so this command ran there"), "fwd {}: {said}", args.join(" "));
+    assert_eq!(printed["from_project"], "beta", "fwd {}: {printed}", args.join(" "));
+    Ok(printed)
+}
+
 #[tokio::test]
-async fn no_command_in_one_project_prints_finds_or_changes_a_record_of_the_other() -> Result<()> {
+async fn every_list_in_one_project_prints_its_own_records_a_typed_id_reaches_the_other_and_writes_stay() -> Result<()> {
     let Two { daemon, a, b, alpha, beta } = Two::new().await?;
     let theirs = records(&beta.graph).await?;
     let others = spellings(theirs.keys().copied());
@@ -290,12 +327,13 @@ async fn no_command_in_one_project_prints_finds_or_changes_a_record_of_the_other
     let listed = daemon.json(&daemon.alpha, &["task", "list"])?.to_string();
     assert!(listed.contains(&a.retry) && listed.contains(&a.cap), "alpha's own tasks are listed: {listed}");
 
-    // A record of beta's, named in alpha by its whole id or the start of it, is not found; D1 is
-    // alpha's own.
-    for named in [b.retry.as_str(), &b.retry[..8], b.question.as_str(), &b.cap[..8]] {
-        let shown = daemon.output(&daemon.alpha, &["task", "show", named])?;
-        assert!(shown.is_err(), "fwd task show {named} in alpha found beta's record: {shown:?}");
+    // A record of beta's, named in alpha by its whole id or the start of it, is found in beta,
+    // where the command runs, saying so; D1 is alpha's own, a decision's number being its
+    // project's.
+    for (named, record) in [(b.retry.as_str(), &b.retry), (&b.retry[..8], &b.retry), (&b.cap[..8], &b.cap)] {
+        assert_eq!(ran_in_beta(&daemon, &["task", "show", named])?["id"], *record);
     }
+    assert_eq!(ran_in_beta(&daemon, &["message", "show", &b.question])?["id"], b.question);
     let d1 = daemon.json(&daemon.alpha, &["decision", "show", "D1"])?.to_string();
     let ours = records(&alpha.graph).await?;
     assert!(ours.keys().any(|id| d1.contains(&id.to_base64()) && ours[id]["ref"] == "D1"), "{d1}");
@@ -336,6 +374,81 @@ async fn no_command_in_one_project_prints_finds_or_changes_a_record_of_the_other
     Ok(())
 }
 
+/// A task of alpha's shows what it holds of beta's with beta's name, as JSON and as text: the task
+/// it depends on, which gates its readiness until beta finishes it, the scope it is worked in, its
+/// assignee and the author of a comment on it, as a task moved from beta keeps them, and the
+/// relation beta made that points at it. `fwd link` run in alpha joins alpha's task to beta's.
+#[tokio::test]
+async fn a_task_shows_what_it_holds_of_the_other_project_with_that_projects_name() -> Result<()> {
+    let Two { daemon, a, b, alpha, beta } = Two::new().await?;
+    daemon.json(&daemon.alpha, &["link", &a.cap, "depends_on", &b.cap])?;
+    daemon.json(&daemon.alpha, &["link", &a.cap, "worked_in", &b.scope])?;
+    daemon.json(&daemon.beta, &["link", &b.retry, "relates_to", &a.cap])?;
+    let their_alice = naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|p| p.id()).expect("hers");
+    let their_person = ops::person_by_handle(&beta.graph, "dnorman").await?;
+    let cap: EntityId = a.cap.parse()?;
+    let trx = alpha.graph.begin();
+    let held: TaskView = alpha.graph.get(cap).await?;
+    trx.edit(&held)?.assignee()?.set(&Some(ankurah::property::Ref::new(their_alice)))?;
+    trx.commit().await?;
+    let on_cap = MessageContext { task_id: Some(cap), ..Default::default() };
+    ops::post_message(&alpha.graph, their_person, "written in beta", Priority::Next, on_cap).await?;
+
+    let args = ["task", "show", a.cap.as_str(), "--include", "relations,messages"];
+    let shown = daemon.json(&daemon.alpha, &args)?;
+    assert_eq!(shown["assignee_handle"], "impl-alice in beta", "{shown}");
+    // Worked in alpha's scope, where it was filed, and in beta's, of the same title.
+    let scopes: Vec<(Value, Value)> = shown["scopes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| (s["title"].clone(), s.get("project").cloned().unwrap_or(Value::Null)))
+        .collect();
+    assert_eq!(scopes, vec![(json!("Replication"), Value::Null), (json!("Replication in beta"), json!("beta"))]);
+    let other = |side: &str, kind: &str| {
+        shown["relations"][side]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|r| r["kind"] == kind)
+            .map(|r| r["other"].clone())
+    };
+    let blocker = other("out", "depends_on").expect("the dependency");
+    assert_eq!((&blocker["name"], &blocker["project"]), (&json!("Cap the retry delay in beta"), &json!("beta")));
+    let pointing = other("in", "relates_to").expect("beta's relation");
+    assert_eq!((&pointing["id"], &pointing["project"]), (&json!(b.retry), &json!("beta")));
+    let said = shown["messages"].as_array().into_iter().flatten().find(|m| m["content"] == "written in beta");
+    assert_eq!(said.map(|m| m["author_handle"].clone()), Some(json!("dnorman in beta")));
+    assert_eq!(shown["readiness"]["state"], "not_ready");
+    assert!(
+        shown["readiness"]["reasons"].to_string().contains("BlockedByTaskIn")
+            && shown["readiness"]["reasons"].to_string().contains("beta")
+    );
+    let text = daemon.text(&daemon.alpha, &args)?;
+    for line in [
+        "assigned to @impl-alice in beta",
+        "scopes: Replication, Replication in beta",
+        "Cap the retry delay in beta (task,",
+        "@dnorman in beta",
+    ] {
+        assert!(text.contains(line), "`{line}` in:\n{text}");
+    }
+    let listed = daemon.json(&daemon.alpha, &["relations", &a.cap])?;
+    let theirs: Vec<&Value> = listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| [&b.cap, &b.scope, &b.retry].iter().any(|id| r["other"]["id"] == **id))
+        .collect();
+    assert_eq!(theirs.len(), 3, "{listed}");
+    assert!(theirs.iter().all(|r| r["other"]["project"] == "beta"), "{listed}");
+
+    // Finished in beta, the dependency counts as finished in alpha.
+    ops::transition(&beta.graph, their_person, b.cap.parse()?, fwd_core::rules::Verb::Done, None).await?;
+    assert_eq!(daemon.json(&daemon.alpha, &["task", "show", &a.cap])?["readiness"]["state"], "ready");
+    Ok(())
+}
+
 /// Records, through `client`'s graph, that `record` once had the id `former`, as the move that
 /// renumbers records writes it.
 async fn renumbered(client: &Client, former: &str, record: EntityId) -> Result<()> {
@@ -347,10 +460,12 @@ async fn renumbered(client: &Client, former: &str, record: EntityId) -> Result<(
 
 /// An id a record of alpha's had before it was renumbered names that record wherever a command takes
 /// an id, whole or as a prefix: `--as` for a principal, a scope by name or id, a checklist step by
-/// its relation or by what it is, any record's argument, and the scope a checkout is bound to. In
-/// beta, the same text names nothing.
+/// its relation or by what it is, any record's argument, and the scope a checkout is bound to.
+/// Typed in beta as a record's argument, it names alpha's record, where the command runs; as a
+/// principal's, a scope's or a step's name, which are each project's own, it names nothing in beta.
 #[tokio::test]
-async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_in_its_own_project_alone() -> Result<()> {
+async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_and_as_a_records_argument_in_any_project(
+) -> Result<()> {
     let Two { daemon, a, b, alpha, beta: _ } = Two::new().await?;
     let alice = naming::principal_named(&alpha.graph, "impl-alice", None).await?.map(|p| p.id()).expect("impl-alice");
     let scope: EntityId = a.scope.parse()?;
@@ -407,11 +522,15 @@ async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_in_its_own_
         vec!["decision", "attach", "D1", &as_scope],
         vec!["decision", "list", "--attached", &as_scope],
         vec!["step", "check", &b.retry, &as_step],
-        vec!["task", "show", &as_cap],
-        vec!["message", "show", &as_question[..8]],
     ] {
         let refused = daemon.output(&daemon.beta, &args)?;
         assert!(refused.is_err(), "fwd {} in beta found what alpha's former id names: {refused:?}", args.join(" "));
+    }
+    for (args, record) in
+        [(vec!["task", "show", &as_cap], &a.cap), (vec!["message", "show", &as_question[..8]], &a.question)]
+    {
+        let (printed, said) = daemon.json_and_said(&daemon.beta, &args)?;
+        assert_eq!((&printed["id"], &printed["from_project"]), (&json!(record), &json!("alpha")), "{said}");
     }
     Ok(())
 }
@@ -474,9 +593,9 @@ async fn a_watch_held_open_in_one_project_hears_nothing_written_in_the_other() -
 }
 
 /// The daemon's MCP endpoint, called as a Codex thread in alpha, gives alpha's records alone from
-/// every tool that reads, and finds none of beta's by its id.
+/// every tool that reads, and given beta's record by its id runs in beta and says so.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_mcp_read_tools_in_one_project_give_none_of_the_others_records() -> Result<()> {
+async fn the_mcp_read_tools_in_one_project_give_its_own_records_and_reach_the_others_by_id() -> Result<()> {
     use rmcp::model::{CallToolRequestParams, RequestMetaObject};
     use rmcp::ServiceExt;
     let Two { daemon, a, b, alpha, beta } = Two::new().await?;
@@ -527,7 +646,11 @@ async fn the_mcp_read_tools_in_one_project_give_none_of_the_others_records() -> 
     }
     for (tool, id) in [("task_show", &b.retry), ("message_show", &b.question)] {
         let answer = call(tool, serde_json::json!({"id": id})).await?;
-        assert_eq!(answer.is_error, Some(true), "{tool} of beta's {id} through alpha answered");
+        let given = answer.structured_content.clone().unwrap_or_default();
+        assert_ne!(answer.is_error, Some(true), "{tool} of beta's {id} through alpha was refused: {given}");
+        assert_eq!((&given["result"]["id"], &given["result"]["from_project"]), (&json!(id), &json!("beta")), "{given}");
+        let notes = given["notes"].to_string();
+        assert!(notes.contains("is from project `beta`, so this command ran there"), "{notes}");
     }
     Ok(())
 }
