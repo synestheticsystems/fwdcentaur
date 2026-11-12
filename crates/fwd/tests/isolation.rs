@@ -589,10 +589,11 @@ async fn a_write_through_another_projects_id_is_made_there_by_the_caller_there_a
 }
 
 /// A command typed in alpha whose record is beta's, refused in beta for its caller, an agent alpha
-/// holds and beta does not, says that it ran in beta, and each command the refusal suggests carries
-/// beta, since run in alpha's checkout it would run in alpha: a comment, and a move of beta's task.
+/// holds and beta does not, says that it ran in beta, keeps the commands the refusal suggests as it
+/// words them, and ends saying they are for beta too and how to run one there, since run in alpha's
+/// checkout one would run in alpha: a comment, and a move of beta's task.
 #[tokio::test]
-async fn a_refusal_in_the_project_a_command_ran_in_names_it_and_what_it_suggests_runs_there() -> Result<()> {
+async fn a_refusal_in_the_project_a_command_ran_in_names_it_and_says_what_it_suggests_is_for_it_too() -> Result<()> {
     let Two { daemon, a: _, b, alpha: _, beta: _ } = Two::new().await?;
     daemon.json(&daemon.alpha, &["--as", "lead-alba", "principal", "add", "lead-alba", "--role", "lead"])?;
     let named = &b.retry[..8];
@@ -604,8 +605,14 @@ async fn a_refusal_in_the_project_a_command_ran_in_names_it_and_what_it_suggests
         let ran = format!("`{named}` is from project `beta`, so this command ran there: no principal of this project is named `lead-alba`");
         assert!(refused.contains(&ran), "fwd {}: {refused}", args.join(" "));
         assert!(
-            refused.contains("`fwd --project 'beta' principal add lead-alba --role ")
-                && refused.contains("`fwd --project 'beta' init`"),
+            refused.contains("`fwd principal add lead-alba --role ") && refused.contains("`fwd init`"),
+            "fwd {}: {refused}",
+            args.join(" ")
+        );
+        assert!(
+            refused.trim_end().ends_with(
+                "The commands this suggests are for project `beta` too: run one there with `--project 'beta'`, or from one of its checkouts"
+            ),
             "fwd {}: {refused}",
             args.join(" ")
         );

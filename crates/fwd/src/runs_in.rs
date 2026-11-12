@@ -196,12 +196,15 @@ impl RanIn {
     /// another project while it ran (`ProjectGraph::get` refusing it,
     /// `ProjectGraphError::InAnotherProject`), it names where the record is now and says to run the
     /// command again, which runs there; when the command ran in another project than the one it
-    /// started in, it names that project, and every `fwd` command it suggests carries `--project`
-    /// naming it, since run where the caller is it would run in the project the caller started in.
-    /// A lost connection to the daemon (`daemon::Lost`) is left as it is: it says what to do
-    /// itself, and its exit code tells it.
+    /// started in, it names that project, and ends saying that the commands it suggests are for
+    /// that project too and how to run one there, since run where the caller is one would run in
+    /// the project the caller started in. A lost connection to the daemon (`daemon::Lost`) is left
+    /// as it is, with the error it caused as its source, for `main` to end the command with its exit
+    /// code at once: the daemon's client attaches it to that error as its context
+    /// (`Client::while_connected`), which anyhow's typed check finds and a walk of the error's
+    /// sources does not.
     pub(crate) fn failure(&self, error: anyhow::Error) -> anyhow::Error {
-        if error.chain().any(|e| e.is::<daemon::Lost>()) {
+        if error.is::<daemon::Lost>() {
             return error;
         }
         let moved = error.chain().find_map(|e| match e.downcast_ref::<ProjectGraphError>() {
@@ -213,12 +216,11 @@ impl RanIn {
         });
         match (moved, &self.elsewhere) {
             (Some(moved), _) => moved.into(),
-            (None, Some(project)) => Failed::There {
-                because: self.because.clone(),
-                project: project.clone(),
-                failure: suggesting_project(&format!("{error:#}"), project),
+            (None, Some(project)) => {
+                let why = format!("{error:#}");
+                let why = why.strip_suffix('.').unwrap_or(&why).to_string();
+                Failed::There { because: self.because.clone(), project: project.clone(), why }.into()
             }
-            .into(),
             (None, None) => error,
         }
     }
@@ -231,28 +233,13 @@ enum Failed {
     /// `ran`.
     #[error("`{typed}` moved to project `{now}` while this command ran in `{ran}`; run the command again, and it runs there")]
     Moved { typed: String, now: String, ran: String },
-    /// It ran in `project`, because `because` is from there, and `failure`, its whole chain with
-    /// every command it suggests carrying that project, says why it failed.
-    #[error("{because} is from project `{project}`, so this command ran there: {failure}")]
-    There { because: String, project: String, failure: String },
-}
-
-/// `text` with each `fwd` command it suggests in backticks run in `project`: `--project` naming it
-/// put after `fwd`, unless the command names a project already.
-fn suggesting_project(text: &str, project: &str) -> String {
-    let flag = format!("--project '{}' ", project.replace('\'', r"'\''"));
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("`fwd ") {
-        let (before, after) = rest.split_at(at + "`fwd ".len());
-        out.push_str(before);
-        if !after.starts_with("--project") {
-            out.push_str(&flag);
-        }
-        rest = after;
-    }
-    out.push_str(rest);
-    out
+    /// It ran in `project`, because `because` is from there, and failed for `why`, its error's
+    /// whole chain, whose suggestions are for that project too.
+    #[error(
+        "{because} is from project `{project}`, so this command ran there: {why}. The commands this suggests are for project `{project}` too: run one there with `--project '{quoted}'`, or from one of its checkouts",
+        quoted = .project.replace('\'', r"'\''")
+    )]
+    There { because: String, project: String, why: String },
 }
 
 /// Places `command`, which started in `graph`'s project, where it runs: in the project of the
@@ -466,18 +453,36 @@ mod tests {
         assert!(unchanged.downcast_ref::<ProjectGraphError>().is_some(), "{unchanged:#}");
     }
 
-    /// A failure of a command that ran in another project names it, and each `fwd` command it
-    /// suggests runs there, unless it names its project already; a lost connection to the daemon
-    /// is left as it is, for its exit code.
+    /// A failure of a command that ran in another project names it, keeps what it says as it is,
+    /// and ends saying that the commands it suggests are for that project too and how to run one
+    /// there.
     #[test]
-    fn a_failure_where_the_command_ran_elsewhere_names_it_and_suggests_commands_that_run_there() {
+    fn a_failure_where_the_command_ran_elsewhere_names_it_and_says_its_suggestions_are_for_it_too() {
         let ran_in = RanIn { elsewhere: Some("Ankurah's".into()), because: "`1K30VkQg`".into(), found: Vec::new() };
-        let failed = anyhow::anyhow!("run `fwd init`, or `fwd --project 'x' scope list`; fwd: a note");
+        let failed = anyhow::anyhow!("run `fwd init --project beta`, or name `fwd x` as it was typed.")
+            .context("the task being amended");
         assert_eq!(
             ran_in.failure(failed).to_string(),
-            r"`1K30VkQg` is from project `Ankurah's`, so this command ran there: run `fwd --project 'Ankurah'\''s' init`, or `fwd --project 'x' scope list`; fwd: a note"
+            r"`1K30VkQg` is from project `Ankurah's`, so this command ran there: the task being amended: run `fwd init --project beta`, or name `fwd x` as it was typed. The commands this suggests are for project `Ankurah's` too: run one there with `--project 'Ankurah'\''s'`, or from one of its checkouts"
         );
-        let lost = ran_in.failure(daemon::Lost::Closed { port: 1 }.into());
-        assert!(lost.downcast_ref::<daemon::Lost>().is_some(), "{lost:#}");
+    }
+
+    /// A lost connection to the daemon ends a command that ran in another project as it is, the
+    /// error it caused kept as its source, so that `main` ends the command with its exit code at
+    /// once: whether the loss is the error itself or the context the daemon's client attaches to
+    /// the error it caused (`Client::while_connected`).
+    #[test]
+    fn a_lost_connection_to_the_daemon_is_left_as_it_is_where_the_command_ran_elsewhere() {
+        let ran_in = RanIn { elsewhere: Some("beta".into()), because: "`1K30VkQg`".into(), found: Vec::new() };
+        let bare = ran_in.failure(daemon::Lost::Closed { port: 1 }.into());
+        assert!(bare.is::<daemon::Lost>(), "{bare:#}");
+        let caused = anyhow::anyhow!("a read with no daemon connected failed");
+        let attached = ran_in.failure(caused.context(daemon::Lost::Closed { port: 1 }));
+        assert!(attached.is::<daemon::Lost>(), "{attached:#}");
+        assert_eq!(
+            attached.chain().map(ToString::to_string).last().as_deref(),
+            Some("a read with no daemon connected failed"),
+            "the error the loss caused stays its source"
+        );
     }
 }
