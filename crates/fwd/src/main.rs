@@ -986,7 +986,7 @@ enum TaskCommand {
     /// scopes. The tasks come last, after the flags.
     ///
     /// Example:
-    ///   fwd task move --to Ankurah --to-scope "Ankurah Commons" --note "Commons work" brrBkooZ ZZERWe7h
+    ///   fwd task move --to beta --to-scope Replication --note "replication work" Ab3dEf12 Xy7pQr2W
     #[command(override_usage = "fwd task move --to <project> [--to-scope <scope>] [--note <text>] <id>...")]
     Move {
         /// The tasks, by id, the start of one or a former id: all of one project, or in the
@@ -6025,7 +6025,7 @@ mod tests {
             ("dismiss".into(), vec![A, B], vec![("ids", format!("[{A:?}, {B:?}]"))]),
             (
                 "task move".into(),
-                vec!["--to", "Ankurah", "--to-scope", B, A, B],
+                vec!["--to", "beta", "--to-scope", B, A, B],
                 vec![("ids", format!("[{A:?}, {B:?}]")), ("to_scope", some(B))],
             ),
             (

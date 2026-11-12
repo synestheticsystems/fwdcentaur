@@ -438,10 +438,10 @@ pub(crate) async fn scope_named(graph: &ProjectGraph, typed: &[Typed], scope: &s
 mod tests {
     use super::*;
 
-    /// The refusal `ProjectGraph::get` gives for `record`, a record of Fwd Centaur read through
-    /// Personal's graph, as a command's own context wraps it.
-    fn read_in_personal(record: EntityId) -> anyhow::Error {
-        let (project, here) = ("Fwd Centaur".into(), "Personal".into());
+    /// The refusal `ProjectGraph::get` gives for `record`, a record of alpha read through beta's
+    /// graph, as a command's own context wraps it.
+    fn read_in_beta(record: EntityId) -> anyhow::Error {
+        let (project, here) = ("alpha".into(), "beta".into());
         anyhow::Error::new(ProjectGraphError::InAnotherProject { record, project, here })
             .context("the task being amended")
     }
@@ -453,15 +453,15 @@ mod tests {
     #[test]
     fn a_record_that_moved_while_the_command_ran_is_named_with_where_it_is_now() {
         let task = EntityId::random();
-        for elsewhere in [None, Some("Personal".to_string())] {
-            let ran_in = RanIn { elsewhere, because: "`1K30VkQg`".into(), found: vec![("1K30VkQg".into(), task)] };
+        for elsewhere in [None, Some("beta".to_string())] {
+            let ran_in = RanIn { elsewhere, because: "`Ab3dEf12`".into(), found: vec![("Ab3dEf12".into(), task)] };
             assert_eq!(
-                ran_in.failure(read_in_personal(task)).to_string(),
-                "`1K30VkQg` moved to project `Fwd Centaur` while this command ran in `Personal`; run the command again, and it runs there"
+                ran_in.failure(read_in_beta(task)).to_string(),
+                "`Ab3dEf12` moved to project `alpha` while this command ran in `beta`; run the command again, and it runs there"
             );
         }
-        let ran_in = RanIn { elsewhere: None, because: String::new(), found: vec![("1K30VkQg".into(), task)] };
-        let unchanged = ran_in.failure(read_in_personal(EntityId::random()));
+        let ran_in = RanIn { elsewhere: None, because: String::new(), found: vec![("Ab3dEf12".into(), task)] };
+        let unchanged = ran_in.failure(read_in_beta(EntityId::random()));
         assert!(unchanged.downcast_ref::<ProjectGraphError>().is_some(), "{unchanged:#}");
     }
 
@@ -470,17 +470,17 @@ mod tests {
     /// there, which holds as well of a failure that suggests none.
     #[test]
     fn a_failure_where_the_command_ran_elsewhere_names_it_and_says_its_suggestions_are_for_it_too() {
-        let ran_in = RanIn { elsewhere: Some("Ankurah's".into()), because: "`1K30VkQg`".into(), found: Vec::new() };
+        let ran_in = RanIn { elsewhere: Some("gamma's".into()), because: "`Ab3dEf12`".into(), found: Vec::new() };
         let failed = anyhow::anyhow!("run `fwd init --project beta`, or name `fwd x` as it was typed.")
             .context("the task being amended");
         assert_eq!(
             ran_in.failure(failed).to_string(),
-            r"`1K30VkQg` is from project `Ankurah's`, so this command ran there: the task being amended: run `fwd init --project beta`, or name `fwd x` as it was typed. Any command suggested above is for project `Ankurah's` too: run it there with `--project 'Ankurah'\''s'`, or from one of its checkouts"
+            r"`Ab3dEf12` is from project `gamma's`, so this command ran there: the task being amended: run `fwd init --project beta`, or name `fwd x` as it was typed. Any command suggested above is for project `gamma's` too: run it there with `--project 'gamma'\''s'`, or from one of its checkouts"
         );
         let suggests_nothing = anyhow::anyhow!("the task is done already");
         assert_eq!(
             ran_in.failure(suggests_nothing).to_string(),
-            r"`1K30VkQg` is from project `Ankurah's`, so this command ran there: the task is done already. Any command suggested above is for project `Ankurah's` too: run it there with `--project 'Ankurah'\''s'`, or from one of its checkouts"
+            r"`Ab3dEf12` is from project `gamma's`, so this command ran there: the task is done already. Any command suggested above is for project `gamma's` too: run it there with `--project 'gamma'\''s'`, or from one of its checkouts"
         );
     }
 
@@ -490,7 +490,7 @@ mod tests {
     /// the error it caused (`Client::while_connected`).
     #[test]
     fn a_lost_connection_to_the_daemon_is_left_as_it_is_where_the_command_ran_elsewhere() {
-        let ran_in = RanIn { elsewhere: Some("beta".into()), because: "`1K30VkQg`".into(), found: Vec::new() };
+        let ran_in = RanIn { elsewhere: Some("beta".into()), because: "`Ab3dEf12`".into(), found: Vec::new() };
         let bare = ran_in.failure(daemon::Lost::Closed { port: 1 }.into());
         assert!(bare.is::<daemon::Lost>(), "{bare:#}");
         let caused = anyhow::anyhow!("a read with no daemon connected failed");
