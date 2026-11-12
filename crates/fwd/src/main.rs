@@ -30,6 +30,7 @@ mod claude_code;
 mod dev_runner;
 mod mcp;
 mod mcp_stdio;
+mod runs_in;
 mod serve;
 mod services;
 mod watch;
@@ -84,7 +85,9 @@ macro_rules! naming_in_text {
 )]
 struct Cli {
     /// The project: a name, an id, or a directory inside one of its checkouts (default: found from
-    /// the current directory through its git upstream, or a `.fwd/project.toml` marker).
+    /// the current directory through its git upstream, or a `.fwd/project.toml` marker). A command
+    /// whose subject is a record of another project, or that works in another project's scope,
+    /// runs in that project instead, and says so.
     #[arg(long, global = true, env = "FWD_PROJECT")]
     project: Option<String>,
     /// Fail instead of starting the daemon when none is running.
@@ -109,8 +112,10 @@ struct Cli {
     /// own inbox and tasks.
     #[arg(long = "as", global = true, env = "FWD_AS", allow_hyphen_values = true)]
     act_as: Option<String>,
-    /// The scope this session works in: any scope, whoever made it. Without it, the scope the
-    /// checkout is bound to (`fwd scope attach-dir`), else the one active scope naming its branch.
+    /// The scope this session works in: any scope, whoever made it, by its id or its first six
+    /// characters or more, of any project; a command with no subject given a scope of another
+    /// project runs in that project. Without it, the scope the checkout is bound to (`fwd scope
+    /// attach-dir`), else the one active scope naming its branch.
     #[arg(long, global = true, env = "FWD_SCOPE", allow_hyphen_values = true)]
     scope: Option<String>,
     #[command(subcommand)]
@@ -1548,22 +1553,22 @@ struct App {
     /// ([`App::needed_scope`]).
     several: Option<(Option<String>, Vec<EntityId>)>,
     format: Format,
-    /// The name of the project the command moved to because its subject is a record of that
-    /// project (docs/DECISIONS.md, D181; [`App::moved_to`]), which its answer names; none for a
-    /// command that runs in the project it started in.
+    /// The name of the project the command moved to because its subject, or the scope it works
+    /// in, is a record of that project (docs/DECISIONS.md, D181; [`App::moved_to`]), which its
+    /// answer names; none for a command that runs in the project it started in.
     subject_project: Option<String>,
-    /// The command's subject as it was typed and the record it names, found before the command
-    /// ran ([`subject_of`]), so that [`App::id`] gives it without reading every project's ids
-    /// again.
-    located: Option<(String, EntityId)>,
+    /// The ids typed on the command that placing it resolved before it ran ([`runs_in::runs_in`]),
+    /// which [`App::id`] gives without reading every project's ids again.
+    typed: Vec<runs_in::Typed>,
 }
 
 impl App {
-    /// Records that the command runs in `project`, the project of its subject `typed`, rather than
-    /// the one it started in, as if it had been run there, and says so beside its answer; a JSON
-    /// answer names the project as `from_project` ([`App::print`]).
-    fn moved_to(&mut self, typed: &str, project: &str) {
-        self.note(format!("NOTE: `{typed}` is from project `{project}`, so this command ran there"));
+    /// Records that the command runs in `project` rather than the one it started in, as if it had
+    /// been run there, because `because` (its subject, as [`runs_in::RunsIn`] names it) is a
+    /// record of that project, and says so beside its answer; a JSON answer names the project as
+    /// `from_project` ([`App::print`]).
+    fn moved_to(&mut self, because: &str, project: &str) {
+        self.note(format!("NOTE: {because} is from project `{project}`, so this command ran there"));
         self.subject_project = Some(project.to_string());
     }
 
@@ -1630,11 +1635,11 @@ impl App {
 
     /// An entity named on the command line among `kinds`, in any project: its id, `D<number>` for
     /// a decision of this project, or the first six or more characters of its id
-    /// (`ops::resolve_id`); the command's subject as it was found before the command ran.
+    /// (`ops::resolve_id`); an id placing the command resolved as it was found then.
     async fn id(&self, s: &str, kinds: &[Kind]) -> Result<EntityId> {
-        match &self.located {
-            Some((typed, record)) if typed == s => Ok(*record),
-            _ => ops::resolve_id(self.graph(), s, kinds).await,
+        match runs_in::typed_record(&self.typed, s, kinds) {
+            Some(record) => Ok(record),
+            None => ops::resolve_id(self.graph(), s, kinds).await,
         }
     }
 
@@ -2521,20 +2526,29 @@ async fn run_cli() -> Result<()> {
         None => subject_here()?,
     };
     let resolved = resolve_project(&cli, &paths)?;
-    let mut app =
-        connect(&cli, paths, resolved, format, subject.clone(), typed_as.clone(), thread_hook, scope_typed).await?;
-    // A command whose subject is a record of another project runs in that project, as if
-    // `--project` had named it, whoever the caller is there, and says so (docs/DECISIONS.md, D181).
-    if let Some((typed, kinds)) = subject_of(&cli.command) {
-        let client = app.client.as_ref().expect("the CLI connected through its client");
-        let found = client.while_connected(ops::locate(app.graph(), typed, kinds)).await?;
-        if let Whose::Other(there) = found.project {
-            let resolved = project::resolve(&app.paths, &std::env::current_dir()?, Some(&there.uuid.to_string()))?;
-            let paths = app.paths.clone();
-            app = connect(&cli, paths, resolved, format, subject, typed_as, thread_hook, scope_typed).await?;
-            app.moved_to(typed, &there.name);
+    let client = daemon::ensure_daemon(&paths, &resolved.project, autostart(&cli)?).await?;
+    // The daemon learns of the checkout the command runs in as one of the project the command
+    // resolved to, whose repository it is, whichever project the command then runs in.
+    if let Some(c) = &resolved.checkout {
+        report_checkout(&client, c).await;
+    }
+    // A command whose subject is a record of another project, or that works in a scope of another
+    // project, runs in that project, as if `--project` had named it, and says so
+    // (docs/DECISIONS.md, D181): it is placed before whom it acts as is found, so that its caller
+    // is found, or made, there, and nothing is read for the caller or written where it started.
+    let placed = client.while_connected(runs_in::runs_in(&client.graph, &cli.command, cli.scope.as_deref())).await?;
+    let (resolved, client) = match &placed.project {
+        Whose::Other(there) => {
+            let project = NamedProject { id: there.uuid, name: there.name.clone() };
+            let client = daemon::ensure_daemon(&paths, &project, autostart(&cli)?).await?;
+            (Resolved { project, ..resolved }, client)
         }
-        app.located = Some((typed.to_string(), found.id));
+        Whose::This => (resolved, client),
+    };
+    let calling = Calling { subject, typed_as, thread_hook, scope_typed };
+    let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
+    if let Whose::Other(there) = &placed.project {
+        app.moved_to(&placed.because, &there.name);
     }
     // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
     // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
@@ -2594,94 +2608,6 @@ pub(crate) fn refuse_before_running(command: &Command) -> Result<()> {
     match command {
         Command::Inbox { command: Some(InboxCommand::Pop { heartbeat: true, .. }), .. } => bail!(NO_HEARTBEAT),
         _ => Ok(()),
-    }
-}
-
-/// The record a command acts on, as typed on its command line, with the kinds it may be: the
-/// command runs in the project that record is in, wherever it started, as the page switches to
-/// the project of a record it opens (docs/DECISIONS.md, D181). Every other id the command takes is
-/// a reference, which names a record of any project and moves nothing: `fwd link <from> <kind>
-/// <to>` runs in the project of `from`, and `to` may be a record of another. None for a command
-/// that acts on no one record: one that makes a record (`task create`), lists, or reads the
-/// caller's own inbox.
-pub(crate) fn subject_of(command: &Command) -> Option<(&str, &'static [Kind])> {
-    const TASK: &[Kind] = &[Kind::Task];
-    const SCOPE: &[Kind] = &[Kind::Scope];
-    const DECISION: &[Kind] = &[Kind::Decision];
-    const MESSAGE: &[Kind] = &[Kind::Message];
-    const MESSAGE_OR_NOTIFICATION: &[Kind] = &[Kind::Message, Kind::Notification];
-    const DISCUSSED: &[Kind] = &[Kind::Task, Kind::Anchor, Kind::Scope, Kind::Decision];
-    match command {
-        Command::Task { command } => match command {
-            TaskCommand::Show { id, .. }
-            | TaskCommand::Assign { id, .. }
-            | TaskCommand::Unassign { id }
-            | TaskCommand::Approve { id, .. }
-            | TaskCommand::Reject { id, .. }
-            | TaskCommand::Start { id }
-            | TaskCommand::Submit { id, .. }
-            | TaskCommand::Accept { id, .. }
-            | TaskCommand::Return { id, .. }
-            | TaskCommand::Done { id, .. }
-            | TaskCommand::Cancel { id, .. }
-            | TaskCommand::Reopen { id, .. }
-            | TaskCommand::Rejustify { id, .. }
-            | TaskCommand::Hold { id, .. }
-            | TaskCommand::Release { id }
-            | TaskCommand::Explain { id } => Some((id, TASK)),
-            TaskCommand::Amend(a) => Some((&a.id, TASK)),
-            TaskCommand::Create(_) | TaskCommand::List { .. } | TaskCommand::Next { .. } => None,
-        },
-        Command::Step { command } => match command {
-            StepCommand::Add { task, .. }
-            | StepCommand::List { task }
-            | StepCommand::Check { task, .. }
-            | StepCommand::Uncheck { task, .. }
-            | StepCommand::Remove { task, .. } => Some((task, TASK)),
-        },
-        Command::Link { from, .. } | Command::Unlink { from, .. } => Some((from, ops::ANY)),
-        Command::Relations { id, .. } => Some((id, ops::ANY)),
-        Command::Relation { command: RelationCommand::Approve { id } | RelationCommand::Reject { id, .. } } => {
-            Some((id, &[Kind::Relation]))
-        }
-        Command::Scope { command } => match command {
-            ScopeCommand::Branches { id, .. }
-            | ScopeCommand::AttachDir { id, .. }
-            | ScopeCommand::Show { id }
-            | ScopeCommand::Rename { id, .. }
-            | ScopeCommand::Intention { id, .. }
-            | ScopeCommand::Status { id, .. } => Some((id, SCOPE)),
-            ScopeCommand::Create { .. } | ScopeCommand::List => None,
-        },
-        Command::Comment { first, text: Some(_), .. } => Some((first, DISCUSSED)),
-        Command::Anchor { command: AnchorCommand::Show { id, .. } | AnchorCommand::Resolve { id, .. } } => {
-            Some((id, &[Kind::Anchor]))
-        }
-        Command::Ask { about: Some(about), .. } => Some((about, &[Kind::Task, Kind::Decision])),
-        Command::Reply { id, .. } | Command::Forward { id, .. } => Some((id, MESSAGE_OR_NOTIFICATION)),
-        Command::Message { command } => match command {
-            MessageCommand::List { on: Some(on), .. } => Some((on, DISCUSSED)),
-            MessageCommand::Show { id } | MessageCommand::Resolve { id } | MessageCommand::Unresolve { id } => {
-                Some((id, MESSAGE))
-            }
-            MessageCommand::Edit { id, .. } => Some((id, MESSAGE_OR_NOTIFICATION)),
-            MessageCommand::List { on: None, .. } => None,
-        },
-        Command::Decision { command } => match command {
-            DecisionCommand::Show { id }
-            | DecisionCommand::Attach { id, .. }
-            | DecisionCommand::Detach { id }
-            | DecisionCommand::Accept { id, .. }
-            | DecisionCommand::Reject { id, .. }
-            | DecisionCommand::Repeal { id, .. } => Some((id, DECISION)),
-            DecisionCommand::Supersede { old, .. } => Some((old, DECISION)),
-            DecisionCommand::Create(_) | DecisionCommand::List { .. } | DecisionCommand::Export => None,
-        },
-        Command::Cite { entity, .. } => Some((entity, &[Kind::Task, Kind::Message, Kind::Decision])),
-        Command::Read { ids } | Command::Dismiss { ids } => {
-            ids.first().map(|id| (id.as_str(), &[Kind::Notification][..]))
-        }
-        _ => None,
     }
 }
 
@@ -2770,24 +2696,35 @@ async fn person(graph: &ProjectGraph, paths: &Paths) -> Result<(EntityId, String
     Ok((me, identity.handle))
 }
 
-/// Connects to the daemon for the project `resolved` names and finds whom the command acts as, and
-/// the scope it works in ([`caller`]), reading them from the daemon while it stays connected
-/// (`Client::while_connected`).
-#[allow(clippy::too_many_arguments)]
+/// What a command line says of who calls it, read before the command connects.
+struct Calling {
+    /// The Claude Code agent the fwd plugin stamped the command with, or whose hook runs it.
+    subject: Option<String>,
+    /// The `--as` typed on the command line, told apart from FWD_AS ([`App::typed_as`]).
+    typed_as: Option<String>,
+    /// Whether the command is the hook of a Claude Code session's own thread.
+    thread_hook: bool,
+    /// Whether `--scope` was typed on the command line ([`App::scope_typed`]).
+    scope_typed: bool,
+}
+
+/// The command's [`App`], over `client`, the daemon's connection for the project `resolved` names,
+/// which is where the command runs ([`runs_in::runs_in`]): whom the command acts as there and the
+/// scope it works in ([`caller`]), read from the daemon while it stays connected
+/// (`Client::while_connected`). `typed` holds the ids typed on the command that placing it
+/// resolved.
 async fn connect(
     cli: &Cli,
     paths: Paths,
     resolved: Resolved,
+    client: Client,
     format: Format,
-    subject: Option<String>,
-    typed_as: Option<String>,
-    thread_hook: bool,
-    scope_typed: bool,
+    calling: Calling,
+    typed: Vec<runs_in::Typed>,
 ) -> Result<App> {
-    let client = daemon::ensure_daemon(&paths, &resolved.project, autostart(cli)?).await?;
-    let Caller { me, me_handle, acting, scope, several } = client
-        .while_connected(caller(cli, &paths, &client, &resolved, subject.as_deref(), typed_as.as_deref(), thread_hook))
-        .await?;
+    let Caller { me, me_handle, acting, scope, several } =
+        client.while_connected(caller(cli, &paths, &client, &resolved, &calling, &typed)).await?;
+    let Calling { subject, typed_as, scope_typed, .. } = calling;
     let Resolved { project, checkout, root } = resolved;
     Ok(App {
         paths,
@@ -2808,7 +2745,7 @@ async fn connect(
         several,
         format,
         subject_project: None,
-        located: None,
+        typed,
     })
 }
 
@@ -2821,24 +2758,22 @@ struct Caller {
     several: Option<(Option<String>, Vec<EntityId>)>,
 }
 
-/// Finds whom the command acts as: the principal bound to `subject`, where the command carries
-/// one, or `--as` or FWD_AS, or without either the person, except in a Claude Code session one of
-/// whose agents is bound, where it acts as no one ([`bound_session`]). `thread_hook` says the
-/// command is the hook of a Claude Code session's own thread, which falls back to `--as` or FWD_AS
-/// while no principal is bound to its subject. Then the scope it works in: `--scope`, else the one
-/// its checkout finds.
+/// Finds whom the command acts as: the principal bound to the Claude Code agent `calling` names,
+/// where the command carries one, or `--as` or FWD_AS, or without either the person, except in a
+/// Claude Code session one of whose agents is bound, where it acts as no one ([`bound_session`]).
+/// The hook of a Claude Code session's own thread falls back to `--as` or FWD_AS while no
+/// principal is bound to its agent. Then the scope it works in: `--scope`, else the one
+/// its checkout finds; a scope `typed` holds, as placing the command found it, is not read again.
 async fn caller(
     cli: &Cli,
     paths: &Paths,
     client: &Client,
     resolved: &Resolved,
-    subject: Option<&str>,
-    typed_as: Option<&str>,
-    thread_hook: bool,
+    calling: &Calling,
+    typed: &[runs_in::Typed],
 ) -> Result<Caller> {
-    if let Some(c) = &resolved.checkout {
-        report_checkout(client, c).await;
-    }
+    let (subject, typed_as, thread_hook) =
+        (calling.subject.as_deref(), calling.typed_as.as_deref(), calling.thread_hook);
     let graph = &client.graph;
     let (me, me_handle, acting) = match subject {
         // A command the fwd plugin stamped, and a hook's command, acts as the principal bound to its
@@ -2906,7 +2841,7 @@ async fn caller(
         }
     };
     let (scope, several) = match &cli.scope {
-        Some(s) => (Some(ops::resolve_id(&client.graph, s, &[Kind::Scope]).await?), None),
+        Some(s) => (Some(runs_in::scope_named(graph, typed, s).await?), None),
         None => match scope_for_checkout(client, resolved).await? {
             rules::ScopeHere::One(scope) => (Some(scope), None),
             rules::ScopeHere::None => (None, None),
@@ -4191,61 +4126,13 @@ fn message_lines(m: &Value, indent: usize) -> Vec<String> {
     lines
 }
 
-/// A step named on the command line among a task's `steps`: its number in the checklist (from 1),
-/// or the id of its relation or of what it is (a highlight, a message, a task), whole or its first
-/// six characters or more, an id either had before it was renumbered (`former`) counting as its
-/// id, looked for among this checklist's steps alone. Returns its number and its relation. A name
-/// that fits no step of the checklist is refused, saying so, and so is a start of an id that fits
-/// several.
-fn step_at(steps: &[RelationView], s: &str, former: &FormerIds) -> Result<(usize, EntityId)> {
-    if let Ok(n) = s.parse::<usize>() {
-        if (1..=steps.len()).contains(&n) {
-            return Ok((n, steps[n - 1].id()));
-        }
-        if s.len() < ops::MIN_PREFIX {
-            bail!("the task has {} step(s), so there is no step {n}", steps.len());
-        }
-    }
-    let whole = s.parse::<EntityId>().ok();
-    if whole.is_none() && s.len() < ops::MIN_PREFIX {
-        bail!(
-            "`{s}` names no step: give its number in the checklist, or the id of its relation or of what it is, whole or its first {} characters or more",
-            ops::MIN_PREFIX
-        );
-    }
-    let renumbered: Vec<EntityId> = match whole {
-        Some(_) => former.named(s).into_iter().collect(),
-        None => former.starting(s).map(|(_, record)| record).collect(),
-    };
-    let fits =
-        |id: EntityId| renumbered.contains(&id) || whole.map_or_else(|| id.to_base64().starts_with(s), |w| w == id);
-    let found: Vec<usize> =
-        steps.iter().enumerate().filter(|(_, r)| fits(r.id()) || r.from_id().is_ok_and(fits)).map(|(i, _)| i).collect();
-    match found.as_slice() {
-        [i] => Ok((i + 1, steps[*i].id())),
-        [] => bail!(
-            "`{s}` names no step on this task's checklist; `fwd step list` lists its steps with their numbers and ids"
-        ),
-        several => bail!(
-            "`{s}` starts the ids of steps {} of this task's checklist; give more of the id",
-            several.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(" and ")
-        ),
-    }
-}
-
-/// The project's former ids, read when `s` may be an id; none for a step's number or a name too
-/// short to start an id, which no former id can stand for.
-async fn former_ids_for(graph: &ProjectGraph, s: &str) -> Result<FormerIds> {
-    Ok(if ops::may_start_an_id(s) { FormerIds::of(graph).await? } else { FormerIds::default() })
-}
-
 /// Checks or unchecks a step of a task and prints it, with the first thread on its highlight,
 /// which moves with it; and the highlight's steps on other checklists that moved with it, as JSON
 /// under `checked_steps` or `unchecked_steps`, for people a line each.
 async fn check_step(app: &App, task: &str, step: &str, check: bool) -> Result<()> {
     let graph = app.graph();
     let task = app.id(task, &[Kind::Task]).await?;
-    let (n, edge) = step_at(&ops::steps(graph, task).await?, step, &former_ids_for(graph, step).await?)?;
+    let (n, edge) = runs_in::step_named(graph, task, step).await?;
     let moved = ops::check_step(graph, app.me, edge, check).await?;
     let r: RelationView = graph.get(edge).await?;
     let mut v = step_json(graph, &r, n).await?;
@@ -4278,7 +4165,7 @@ async fn check_step(app: &App, task: &str, step: &str, check: bool) -> Result<()
 async fn remove_step(app: &App, task: &str, step: &str, reason: &str, retire: bool) -> Result<()> {
     let graph = app.graph();
     let task = app.id(task, &[Kind::Task]).await?;
-    let (n, edge) = step_at(&ops::steps(graph, task).await?, step, &former_ids_for(graph, step).await?)?;
+    let (n, edge) = runs_in::step_named(graph, task, step).await?;
     let mut removed = step_json(graph, &graph.relation(edge).await?, n).await?;
     let retired = ops::remove_step(graph, app.me, task, edge, reason, retire).await?;
     removed["reason"] = json!(reason.trim());

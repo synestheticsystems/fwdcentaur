@@ -536,6 +536,122 @@ async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_and_as_a_re
     Ok(())
 }
 
+/// A comment typed in alpha on beta's task, named by the start of its id, is written in beta, by
+/// the person's principal there, and says so: a person neither project holds a principal for is
+/// found, or made, in beta alone, and nothing of alpha's changes, a principal for that person
+/// included. An agent beta alone holds acts there through `--as`, typed in alpha.
+#[tokio::test]
+async fn a_write_through_another_projects_id_is_made_there_by_the_caller_there_and_nothing_where_it_started(
+) -> Result<()> {
+    let Two { daemon, a: _, b, alpha, beta } = Two::new().await?;
+    daemon.json(&daemon.beta, &["--as", "impl-bea", "principal", "add", "impl-bea", "--role", "implementer"])?;
+    // The person the next commands act as, whom neither project has met.
+    std::fs::write(daemon.paths.data_dir.join("identity.toml"), "handle = \"carol\"\ndisplay_name = \"Carol\"\n")?;
+    let before = records(&alpha.graph).await?;
+
+    let named = &b.retry[..8];
+    let (made, said) = daemon.json_and_said(&daemon.alpha, &["comment", named, "from alpha's checkout"])?;
+    assert!(said.contains(&format!("NOTE: `{named}` is from project `beta`, so this command ran there")), "{said}");
+    assert_eq!(made["from_project"], "beta", "{made}");
+    let comment: EntityId = made["record"]["id"].as_str().ok_or_else(|| anyhow!("no id in {made}"))?.parse()?;
+    let written: MessageView = beta.graph.get(comment).await?;
+    let carol = ops::person_by_handle(&beta.graph, "carol").await?;
+    assert_eq!(EntityId::from(written.author()?), carol, "written by carol's principal in beta");
+    assert_eq!(written.task()?.map(EntityId::from), Some(b.retry.parse()?));
+
+    let shown = ran_in_beta(&daemon, &["--as", "impl-bea", "task", "show", &b.retry])?;
+    assert_eq!(shown["id"], b.retry);
+    let (_, said) = daemon.json_and_said(&daemon.alpha, &["--as", "impl-bea", "comment", &b.retry, "and from her"])?;
+    assert!(said.contains("so this command ran there"), "{said}");
+
+    assert_eq!(records(&alpha.graph).await?, before, "nothing of alpha's changed, and no principal was made there");
+    assert!(ops::person_by_handle(&alpha.graph, "carol").await.is_err(), "alpha holds no principal for carol");
+    Ok(())
+}
+
+/// A notification of beta's, named in alpha by its whole id as by the start of it, is read in beta,
+/// by its recipient there.
+#[tokio::test]
+async fn a_notifications_whole_id_typed_in_one_project_marks_it_where_it_is() -> Result<()> {
+    let Two { daemon, a: _, b: _, alpha: _, beta } = Two::new().await?;
+    let alice = naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|p| p.id()).expect("hers");
+    let told = ops::inbox(&beta.graph, alice, false).await?.first().map(|n| n.id()).expect("her question's notice");
+    let read = ran_in_beta(&daemon, &["--as", "impl-alice", "read", &told.to_base64()])?;
+    assert_eq!(read["read"], 1, "{read}");
+    assert_eq!(beta.graph.get::<NotificationView>(told).await?.status()?, NotificationStatus::Read);
+    Ok(())
+}
+
+/// Alpha's task made a step of beta's task by `link` run in alpha is alpha's relation, which a
+/// command checks from either project: from alpha, where it runs; from beta, by the step's number
+/// on beta's checklist, in alpha, saying so; and whoever checks it is the caller in alpha.
+#[tokio::test]
+async fn a_step_another_project_made_is_checked_from_either_project_where_its_relation_is() -> Result<()> {
+    let Two { daemon, a, b, alpha, beta } = Two::new().await?;
+    let edge: EntityId = daemon.made(&daemon.alpha, &["link", &a.cap, "step_of", &b.retry])?.parse()?;
+    let person = ops::person_by_handle(&alpha.graph, "dnorman").await?;
+
+    let (checked, said) = daemon.json_and_said(&daemon.alpha, &["step", "check", &b.retry, &a.cap])?;
+    assert!(!said.contains("NOTE"), "the step's relation is alpha's, where the command started: {said}");
+    assert_eq!((&checked["edge"], &checked["checked"]), (&json!(edge.to_base64()), &json!(true)), "{checked}");
+    assert_eq!(beta.graph.relation(edge).await?.closed_by()?.map(EntityId::from), Some(person));
+
+    let (unchecked, said) = daemon.json_and_said(&daemon.beta, &["step", "uncheck", &b.retry, "1"])?;
+    let note = format!("NOTE: step `1` of `{}` is from project `alpha`, so this command ran there", b.retry);
+    assert!(said.contains(&note), "{said}");
+    assert_eq!((&unchecked["checked"], &unchecked["from_project"]), (&json!(false), &json!("alpha")), "{unchecked}");
+    daemon.json(&daemon.beta, &["step", "check", &b.retry, &a.cap[..8]])?;
+    let r = beta.graph.relation(edge).await?;
+    assert_eq!((r.status()?, r.closed_by()?.map(EntityId::from)), (RelationStatus::Resolved, Some(person)));
+    Ok(())
+}
+
+/// A scope of beta's, named in alpha by its id or the start of it, is a scope like any other: a
+/// ruling of alpha's is attached to it, the command running in alpha, whose ruling is its subject;
+/// given as the scope a command with no subject works in, it runs that command in beta, saying so,
+/// where the task it makes is beta's; and a command whose subject is alpha's runs in alpha
+/// whatever scope it works in.
+#[tokio::test]
+async fn a_scope_of_the_other_project_is_followed_as_a_reference_and_runs_a_command_with_no_subject_there() -> Result<()>
+{
+    let Two { daemon, a, b, alpha, beta } = Two::new().await?;
+    let (attached, said) = daemon.json_and_said(&daemon.alpha, &["decision", "attach", "D1", &b.scope[..8]])?;
+    assert!(!said.contains("NOTE"), "{said}");
+    assert_eq!((&attached["scope"], &attached["scope_title"]), (&json!(b.scope), &json!("Replication in beta")));
+    assert!(attached.get("from_project").is_none(), "{attached}");
+
+    let scoped = ["--scope", b.scope.as_str()];
+    let (me, said) = daemon.json_and_said(&daemon.alpha, &[&scoped[..], &["whoami"]].concat())?;
+    let note = format!("NOTE: the scope `{}` is from project `beta`, so this command ran there", b.scope);
+    assert!(said.contains(&note), "{said}");
+    assert_eq!((&me["project"]["name"], &me["scope"]), (&json!("beta"), &json!(b.scope)), "{me}");
+    let before = records(&alpha.graph).await?.len();
+    let made = daemon.made(&daemon.alpha, &[&scoped[..], &["task", "create", "Made in beta's scope"]].concat())?;
+    assert!(beta.graph.get::<TaskView>(made.parse()?).await.is_ok(), "the task is beta's");
+    assert_eq!(records(&alpha.graph).await?.len(), before, "alpha holds nothing more");
+
+    let (shown, said) = daemon.json_and_said(&daemon.alpha, &[&scoped[..], &["task", "show", &a.cap]].concat())?;
+    assert!(!said.contains("NOTE") && shown.get("from_project").is_none(), "{said} {shown}");
+    Ok(())
+}
+
+/// The start of an id that a task of beta's has and a former id beta keeps for another of its
+/// tasks share, typed in alpha, where nothing starts so, is refused with each task named with its
+/// project.
+#[tokio::test]
+async fn a_start_two_of_the_other_projects_records_share_by_a_former_id_is_refused_naming_their_project() -> Result<()>
+{
+    let Two { daemon, a: _, b, alpha: _, beta } = Two::new().await?;
+    let shared = &b.retry[..8];
+    let cited = format!("{shared}{}", &EntityId::random().to_base64()[8..]);
+    renumbered(&beta, &cited, b.cap.parse()?).await?;
+    let refused = daemon.output(&daemon.alpha, &["task", "show", shared])?.expect_err("two of beta's tasks start so");
+    assert!(refused.contains(&format!("`{shared}` starts the ids of 2 entities")), "{refused}");
+    assert!(refused.contains(&format!("task {} in beta", &b.retry[..12])), "{refused}");
+    assert!(refused.contains(&format!("(formerly {}) in beta", &cited[..12])), "{refused}");
+    Ok(())
+}
+
 /// The next line a `fwd watch` prints, as JSON; fails, saying what was awaited, when none comes in a
 /// minute.
 async fn next_line(
@@ -593,65 +709,123 @@ async fn a_watch_held_open_in_one_project_hears_nothing_written_in_the_other() -
     Ok(())
 }
 
+/// A Codex thread calling the daemon's MCP endpoint, with the ids Codex attaches to each call, each
+/// call starting in alpha.
+struct Thread {
+    client: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    meta: rmcp::model::RequestMetaObject,
+}
+
+impl Thread {
+    /// The thread `thread`, joined to the endpoint of the daemon listening on `port`.
+    async fn on(port: u16, thread: &str) -> Result<Thread> {
+        use rmcp::ServiceExt;
+        let url = format!("http://127.0.0.1:{port}/mcp");
+        let client = ().serve(rmcp::transport::StreamableHttpClientTransport::from_uri(url)).await?;
+        let mut meta = rmcp::model::RequestMetaObject::new();
+        for (key, value) in json!({
+            "threadId": thread,
+            "sessionId": thread,
+            "x-codex-turn-metadata": {"thread_id": thread, "session_id": thread, "turn_id": "turn-1", "model": "fake"},
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+        {
+            meta.insert(key, value);
+        }
+        Ok(Thread { client, meta })
+    }
+
+    /// What the tool `tool` answers given `args`, in alpha: its structured content, which must not
+    /// be a refusal.
+    async fn call(&self, tool: &str, args: Value) -> Result<Value> {
+        let mut args = args.as_object().cloned().unwrap_or_default();
+        args.insert("project".into(), json!("alpha"));
+        let mut params = rmcp::model::CallToolRequestParams::new(tool.to_string()).with_arguments(args.clone());
+        params.meta = Some(self.meta.clone());
+        let answer = self.client.call_tool(params).await?;
+        let given = answer.structured_content.unwrap_or_default();
+        if answer.is_error == Some(true) {
+            return Err(anyhow!("{tool} {} was refused: {given}", Value::Object(args)));
+        }
+        Ok(given)
+    }
+}
+
 /// The daemon's MCP endpoint, called as a Codex thread in alpha, gives alpha's records alone from
 /// every tool that reads, and given beta's record by its id runs in beta and says so.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_mcp_read_tools_in_one_project_give_its_own_records_and_reach_the_others_by_id() -> Result<()> {
-    use rmcp::model::{CallToolRequestParams, RequestMetaObject};
-    use rmcp::ServiceExt;
     let Two { daemon, a, b, alpha, beta } = Two::new().await?;
     daemon.made(&daemon.alpha, &["step", "add", &a.retry, &a.cap])?;
-    let url = format!("http://127.0.0.1:{}/mcp", alpha.pf.port);
-    let client = ().serve(rmcp::transport::StreamableHttpClientTransport::from_uri(url)).await?;
-    let thread = "019a0000-0000-7000-8000-0000000a1fa0";
-    let mut meta = RequestMetaObject::new();
-    for (key, value) in serde_json::json!({
-        "threadId": thread,
-        "sessionId": thread,
-        "x-codex-turn-metadata": {"thread_id": thread, "session_id": thread, "turn_id": "turn-1", "model": "fake"},
-    })
-    .as_object()
-    .cloned()
-    .unwrap_or_default()
-    {
-        meta.insert(key, value);
-    }
-    let call = |tool: &'static str, args: Value| {
-        let (client, meta) = (&client, meta.clone());
-        async move {
-            let mut args = args.as_object().cloned().unwrap_or_default();
-            args.insert("project".into(), serde_json::json!("alpha"));
-            let mut params = CallToolRequestParams::new(tool.to_string()).with_arguments(args);
-            params.meta = Some(meta);
-            anyhow::Ok(client.call_tool(params).await?)
-        }
-    };
+    let thread = Thread::on(alpha.pf.port, "019a0000-0000-7000-8000-0000000a1fa0").await?;
     let others = spellings(records(&beta.graph).await?.keys().copied());
     for (tool, args, own) in [
-        ("task_list", serde_json::json!({}), a.retry.as_str()),
-        ("task_show", serde_json::json!({"id": a.retry}), a.retry.as_str()),
-        ("task_explain", serde_json::json!({"id": a.retry}), a.cap.as_str()),
-        ("step_list", serde_json::json!({"task": a.retry}), a.cap.as_str()),
-        ("relations", serde_json::json!({"id": a.retry}), a.cap.as_str()),
-        ("scope_list", serde_json::json!({}), a.scope.as_str()),
-        ("decision_list", serde_json::json!({}), "D1"),
-        ("decision_show", serde_json::json!({"id": "D1"}), "Cap retries at 30s"),
-        ("principal_list", serde_json::json!({}), "impl-alice"),
-        ("message_show", serde_json::json!({"id": a.question}), a.question.as_str()),
+        ("task_list", json!({}), a.retry.as_str()),
+        ("task_show", json!({"id": a.retry}), a.retry.as_str()),
+        ("task_explain", json!({"id": a.retry}), a.cap.as_str()),
+        ("step_list", json!({"task": a.retry}), a.cap.as_str()),
+        ("relations", json!({"id": a.retry}), a.cap.as_str()),
+        ("scope_list", json!({}), a.scope.as_str()),
+        ("decision_list", json!({}), "D1"),
+        ("decision_show", json!({"id": "D1"}), "Cap retries at 30s"),
+        ("principal_list", json!({}), "impl-alice"),
+        ("message_show", json!({"id": a.question}), a.question.as_str()),
     ] {
-        let answer = call(tool, args.clone()).await?;
-        let given = answer.structured_content.clone().unwrap_or_default().to_string();
-        assert_ne!(answer.is_error, Some(true), "{tool} {args} was refused: {given}");
+        let given = thread.call(tool, args).await?.to_string();
         prints_none_of(&others, &[tool], &given);
         prints_its_own(own, &[tool], &given);
     }
     for (tool, id) in [("task_show", &b.retry), ("message_show", &b.question)] {
-        let answer = call(tool, serde_json::json!({"id": id})).await?;
-        let given = answer.structured_content.clone().unwrap_or_default();
-        assert_ne!(answer.is_error, Some(true), "{tool} of beta's {id} through alpha was refused: {given}");
+        let given = thread.call(tool, json!({"id": id})).await?;
         assert_eq!((&given["result"]["id"], &given["result"]["from_project"]), (&json!(id), &json!("beta")), "{given}");
         let notes = given["notes"].to_string();
         assert!(notes.contains("is from project `beta`, so this command ran there"), "{notes}");
     }
+    Ok(())
+}
+
+/// A call through the MCP endpoint, started in alpha, whose subject is beta's runs in beta as the
+/// thread's principal there, made there by the call: a comment on beta's task, named by the start
+/// of its id, is written in beta by that principal, and alpha holds nothing more, no principal for
+/// the thread among it; a reply given the whole id of the notification of a question beta asks
+/// that principal settles it there. A call with no subject given beta's scope runs in beta.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_mcp_call_whose_subject_or_scope_is_the_others_runs_there_as_the_threads_principal_there() -> Result<()> {
+    // The daemon is bound, not dropped: its scratch folder stops it when it goes.
+    let Two { daemon: _daemon, a: _, b, alpha, beta } = Two::new().await?;
+    let before = records(&alpha.graph).await?;
+    let thread = Thread::on(alpha.pf.port, "019a0000-0000-7000-8000-0000000b2fb0").await?;
+
+    let named = &b.retry[..8];
+    let given = thread.call("comment", json!({"first": named, "text": "from a thread in alpha"})).await?;
+    let note = format!("NOTE: `{named}` is from project `beta`, so this command ran there");
+    assert!(given["notes"].to_string().contains(&note), "{given}");
+    assert_eq!(given["result"]["from_project"], "beta", "{given}");
+    let id: EntityId = given["result"]["record"]["id"].as_str().ok_or_else(|| anyhow!("no id in {given}"))?.parse()?;
+    let author: EntityId = beta.graph.get::<MessageView>(id).await?.author()?.into();
+    let bound = beta.graph.get::<PrincipalView>(author).await?.subject()?.unwrap_or_default();
+    assert!(bound.starts_with("codex:") && bound.ends_with("0000000b2fb0"), "the thread's principal in beta: {bound}");
+    assert_eq!(records(&alpha.graph).await?, before, "nothing of alpha's changed, and no principal was made there");
+
+    let mut inbox = Inbox::of(&beta.graph, author)?;
+    let person = ops::person_by_handle(&beta.graph, "dnorman").await?;
+    let to_thread = MessageContext { to: Some(author.to_base64()), ..Default::default() };
+    let asked = ops::post_message(&beta.graph, person, "is it in yet?", Priority::Now, to_thread).await?;
+    let told = inbox.told_of(&asked.to_base64()).await?;
+    let given = thread.call("reply", json!({"id": told.to_base64(), "text": "not yet"})).await?;
+    let note = format!("NOTE: `{}` is from project `beta`, so this command ran there", told.to_base64());
+    assert!(given["notes"].to_string().contains(&note), "{given}");
+    assert_eq!(
+        (&given["result"]["settled"], &given["result"]["from_project"]),
+        (&json!(told.to_base64()), &json!("beta"))
+    );
+    assert_eq!(beta.graph.get::<NotificationView>(told).await?.status()?, NotificationStatus::Read);
+
+    let given = thread.call("task_list", json!({"scope": b.scope})).await?;
+    let note = format!("NOTE: the scope `{}` is from project `beta`, so this command ran there", b.scope);
+    assert!(given["notes"].to_string().contains(&note), "{given}");
+    prints_its_own(&b.retry, &["task_list", "--scope"], &given["result"].to_string());
     Ok(())
 }

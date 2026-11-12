@@ -197,8 +197,8 @@ async fn a_relation_made_in_the_other_project_shows_on_this_projects_task_and_is
         ops::unlink(&t.alpha, t.daniel, RelationKind::DependsOn, theirs, ours, "no").await.expect_err("beta's");
     assert!(of_another_project(&refused, relation), "{refused}");
     assert_eq!(ops::unlink(&t.beta, t.their_daniel, RelationKind::DependsOn, theirs, ours, "done").await?, 1);
-    let proposed = ops::link(&t.beta, t.their_daniel, RelationKind::RelatesTo, theirs, ours, None, true, json!({}))
-        .await?;
+    let proposed =
+        ops::link(&t.beta, t.their_daniel, RelationKind::RelatesTo, theirs, ours, None, true, json!({})).await?;
     let refused = ops::decide_relation(&t.alpha, t.daniel, proposed, true, None).await.expect_err("beta's");
     assert!(of_another_project(&refused, proposed), "{refused}");
     ops::decide_relation(&t.beta, t.their_daniel, proposed, true, None).await?;
@@ -216,8 +216,8 @@ fn of_another_project(refused: &anyhow::Error, record: EntityId) -> bool {
 /// that checks it runs from either project, by the principal who checks it there; beta's graph
 /// changes none of it.
 #[tokio::test]
-async fn a_step_another_project_made_is_on_the_tasks_checklist_and_is_checked_in_the_project_that_made_it(
-) -> Result<()> {
+async fn a_step_another_project_made_is_on_the_tasks_checklist_and_is_checked_in_the_project_that_made_it() -> Result<()>
+{
     let t = two().await?;
     let ours = task(&t.alpha, t.daniel, "Cap the retry delay").await?;
     let theirs = task(&t.beta, t.their_daniel, "Retry on disconnect").await?;

@@ -19,7 +19,7 @@
 pub mod caller;
 pub mod tools;
 
-use crate::{App, Captured, Command, Format, Output, PrincipalCommand};
+use crate::{runs_in, App, Captured, Command, Format, Output, PrincipalCommand};
 use ankurah::EntityId;
 use anyhow::{anyhow, bail, Context as _, Result};
 use caller::Caller;
@@ -222,10 +222,11 @@ impl Operations {
 
     /// Runs the CLI command `spec` stands for, for `caller`, as the CLI runs it after connecting
     /// (`crate::run_cli`): the command parsed by the CLI's parser, run in the project the call's
-    /// `project` names, or in the project of the command's subject when that is a record of
-    /// another, as the CLI moves it (`crate::subject_of`, docs/DECISIONS.md, D181); the principal
-    /// the caller acts as there found (and made when the command needs one), the CLI's refusals,
-    /// the command, and its bookkeeping; its answer captured.
+    /// `project` names, or in the project of the command's subject, or without one of the call's
+    /// `scope`, when that is a record of another, as the CLI places it (`crate::runs_in`,
+    /// docs/DECISIONS.md, D181); the principal the caller acts as there found (and made when the
+    /// command needs one), the CLI's refusals, the command, and its bookkeeping; its answer
+    /// captured.
     /// What the command printed and said goes in `out`, whether it ran or failed.
     async fn command(
         &self,
@@ -250,31 +251,29 @@ impl Operations {
         }
         let command = crate::Cli::from_arg_matches(&matches)?.command;
         crate::refuse_before_running(&command)?;
-        let located = match crate::subject_of(&command) {
-            Some((typed, kinds)) => Some((typed.to_string(), ops::locate(&start, typed, kinds).await?)),
-            None => None,
-        };
-        let (project, graph, moved) = match &located {
-            Some((typed, ops::Located { project: Whose::Other(there), .. })) => {
-                let (project, graph) = self
-                    .hosting
-                    .open(there.uuid)
-                    .with_context(|| format!("the daemon does not have the project {} open", there.name))?;
-                (project, graph, Some((typed.clone(), there.name.clone())))
-            }
-            _ => (started_in, start, None),
+        let scoped =
+            match args.get(tools::SCOPE).filter(|v| !v.is_null()) {
+                Some(s) => Some(s.as_str().context(
+                    "`scope` is a scope's id, or its first six characters or more, as the CLI's --scope takes",
+                )?),
+                None => None,
+            };
+        // Placed before the caller's principal is found, which is found, or made, where the call
+        // runs, as the CLI places a command (`crate::run_cli`).
+        let placed = runs_in::runs_in(&start, &command, scoped).await?;
+        let (project, graph) = match &placed.project {
+            Whose::Other(there) => self
+                .hosting
+                .open(there.uuid)
+                .with_context(|| format!("the daemon does not have the project {} open", there.name))?,
+            Whose::This => (started_in, start),
         };
         let joining = crate::joins(&matches);
         let writes = joining || crate::WRITES_TOO.contains(&spec.words);
         let stamping = crate::stamps(joining, spec.words);
-        let scope = match args.get(tools::SCOPE).filter(|v| !v.is_null()) {
-            Some(s) => {
-                let s = s.as_str().context(
-                    "`scope` is a scope's id, or its first six characters or more, as the CLI's --scope takes",
-                )?;
-                // As the CLI reads `--scope` (`crate::caller`): an id, or its first characters.
-                Some(ops::resolve_id(&graph, s, &[ops::Kind::Scope]).await?)
-            }
+        // As the CLI reads `--scope` (`crate::caller`): an id, or its first characters.
+        let scope = match scoped {
+            Some(s) => Some(runs_in::scope_named(&graph, &placed.typed, s).await?),
             None => None,
         };
         refuse_split(&graph, caller).await?;
@@ -328,10 +327,10 @@ impl Operations {
             several: None,
             format: Format::Json,
             subject_project: None,
-            located: located.map(|(typed, found)| (typed, found.id)),
+            typed: placed.typed,
         };
-        if let Some((typed, there)) = &moved {
-            app.moved_to(typed, there);
+        if let Whose::Other(there) = &placed.project {
+            app.moved_to(&placed.because, &there.name);
         }
         crate::refuse_by_identity(&app, &command, writes).await?;
         let stamped = crate::run_as_caller(&app, command, joining, stamping).await;

@@ -1475,8 +1475,9 @@ async fn check_ends(graph: &ProjectGraph, kind: RelationKind, from: EntityId, to
 async fn end_kind(graph: &ProjectGraph, id: EntityId) -> Result<Option<Kind>> {
     Ok(match kind_of(graph, id).await? {
         Some(kind) => Some(kind),
-        None => matches!(graph.follow::<NotificationView>(id).await?, Followed::Held { .. })
-            .then_some(Kind::Notification),
+        None => {
+            matches!(graph.follow::<NotificationView>(id).await?, Followed::Held { .. }).then_some(Kind::Notification)
+        }
     })
 }
 
