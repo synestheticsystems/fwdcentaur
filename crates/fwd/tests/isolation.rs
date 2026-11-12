@@ -651,6 +651,30 @@ async fn a_recipient_of_another_project_replies_and_forwards_through_her_notific
     Ok(())
 }
 
+/// The messages about a record are its connections, read by its id wherever they were written, as
+/// its relations are: `message list --on` alpha's task lists a message beta holds about it beside
+/// alpha's own, named with beta, as JSON and for people, while the list of alpha's messages holds
+/// none of beta's.
+#[tokio::test]
+async fn the_messages_about_a_record_are_listed_wherever_they_are_each_named_with_its_project() -> Result<()> {
+    let Two { daemon, a, b: _, alpha: _, beta } = Two::new().await?;
+    let their_daniel = naming::principal_named(&beta.graph, "dnorman", None).await?.map(|p| p.id()).expect("his");
+    let about = MessageContext { task_id: Some(a.retry.parse()?), ..Default::default() };
+    let theirs = ops::post_message(&beta.graph, their_daniel, "beta's word on it", Priority::Next, about).await?;
+
+    let listed = daemon.json(&daemon.alpha, &["message", "list", "--on", &a.retry])?;
+    let listed = listed.as_array().ok_or_else(|| anyhow!("{listed}"))?;
+    let named: Vec<(&str, Option<&str>)> =
+        listed.iter().map(|m| (m["content"].as_str().unwrap_or_default(), m["project"].as_str())).collect();
+    assert!(named.contains(&("look at the backoff", None)), "alpha's own comment, unnamed: {named:?}");
+    assert!(named.contains(&("beta's word on it", Some("beta"))), "beta's, named with beta: {named:?}");
+    let text = daemon.text(&daemon.alpha, &["message", "list", "--on", &a.retry])?;
+    assert!(text.contains(&format!("{} beta's word on it [active] in beta", theirs.to_base64())), "{text}");
+    let alphas = daemon.json(&daemon.alpha, &["message", "list"])?.to_string();
+    assert!(!alphas.contains(&theirs.to_base64()), "a list of alpha's messages holds none of beta's: {alphas}");
+    Ok(())
+}
+
 /// A notification of beta's, named in alpha by its whole id as by the start of it, is read in beta,
 /// by its recipient there.
 #[tokio::test]

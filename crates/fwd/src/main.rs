@@ -1819,13 +1819,15 @@ fn summary_line(map: &serde_json::Map<String, Value>) -> Option<String> {
         .iter()
         .find_map(|k| map.get(*k).and_then(Value::as_str))?;
     let status = map.get("status").and_then(Value::as_str).map(|s| format!(" [{s}]")).unwrap_or_default();
+    // An entity of another project names it, as its JSON does.
+    let project = map.get("project").and_then(Value::as_str).map(|p| format!(" in {p}")).unwrap_or_default();
     let readiness = map
         .get("readiness")
         .and_then(|r| r.get("state"))
         .and_then(Value::as_str)
         .map(|s| format!(" ({s})"))
         .unwrap_or_default();
-    Some(format!("{id} {head}{status}{readiness}"))
+    Some(format!("{id} {head}{status}{readiness}{project}"))
 }
 
 fn render_object(map: &serde_json::Map<String, Value>, indent: usize) -> String {
@@ -3594,6 +3596,13 @@ async fn asked_of(app: &App, to: Option<&str>) -> Result<Option<String>> {
 async fn message_json(graph: &ProjectGraph, m: &MessageView) -> Result<Value> {
     let mut v = ops::json_of_message(m)?;
     v["references"] = Value::Array(ops::references_json(graph, v["content"].as_str().unwrap_or("")).await?);
+    // A message of another project, as the messages about a record are wherever they were written
+    // and a reply through a notification is where its thread is, is named with that project.
+    if !graph.owns(m) {
+        if let Followed::Held { project: Whose::Other(p), .. } = graph.follow::<MessageView>(m.id()).await? {
+            v["project"] = json!(p.name);
+        }
+    }
     Ok(v)
 }
 
