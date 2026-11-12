@@ -3267,24 +3267,27 @@ pub async fn post_message(
 
 /// So that acting on a notification settles it (task TdwRqMeQ, "Mark a notification read when the
 /// agent replies to it, forwards it or dismisses it by its id, as the primer says it does"): posts
-/// a message as [`post_message`] does, and the transaction that writes the message marks the
-/// notification `settles` read, so that the two land together or not at all and a watch armed
-/// next does not print the notification again. `fwd reply` and `fwd forward` post through it,
-/// passing the notification when they are given its id rather than its message's. Until
-/// 2026-09-30 a transaction of its own marked the notification after the post, and a failure
-/// between the two left the message posted and the notification unread. A notification read
-/// already is left as it is, and so is one dismissed, which marking it read would bring back into
-/// the recipient's inbox. A notification addressed to another principal than `author` is refused
-/// before anything is posted, naming whose it is and the id of the message behind it, by which
-/// `author` answers the message without settling anything ([`own_notification`]; task AfhuiHYS).
+/// a message as [`post_message`] does and marks the notification `settles` read, so that a watch
+/// armed next does not print the notification again. `fwd reply` and `fwd forward` post through
+/// it, passing the notification when they are given its id rather than its message's. A
+/// notification read already is left as it is, and so is one dismissed, which marking it read
+/// would bring back into the recipient's inbox. A notification addressed to another principal than
+/// `author` is refused before anything is posted, naming whose it is and the id of the message
+/// behind it, by which `author` answers the message without settling anything
+/// ([`own_notification`]; task AfhuiHYS).
+///
 /// The notification is its recipient's, in the recipient's project, which is `graph`'s, and the
-/// message behind it may be another project's: one a message of another project caused, or one
-/// that stayed when the task it is about moved to another project. The reply is made in that
-/// message's project ([`post_message`]), and the notification is marked read in its own project,
-/// in a transaction after the reply's. Once the reply is made it is never reported as a failure,
-/// since a caller that took it for one and posted again would post it twice: a failure of the
-/// second transaction leaves the notification unread, as the next command that settles it finds
-/// it, and [`Posted::settling`] says why.
+/// reply is made in the project of the message it answers ([`post_message`]). When that is the
+/// notification's project, the transaction that writes the reply marks the notification read, so
+/// that the two land together or not at all; until 2026-09-30 a transaction of its own marked the
+/// notification after the post, and a failure between the two left the message posted and the
+/// notification unread. When the message answered is another project's, one a message of another
+/// project caused or one that stayed when the task it is about moved to another project, the
+/// notification is marked read in its own project in a transaction after the reply's, since a
+/// transaction changes one project's records. Once the reply is made it is never reported as a
+/// failure, since a caller that took it for one and posted again would post it twice: a failure
+/// of that second transaction leaves the notification unread, as the next command that settles it
+/// finds it, and [`Posted::settling`] says why.
 pub async fn post_settling(
     graph: &ProjectGraph,
     author: EntityId,
@@ -3349,7 +3352,8 @@ pub struct Posted {
 /// What became of the notification a message was posted through ([`post_settling`]).
 #[derive(Debug)]
 pub enum Settling {
-    /// The message was posted by its own id, through no notification.
+    /// No notification: the command was given the id of the message it answers, not a
+    /// notification's.
     NoNotification,
     /// The notification is settled: marked read with the message or after it, or read or
     /// dismissed already.

@@ -1,9 +1,10 @@
 //! What `fwd reply` and `fwd forward` do to the notification they are given (task TdwRqMeQ, "Mark a
 //! notification read when the agent replies to it, forwards it or dismisses it by its id, as the
 //! primer says it does"): given a notification's id, they answer the message behind it or hand it
-//! on, mark the notification read in the transaction that posts their message, so that acting on a
-//! notification settles it, and name it beside `record` as `settled`; given a message's id, they
-//! leave every notification as it is. Each test runs the CLI against a scratch daemon of its own.
+//! on, mark the notification read in the transaction that posts their message, the message and the
+//! notification being in one project here, so that acting on a notification settles it, and name
+//! it beside `record` as `settled`; given a message's id, they leave every notification as it is.
+//! Each test runs the CLI against a scratch daemon of its own.
 
 use anyhow::{anyhow, Result};
 use fwd_core::anchoring::git;

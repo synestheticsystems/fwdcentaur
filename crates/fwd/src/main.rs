@@ -313,11 +313,15 @@ enum Command {
     },
     /// Reply in a message's thread. Accepts a message id or a notification id.
     ///
-    /// Given a notification's id, it replies to the message behind the notification, and the
-    /// transaction that posts the reply marks the notification read, so that a watch armed next
-    /// does not print it again; the answer names the notification beside `record` as `settled`.
-    /// Only the notification's recipient replies through it: another principal's is refused,
-    /// naming whose it is and the message's id. Given a message's id, it changes no notification.
+    /// Given a notification's id, it replies to the message behind the notification and marks the
+    /// notification read, so that a watch armed next does not print it again; the answer names
+    /// the notification beside `record` as `settled`. When the message is in the notification's
+    /// project, the transaction that posts the reply marks it, and the two land together or not
+    /// at all. When the message is another project's, the reply is made there and the notification
+    /// is marked read after it: should that fail, the reply stands, without `settled`, and a note
+    /// beside it says so. Only the notification's recipient replies through it: another
+    /// principal's is refused, naming whose it is and the message's id. Given a message's id, it
+    /// changes no notification.
     #[command(after_long_help = naming_in_text!(
         "fwd reply NlBXRW2Z \"done in [[8z_sQwsR]], as [[D35]] says; @triage-bot, it is ready for review\""
     ))]
@@ -331,8 +335,8 @@ enum Command {
     /// The forward is a reply in the same thread, addressed to them, quoting the original. Its
     /// note is message text.
     ///
-    /// Given a notification's id, the transaction that posts the forward marks the notification
-    /// read, as `fwd reply` does, and the answer names it beside `record` as `settled`; only the
+    /// Given a notification's id, it marks the notification read as `fwd reply` does, with the
+    /// forward or after it, and the answer names it beside `record` as `settled`; only the
     /// notification's recipient forwards it, as for `fwd reply`. Given a message's id, it changes no
     /// notification.
     #[command(after_long_help = naming_in_text!(
