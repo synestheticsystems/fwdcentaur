@@ -1295,8 +1295,11 @@ mod tests {
     }
 
     /// A relation whose project changes leaves the project's read and arrives in the read of those
-    /// made elsewhere, or the other way round, and the two say so in either order: it stays at its
-    /// ends throughout. One that both reads hold stays while either does, and goes with the last.
+    /// made elsewhere, or the other way round, and the two say so in either order. When the read
+    /// it arrives in says so first, it stays at its ends throughout and their readers do not run
+    /// again; when the read it leaves says so first, no read holds it until the other says it
+    /// arrived, and it is away from its ends meanwhile. One that both reads hold stays while either
+    /// does, and goes with the last.
     #[test]
     fn a_relation_stays_at_its_ends_while_either_read_holds_it_whichever_says_so_first() {
         use RelationRead::{MadeElsewhere, Project};
@@ -1309,14 +1312,14 @@ mod tests {
         ends.place(task, r, Project, true);
         assert_eq!(at_task.get(), vec![r]);
         // It arrives in the other read before it leaves the project's.
+        let before = runs.load(Ordering::SeqCst);
         ends.place(task, r, MadeElsewhere, true);
         ends.place(task, r, Project, false);
         assert_eq!(at_task.get(), vec![r], "arrival, then departure");
-        let before = runs.load(Ordering::SeqCst);
-        at_task.get();
         assert_eq!(runs.load(Ordering::SeqCst), before, "nothing at the task changed, so its reader did not run again");
         // It leaves the other read before it arrives back in the project's.
         ends.place(task, r, MadeElsewhere, false);
+        assert_eq!(at_task.get(), Vec::<EntityId>::new(), "between the departure and the arrival no read holds it");
         ends.place(task, r, Project, true);
         assert_eq!(at_task.get(), vec![r], "departure, then arrival");
         // Held by both, it stays while either does.
