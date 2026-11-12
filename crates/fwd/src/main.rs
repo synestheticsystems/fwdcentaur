@@ -3609,21 +3609,39 @@ async fn say_waiting(app: &App, message: &MessageView) {
 /// while no triage agent answers first for the scope it asks: that it waits, listed under that
 /// scope on the Questions page, until an agent serves the scope or the whole project, and reaches
 /// that agent then (docs/design/agents-and-inbox.md, rule 5), with the guidance on creating one.
-/// None for a message that asks someone, or whose scope a triage agent answers for.
+/// None for a message that asks someone, or whose scope a triage agent answers for. The question
+/// is read as routing reads it, by the rules of its own project, which for a forward through a
+/// notification is the project of the message it forwards, whichever project `graph` is; that
+/// project is named when it is another, since the guidance's commands are run there.
 async fn waiting_notice(graph: &ProjectGraph, message: &MessageView) -> Result<Option<String>> {
     let mc = MessageContext::from_view(message)?;
     if !mc.asks_project {
         return Ok(None);
     }
-    let scope = fwd_core::routing::asked_scope(graph, &mc).await?;
-    let Some(guidance) = triage_guidance(graph, scope).await? else { return Ok(None) };
+    let there = graph.graph_of(message)?;
+    let scope = fwd_core::routing::asked_scope(&there, &mc).await?;
+    let Some(guidance) = triage_guidance(&there, scope).await? else { return Ok(None) };
     let whom = match scope {
-        Some(scope) => format!("of the scope {}", scope_words(graph, scope).await?),
+        Some(scope) => format!("of the scope {}", scope_words(&there, scope).await?),
         None => "of the project".to_string(),
     };
-    Ok(Some(format!(
-        "fwd: this question waits, asked {whom}, until an agent serves it or the whole project, and reaches that agent then. {guidance}"
-    )))
+    let elsewhere = if graph.owns(message) {
+        None
+    } else {
+        match graph.follow::<MessageView>(message.id()).await? {
+            Followed::Held { project: Whose::Other(p), .. } => Some(p.name),
+            _ => None,
+        }
+    };
+    Ok(Some(match elsewhere {
+        None => format!(
+            "fwd: this question waits, asked {whom}, until an agent serves it or the whole project, and reaches that agent then. {guidance}"
+        ),
+        Some(project) => format!(
+            "fwd: this question was made in project `{project}`, where the message it forwards is, and waits there, asked {whom}, until an agent serves it or the whole project `{project}`, and reaches that agent then. {guidance} The commands this names are for project `{project}`: run them there with `{}`, or from one of its checkouts.",
+            runs_in::project_flag(&project)
+        ),
+    }))
 }
 
 /// Says on standard error, after a command of the triage agent it acts as that serves nothing, why

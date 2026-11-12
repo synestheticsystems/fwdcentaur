@@ -236,10 +236,16 @@ enum Failed {
     /// It ran in `project`, because `because` is from there, and failed for `why`, its error's
     /// whole chain, whose suggestions, if it makes any, are for that project too.
     #[error(
-        "{because} is from project `{project}`, so this command ran there: {why}. Any command suggested above is for project `{project}` too: run it there with `--project '{quoted}'`, or from one of its checkouts",
-        quoted = .project.replace('\'', r"'\''")
+        "{because} is from project `{project}`, so this command ran there: {why}. Any command suggested above is for project `{project}` too: run it there with `{flag}`, or from one of its checkouts",
+        flag = project_flag(.project)
     )]
     There { because: String, project: String, why: String },
+}
+
+/// `--project '<project>'`, the flag that runs a command in the project named `project`, quoted for
+/// a shell whatever the name holds.
+pub(crate) fn project_flag(project: &str) -> String {
+    format!("--project '{}'", project.replace('\'', r"'\''"))
 }
 
 /// Places `command`, which started in `graph`'s project, where it runs: in the project of the
