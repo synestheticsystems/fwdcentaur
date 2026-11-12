@@ -17,7 +17,7 @@ use fwd_core::naming;
 use fwd_core::not_before;
 use fwd_core::ops::{self, Amend, CreateDecision, CreateScope, CreateTask, EditScope, Kind, MessageContext};
 use fwd_core::project::{self, Checkout, InitOptions, NamedProject, Paths, Resolved};
-use fwd_core::project_graph::{Followed, ProjectGraph, Whose};
+use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
 use fwd_core::rules::{self, DecisionMove, Verb};
 use fwd_core::subject;
 use fwd_core::task_move;
@@ -3596,7 +3596,7 @@ async fn scope_words(graph: &ProjectGraph, scope: EntityId) -> Result<String> {
 /// a triage agent ([`waiting_notice`]). Failing to tell is said in its place and is not the
 /// command's failure: the message stands, and running the command again would make it twice.
 async fn say_waiting(app: &App, message: &MessageView) {
-    match waiting_notice(app.graph(), message).await {
+    match waiting_notice(app.graph(), &app.project.name, message).await {
         Ok(Some(notice)) => app.note(notice),
         Ok(None) => {}
         Err(why) => app.note(format!(
@@ -3611,37 +3611,63 @@ async fn say_waiting(app: &App, message: &MessageView) {
 /// that agent then (docs/design/agents-and-inbox.md, rule 5), with the guidance on creating one.
 /// None for a message that asks someone, or whose scope a triage agent answers for. The question
 /// is read as routing reads it, by the rules of its own project, which for a forward through a
-/// notification is the project of the message it forwards, whichever project `graph` is; that
-/// project is named when it is another, since the guidance's commands are run there.
-async fn waiting_notice(graph: &ProjectGraph, message: &MessageView) -> Result<Option<String>> {
+/// notification is the project of the message it forwards, whichever project `graph`, the one the
+/// command ran in and `here` names, is: it is answered by the triage agents of the project of the
+/// scope it asks, else of its own project ([`ops::triage_for`]), where the guidance's commands are
+/// run. Each of those two projects is named when it is not the command's.
+async fn waiting_notice(graph: &ProjectGraph, here: &str, message: &MessageView) -> Result<Option<String>> {
     let mc = MessageContext::from_view(message)?;
     if !mc.asks_project {
         return Ok(None);
     }
-    let there = graph.graph_of(message)?;
-    let scope = fwd_core::routing::asked_scope(&there, &mc).await?;
-    let Some(guidance) = triage_guidance(&there, scope).await? else { return Ok(None) };
+    let made_in = graph.graph_of(message)?;
+    let scope = fwd_core::routing::asked_scope(&made_in, &mc).await?;
+    // A scope's triage agents are read in the scope's own project through any graph, which then
+    // names the scope as the command's project does; for no scope, the agent that serves the
+    // message's project whole answers.
+    let answering = if scope.is_some() { graph } else { &made_in };
+    let Some(guidance) = triage_guidance(answering, scope).await? else { return Ok(None) };
     let whom = match scope {
-        Some(scope) => format!("of the scope {}", scope_words(&there, scope).await?),
+        Some(scope) => format!("of the scope {}", scope_words(graph, scope).await?),
         None => "of the project".to_string(),
     };
-    let elsewhere = if graph.owns(message) {
-        None
+    let message_in = if graph.owns(message) {
+        Whose::This
     } else {
-        match graph.follow::<MessageView>(message.id()).await? {
-            Followed::Held { project: Whose::Other(p), .. } => Some(p.name),
-            _ => None,
-        }
+        project_of::<MessageView>(graph, message.id()).await?.unwrap_or(Whose::This)
     };
-    Ok(Some(match elsewhere {
-        None => format!(
-            "fwd: this question waits, asked {whom}, until an agent serves it or the whole project, and reaches that agent then. {guidance}"
+    let answered_in = match scope {
+        Some(scope) => project_of::<ScopeView>(graph, scope).await?.unwrap_or_else(|| message_in.clone()),
+        None => message_in.clone(),
+    };
+    let made = match &message_in {
+        Whose::Other(p) => format!(" was made in project `{}`, where the message it forwards is, and", p.name),
+        Whose::This => String::new(),
+    };
+    let (whole, run_there) = match (&message_in, &answered_in) {
+        (_, Whose::Other(p)) => (
+            format!("the whole project `{}`", p.name),
+            format!(
+                " The commands this names are for project `{}`: run them there with `{}`, or from one of its checkouts.",
+                p.name,
+                runs_in::project_flag(&p.name)
+            ),
         ),
-        Some(project) => format!(
-            "fwd: this question was made in project `{project}`, where the message it forwards is, and waits there, asked {whom}, until an agent serves it or the whole project `{project}`, and reaches that agent then. {guidance} The commands this names are for project `{project}`: run them there with `{}`, or from one of its checkouts.",
-            runs_in::project_flag(&project)
-        ),
-    }))
+        (Whose::Other(_), Whose::This) => (format!("the whole project `{here}`"), String::new()),
+        (Whose::This, Whose::This) => ("the whole project".to_string(), String::new()),
+    };
+    Ok(Some(format!(
+        "fwd: this question{made} waits, asked {whom}, until an agent serves it or {whole}, and reaches that agent then. {guidance}{run_there}"
+    )))
+}
+
+/// The project of the record `id`, read as `V`, as the project of `graph` names it; none when the
+/// node holds no such record.
+async fn project_of<V: InProjectView>(graph: &ProjectGraph, id: EntityId) -> Result<Option<Whose>> {
+    Ok(match graph.follow::<V>(id).await? {
+        Followed::Held { project, .. } => Some(project),
+        Followed::NotHeld => None,
+    })
 }
 
 /// Says on standard error, after a command of the triage agent it acts as that serves nothing, why

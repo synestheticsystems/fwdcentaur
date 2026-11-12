@@ -659,12 +659,15 @@ async fn a_recipient_of_another_project_replies_and_forwards_through_her_notific
 }
 
 /// A forward asked of no one in particular, made through beta's notification of a comment of
-/// alpha's, is a message of alpha's thread, made in alpha and routed by alpha's rules, so whether
-/// it waits is read among alpha's triage agents: with none serving alpha, one serving beta whole,
-/// and no scope in either, the forwarder is told that the question waits in alpha, which the notice
-/// names with how to run the guidance's commands there.
+/// alpha's, is a message of alpha's thread, made in alpha and routed by alpha's rules, so the
+/// forwarder is told where it was made and which project's triage agents would answer it, and the
+/// guidance's commands go to that project. Asking no scope, it is answered in alpha: with none
+/// serving alpha and one serving beta whole, it waits in alpha, and the commands are for alpha.
+/// Asking a scope of beta's that no agent serves, once beta's agent has retired, it is answered in
+/// beta, where the command ran: it waits there, and no command is sent to alpha, where an agent
+/// made would never be asked.
 #[tokio::test]
-async fn a_forward_made_in_another_projects_thread_says_whether_it_waits_there() -> Result<()> {
+async fn a_forward_made_in_another_projects_thread_says_whether_it_waits_where_it_is_answered() -> Result<()> {
     let daemon = Daemon::new()?;
     let beta = daemon.client(&daemon.beta).await?;
     let triage = ["--as", "triage-bot", "principal", "add", "triage-bot", "--role", "triage", "--project-wide"];
@@ -675,15 +678,34 @@ async fn a_forward_made_in_another_projects_thread_says_whether_it_waits_there()
     let mut hers = Inbox::of(&beta.graph, alice).await?;
     let task = daemon.made(&daemon.alpha, &["task", "create", "Retry on disconnect"])?;
     let mention = format!("@{} look at the backoff", alice.to_base64());
+    let made_in_alpha = "fwd: this question was made in project `alpha`, where the message it forwards is, and waits";
+
     let comment = daemon.made(&daemon.alpha, &["comment", &task, &mention])?;
     let told = hers.told_of(&comment).await?.to_base64();
-
     let args = ["--as", "impl-alice", "forward", &told, "--note", "who takes this?"];
     let (forwarded, said) = daemon.json_and_said(&daemon.beta, &args)?;
     assert_eq!(forwarded["record"]["project"], "alpha", "made in alpha, beside beta's notification: {forwarded}");
-    let waits = "fwd: this question was made in project `alpha`, where the message it forwards is, and waits there, asked of the project, until an agent serves it or the whole project `alpha`, and reaches that agent then.";
-    assert!(said.contains(waits), "{said}");
+    let waits = format!(
+        "{made_in_alpha}, asked of the project, until an agent serves it or the whole project `alpha`, and reaches that agent then."
+    );
+    assert!(said.contains(&waits), "{said}");
     assert!(said.contains("run them there with `--project 'alpha'`, or from one of its checkouts."), "{said}");
+
+    daemon.json(&daemon.beta, &["principal", "retire", "triage-bot"])?;
+    let scope = daemon.made(&daemon.beta, &["scope", "create", "Replication"])?;
+    let comment = daemon.made(&daemon.alpha, &["comment", &task, &mention])?;
+    let told = hers.told_of(&comment).await?.to_base64();
+    let args = ["--as", "impl-alice", "--scope", &scope, "forward", &told, "--note", "who takes this?"];
+    let (forwarded, said) = daemon.json_and_said(&daemon.beta, &args)?;
+    assert_eq!(forwarded["record"]["project"], "alpha", "{forwarded}");
+    let waits = format!(
+        "{made_in_alpha}, asked of the scope \"Replication\" ({}), until an agent serves it or the whole project `beta`, and reaches that agent then.",
+        &scope[..8]
+    );
+    assert!(said.contains(&waits), "{said}");
+    let guidance = format!("The scope \"Replication\" ({}) has no triage agent", &scope[..8]);
+    assert!(said.contains(&guidance), "named as beta, where the command ran, names it: {said}");
+    assert!(!said.contains("--project 'alpha'"), "no command is sent to alpha: {said}");
     Ok(())
 }
 
