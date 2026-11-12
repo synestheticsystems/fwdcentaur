@@ -28,6 +28,12 @@
 //!   record's own project ([`ProjectGraph::graph_of`]), so that each rule is read where its subject
 //!   is and each notification is made in its recipient's project.
 //!
+//! - A page shows one project's lists from live queries that carry the project, and names what
+//!   their records hold the ids of through live reads that carry none ([`ProjectGraph::follow_live`],
+//!   [`ProjectGraph::relations_made_elsewhere_live`], [`ProjectGraph::query_projects`]): each holds
+//!   the records whose ids a reader names, so a record of another project is shown with its project,
+//!   and no list reads through them.
+//!
 //! - A record changes project in one write alone, [`ProjectTransaction::take_in`], which a task's
 //!   move to another project makes (`task_move`); every other write of a project's graph makes and
 //!   changes that project's records alone.
@@ -44,6 +50,7 @@ use ankurah::model::MutableBorrow;
 use ankurah::property::PropertyError;
 use ankurah::transaction::Transaction;
 use ankurah::{Context, EntityId, LiveQuery, MatchArgs, Model, Ref, Value, View};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 /// A model whose records each name their project: the nine models of a project's work, and
@@ -599,6 +606,95 @@ impl NodeGraph {
     }
 }
 
+/// The live reads of a page that shows one project: what its records name, wherever it is. A page
+/// lists one project's records ([`ProjectGraph::query_all`]) and names what they hold the ids of
+/// (the far end of a relation, a message's author, a task's assignee), which may be a record of
+/// another project; it names that record with its project's name, as the command line does
+/// ([`ProjectGraph::follow`]), and keeps it current as it changes there.
+impl ProjectGraph {
+    /// A live query on the records of `V`'s model whose ids are `ids`, of whichever project: the
+    /// records a page names by their ids and does not list, which [`LiveFollow::follow_ids`] changes
+    /// as the page names others. An id the node holds no record of in `V`'s model is not among its
+    /// results. Nothing that lists records reads through it.
+    pub fn follow_live<V: InProjectView>(&self, ids: &BTreeSet<EntityId>) -> Result<LiveFollow<V>, RetrievalError> {
+        let reads = Reads::Records;
+        Ok(LiveFollow { query: self.ctx.query(selecting(reads.predicate(ids)))?, reads })
+    }
+
+    /// A live query on the relations that other projects made from or to any of `ids`: what a page
+    /// reads beside its project's own relations, so that a relation another project made, pointing
+    /// at one of this project's records, shows on that record, and a record of another project
+    /// shows with its own relations. It reads by the records' ids, since the store has no join
+    /// that would find them by the records' project. [`LiveFollow::follow_ids`] changes the records
+    /// it reads them for.
+    pub fn relations_made_elsewhere_live(
+        &self,
+        ids: &BTreeSet<EntityId>,
+    ) -> Result<LiveFollow<RelationView>, RetrievalError> {
+        let reads = Reads::RelationsMadeElsewhere { here: self.project };
+        Ok(LiveFollow { query: self.ctx.query(selecting(reads.predicate(ids)))?, reads })
+    }
+
+    /// A live query on every project of the node: the names by which a page names a record of
+    /// another project beside it. A project is no project's record, so this lists no project's
+    /// records.
+    pub fn query_projects(&self) -> Result<LiveQuery<ProjectView>, RetrievalError> {
+        self.ctx.query(selecting(Predicate::True))
+    }
+}
+
+/// What a [`LiveFollow`] reads for the ids it is given.
+#[derive(Clone, Copy)]
+enum Reads {
+    /// The records with those ids.
+    Records,
+    /// The relations from or to those ids that a project other than `here` made.
+    RelationsMadeElsewhere { here: EntityId },
+}
+
+impl Reads {
+    fn predicate(self, ids: &BTreeSet<EntityId>) -> Predicate<Parsed> {
+        // `IN ()` is no predicate the query language reads: no id selects nothing.
+        if ids.is_empty() {
+            return Predicate::False;
+        }
+        let among = |field: &str| Predicate::Comparison {
+            left: Box::new(Expr::Path(PathExpr { component: None, steps: vec![field.to_string()] })),
+            operator: ComparisonOperator::In,
+            right: Box::new(Expr::ExprList(ids.iter().map(|id| Expr::Literal(Value::EntityId(*id))).collect())),
+        };
+        match self {
+            Reads::Records => among("id"),
+            Reads::RelationsMadeElsewhere { here } => {
+                let elsewhere = comparing("project", ComparisonOperator::NotEqual, Value::EntityId(here));
+                let touching = Predicate::Or(Box::new(among("from_id")), Box::new(among("to_id")));
+                Predicate::And(Box::new(elsewhere), Box::new(touching))
+            }
+        }
+    }
+}
+
+/// A live query a page reads what its records name through ([`ProjectGraph::follow_live`],
+/// [`ProjectGraph::relations_made_elsewhere_live`]), over ids it changes as the page names others.
+#[derive(Clone)]
+pub struct LiveFollow<V: InProjectView> {
+    query: LiveQuery<V>,
+    reads: Reads,
+}
+
+impl<V: InProjectView> LiveFollow<V> {
+    /// The live query, to read its results and wait for the daemon's answer.
+    pub fn live(&self) -> &LiveQuery<V> {
+        &self.query
+    }
+
+    /// Reads for `ids` from now on, in place of the ids it read for: what no longer matches leaves
+    /// the results and what now matches arrives, each a change of its own.
+    pub fn follow_ids(&self, ids: &BTreeSet<EntityId>) -> Result<(), RetrievalError> {
+        self.query.update_selection(selecting(self.reads.predicate(ids)))
+    }
+}
+
 /// A record that another record holds the id of, as [`ProjectGraph::follow`] found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Followed<T> {
@@ -629,7 +725,7 @@ pub struct ProjectRecord {
 
 impl ProjectRecord {
     /// The project `view` shows.
-    fn of(view: &ProjectView) -> Result<ProjectRecord, PropertyError> {
+    pub fn of(view: &ProjectView) -> Result<ProjectRecord, PropertyError> {
         let text = view.uuid()?;
         let uuid =
             text.parse().map_err(|_| PropertyError::InvalidValue { value: text, ty: "a project's UUID".into() })?;
