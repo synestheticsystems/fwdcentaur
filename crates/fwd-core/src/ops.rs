@@ -3321,7 +3321,7 @@ pub async fn post_settling(
     };
     trx.commit().await?;
     let settling = match (settles, elsewhere) {
-        (None, _) => Settling::Nothing,
+        (None, _) => Settling::NoNotification,
         (Some(notification), None) => Settling::Settled(notification),
         (Some(notification), Some(view)) => match mark_read(graph, &view).await {
             Ok(()) => Settling::Settled(notification),
@@ -3350,7 +3350,7 @@ pub struct Posted {
 #[derive(Debug)]
 pub enum Settling {
     /// The message was posted by its own id, through no notification.
-    Nothing,
+    NoNotification,
     /// The notification is settled: marked read with the message or after it, or read or
     /// dismissed already.
     Settled(EntityId),

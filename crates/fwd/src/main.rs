@@ -3383,27 +3383,29 @@ async fn message_anywhere(graph: &ProjectGraph, id: EntityId) -> Result<MessageV
 
 /// Prints what `reply` and `forward` posted, under `record` ([`made_json`]), and beside it as
 /// `settled` the notification they were given and settled, so that an agent that meant to act on a
-/// notification sees whether it did: given a message's id, the answer has no `settled`. A
-/// notification left unread after the message was made is said beside the answer
-/// ([`unsettled_note`]), which is the message made, as it is.
-async fn print_reply(app: &App, made: &str, posted: ops::Posted) -> Result<()> {
+/// notification sees whether it did: given a message's id, the answer has no `settled`. When the
+/// notification stays unread after the message was made, the answer is the message made all the
+/// same, and a note beside it says why ([`unsettled_note`]). `what` names the message: "reply" or
+/// "forward".
+async fn print_reply(app: &App, what: &str, posted: ops::Posted) -> Result<()> {
     let graph = app.graph();
     let mut answer = made_json(message_json(graph, &message_anywhere(graph, posted.message).await?).await?);
     match posted.settling {
-        ops::Settling::Nothing => {}
+        ops::Settling::NoNotification => {}
         ops::Settling::Settled(n) => answer["settled"] = json!(n.to_base64()),
-        ops::Settling::Unread { notification, why } => app.note(unsettled_note(made, notification, &why)),
+        ops::Settling::Unread { notification, why } => app.note(unsettled_note(what, notification, &why)),
     }
     app.print_made(answer, to_text)
 }
 
-/// What `reply` and `forward` say beside the message they `made` ("reply", "forward") when the
-/// notification they were given stays unread, for `why`: that the message was made all the same,
-/// so that no one runs the command again and posts it twice, and how to mark the notification read.
-fn unsettled_note(made: &str, notification: EntityId, why: &anyhow::Error) -> String {
+/// What `reply` and `forward` say beside the message they made, `what` ("reply", "forward"), when
+/// the notification they were given stays unread, for `why`: that the message was made all the
+/// same, so that no one runs the command again and posts it twice, and how to mark the
+/// notification read.
+fn unsettled_note(what: &str, notification: EntityId, why: &anyhow::Error) -> String {
     let short = short_id(&notification.to_base64());
     format!(
-        "NOTE: the {made} was made, but its notification {short} could not be marked read ({why:#}); `fwd read {short}` marks it read, and running this command again would make the {made} twice"
+        "NOTE: the {what} was made, but its notification {short} could not be marked read ({why:#}); `fwd read {short}` marks it read, and running this command again would make the {what} twice"
     )
 }
 
