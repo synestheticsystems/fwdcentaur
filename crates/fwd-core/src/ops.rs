@@ -1523,7 +1523,6 @@ pub async fn link(
         let already = relations_from(graph, from, Some(RelationKind::Cites)).await?;
         if let Some(r) = already.iter().find(|r| r.to_id().ok() == Some(to) && standing(r)) {
             if !propose && r.status()? == RelationStatus::Proposed {
-                graph.ensure_own(r).await?;
                 let trx = graph.begin();
                 let m = trx.edit(r)?;
                 m.status()?.set(&RelationStatus::Accepted)?;
@@ -1604,9 +1603,9 @@ fn new_relation(
 /// reason. Returns how many. A supersession of one decision by another is refused: retracting it
 /// would leave the old decision Superseded with no successor, and nothing moves a superseded
 /// decision back, so a supersession is never undone; a new decision supersedes the successor
-/// instead. A relation another project made, which this project's record holds as one of its
-/// relations, is refused, naming that project: only the project that made it changes it
-/// (`ProjectGraph::ensure_own`).
+/// instead. The relations are changed in the graph's project, which a command that retracts them
+/// runs in, whichever project their ends are in (docs/DECISIONS.md, D181); one of another project
+/// is refused by the transaction (`ProjectGraphError::OfAnotherProject`).
 pub async fn unlink(
     graph: &ProjectGraph,
     by: EntityId,
@@ -1627,7 +1626,6 @@ pub async fn unlink(
     let mut holding = Vec::new();
     for r in candidates.iter().filter(|r| r.to_id().ok() == Some(to)) {
         if rules::holds(kind, r.status()?) {
-            graph.ensure_own(r).await?;
             holding.push(r);
         }
     }
@@ -1685,9 +1683,6 @@ pub async fn change_scopes(
     if adding.is_empty() && leaving.is_empty() {
         return Ok(());
     }
-    for r in &leaving {
-        graph.ensure_own(*r).await?;
-    }
     let t = now();
     let via = json!({"actor_id": by.to_base64()});
     let trx = graph.begin();
@@ -1714,8 +1709,8 @@ pub async fn change_scopes(
     Ok(())
 }
 
-/// Approves or rejects the proposed relation `relation`; one another project made is refused,
-/// naming that project, as [`unlink`] refuses it.
+/// Approves or rejects the proposed relation `relation`, in the graph of its project, which a
+/// command that decides it runs in, as [`unlink`] retracts one.
 pub async fn decide_relation(
     graph: &ProjectGraph,
     by: EntityId,
@@ -1724,7 +1719,6 @@ pub async fn decide_relation(
     reason: Option<&str>,
 ) -> Result<()> {
     let r = graph.relation(relation).await?;
-    graph.ensure_own(&r).await?;
     if r.status()? != RelationStatus::Proposed {
         bail!("relation {relation} is {}, not proposed", r.status()?);
     }
@@ -1810,12 +1804,15 @@ fn step_via(by: EntityId) -> Value {
 /// it back to active, and the highlight's steps of other tasks move with them, in the same
 /// transaction. A step that is a message or a task, or a highlight no one has started a thread on,
 /// moves alone. Checking a checked step, or unchecking an unchecked one, leaves the step as it is.
-/// Returns what moved. Like a check before D99, it tells no one.
+/// Returns what moved. Like a check before D99, it tells no one. The step's relation is changed in
+/// the graph's project, which a command that checks it runs in, whichever project its task is in
+/// (docs/DECISIONS.md, D181), and so are the thread and the highlight's other steps that move with
+/// it.
 pub async fn check_step(graph: &ProjectGraph, by: EntityId, edge: EntityId, check: bool) -> Result<rules::Changes> {
     let r = graph.relation(edge).await.context("that step")?;
-    graph.ensure_own(&r).await?;
     let from = r.from_id()?;
-    let highlight = r.kind()? == RelationKind::StepOf && graph.get::<CodeAnchorView>(from).await.is_ok();
+    let highlight = r.kind()? == RelationKind::StepOf
+        && matches!(graph.follow::<CodeAnchorView>(from).await?, Followed::Held { .. });
     let (messages, mut relations) =
         if highlight { highlight_parts(graph, from).await? } else { (Vec::new(), Vec::new()) };
     if !relations.iter().any(|x| x.id() == edge) {
@@ -1841,7 +1838,9 @@ pub async fn check_step(graph: &ProjectGraph, by: EntityId, edge: EntityId, chec
 /// Only the task's creator and its assignee take a step off (`rules::can_remove_step`). Refused
 /// with a sentence, writing nothing: a relation that is not a step on `task`'s checklist, anyone
 /// but the task's creator and its assignee, a blank reason, and a retire of a step that is not a
-/// highlight. Returns what the retire moved, nothing without one.
+/// highlight. Returns what the retire moved, nothing without one. The step's relation is changed
+/// in the graph's project, which a command that takes it off runs in, whichever project the task
+/// is in (docs/DECISIONS.md, D181).
 ///
 /// It tells no one, as an unlink and a resolve tell no one today: it retracts a relation and
 /// moves statuses, and adds nothing for routing, which reacts only to what is added.
@@ -1853,10 +1852,12 @@ pub async fn remove_step(
     reason: &str,
     retire: bool,
 ) -> Result<rules::Retired> {
-    let view: TaskView = graph.get(task).await.context("that task")?;
+    let view = match graph.follow::<TaskView>(task).await? {
+        Followed::Held { found, .. } => found,
+        Followed::NotHeld => bail!("the node holds no task {task}"),
+    };
     let title = view.title()?;
     let r = graph.relation(edge).await.context("that step")?;
-    graph.ensure_own(&r).await?;
     if r.kind()? != RelationKind::StepOf || r.to_id()? != task {
         bail!("that is not a step on the checklist of \"{title}\"");
     }
@@ -1879,7 +1880,7 @@ pub async fn remove_step(
     }
     let step = r.from_id()?;
     let (messages, relations, retired) = if retire {
-        if graph.get::<CodeAnchorView>(step).await.is_err() {
+        if !matches!(graph.follow::<CodeAnchorView>(step).await?, Followed::Held { .. }) {
             let what = match describe(graph, step).await? {
                 Some((kind, name)) => format!("a {} ({name})", kind.name()),
                 None => "not a highlight".to_string(),

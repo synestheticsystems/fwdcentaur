@@ -108,6 +108,7 @@ async fn following_an_id_reads_its_record_in_whichever_project_with_that_project
 async fn a_records_relations_are_read_by_its_id_whichever_project_made_them_and_a_list_by_project() -> Result<()> {
     use fwd_core::model::{PrincipalKind, RelationKind, RelationView};
     use fwd_core::ops;
+    use fwd_core::project_graph::ProjectGraphError;
     let (alpha, beta) = two().await?;
     let person = ops::ensure_principal(&alpha, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     let ours = task(&alpha, person, "Cap the retry delay").await?;
@@ -123,11 +124,11 @@ async fn a_records_relations_are_read_by_its_id_whichever_project_made_them_and_
     assert!(listed.is_empty(), "alpha's list of relations holds those alpha made: {}", listed.len());
     assert_eq!(beta.all::<RelationView>().await?.len(), 1);
 
-    // Only the project that made it changes it: alpha names beta when it refuses.
-    let refused = alpha.ensure_own(&to_ours[0]).await.expect_err("beta's relation");
-    assert!(refused.to_string().contains("project `beta`"), "{refused}");
-    assert!(beta.ensure_own(&to_ours[0]).await.is_ok());
+    // It is beta's record: beta's transactions change it, and alpha's refuse it.
     assert!(!alpha.owns(&to_ours[0]) && beta.owns(&to_ours[0]));
+    let trx = alpha.begin();
+    let refused = trx.edit(&to_ours[0]).map(|_| ()).expect_err("beta's relation");
+    assert!(matches!(refused, ProjectGraphError::OfAnotherProject { record, .. } if record == made_in_beta));
     Ok(())
 }
 

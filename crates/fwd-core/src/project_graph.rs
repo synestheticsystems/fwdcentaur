@@ -12,8 +12,8 @@
 //! - What connects records is read wherever in the node it is. The relations that touch a record
 //!   are read by that record's id ([`ProjectGraph::relations_from`], `relations_to`, `relation`),
 //!   whichever project made them, so a relation made in another project shows on the record it
-//!   points at; only the project that made a relation changes it ([`ProjectGraph::ensure_own`]). An
-//!   id a record holds (a relation's end, a message's author, a task's assignee or scope, a cited
+//!   points at, and a command that changes a relation runs in the project that made it, as any
+//!   command whose subject is a record of another project does. An id a record holds (a relation's end, a message's author, a task's assignee or scope, a cited
 //!   decision) is followed wherever its record is ([`ProjectGraph::follow`]), and the record comes
 //!   with its project, which a reader names beside it.
 //! - An id someone types names a record of any project (D181): the resolver reads the former ids
@@ -104,14 +104,14 @@ pub enum ProjectGraphError {
     OtherProject { named: EntityId, bound: EntityId },
     /// A record of another project, such as a relation another project made that points at one of
     /// this project's records, was to be changed in this project's graph, which changes only its
-    /// own project's records. `name` is that project's name where the refusal read it
-    /// ([`ProjectGraph::ensure_own`]).
+    /// own project's records, so that what a command writes is attributed to its caller in the
+    /// project it runs in: a command whose subject is the record runs in the record's project.
     #[error(
-        "{} is a record of {}, and only a command run in that project changes it",
+        "{} is a record of another project ({}), which only a command run in that project changes",
         .record.to_base64(),
-        .name.as_ref().map_or_else(|| format!("another project ({})", .project.to_base64()), |name| format!("project `{name}`: run the command there (--project '{name}')"))
+        .project.to_base64()
     )]
-    OfAnotherProject { record: EntityId, project: EntityId, name: Option<String> },
+    OfAnotherProject { record: EntityId, project: EntityId },
     #[error(transparent)]
     Retrieval(Box<RetrievalError>),
     #[error(transparent)]
@@ -330,8 +330,8 @@ impl ProjectGraph {
     }
 
     /// The relation `id`, whichever project made it, as a record's relations hold it
-    /// ([`ProjectGraph::relations_from`]): a command that changes it refuses one of another project
-    /// first ([`ProjectGraph::ensure_own`]).
+    /// ([`ProjectGraph::relations_from`]): a command that changes it runs in the project that made
+    /// it.
     pub async fn relation(&self, id: EntityId) -> Result<RelationView, RetrievalError> {
         self.ctx.get(id).await
     }
@@ -347,21 +347,6 @@ impl ProjectGraph {
     /// Whether `record` is one of this project's, which this graph's transactions change.
     pub fn owns<V: InProjectView>(&self, record: &V) -> bool {
         record.project_id().is_ok_and(|project| project == self.project)
-    }
-
-    /// Refuses, naming its project, a record of another project, which this graph's transactions
-    /// do not change ([`ProjectGraphError::OfAnotherProject`]): a command that reached it through a
-    /// record's relations says so before it begins to write. A record of this project passes.
-    pub async fn ensure_own<V: InProjectView>(&self, record: &V) -> Result<(), ProjectGraphError> {
-        let project = record.project_id()?;
-        if project == self.project {
-            return Ok(());
-        }
-        let name = match self.whose(project).await? {
-            Some(Whose::Other(p)) => Some(p.name),
-            Some(Whose::This) | None => None,
-        };
-        Err(ProjectGraphError::OfAnotherProject { record: record.id(), project, name })
     }
 
     /// The project whose record is `project`, as a reader names it; none when the store has no
@@ -636,15 +621,14 @@ impl ProjectTransaction {
     }
 
     /// The record `view` shows, to change in this transaction. A record of another project is
-    /// refused ([`ProjectGraphError::OfAnotherProject`]); [`ProjectGraph::ensure_own`] refuses it
-    /// with its project's name before a transaction begins.
+    /// refused ([`ProjectGraphError::OfAnotherProject`]).
     pub fn edit<'rec, 'trx: 'rec, V: InProjectView>(
         &'trx self,
         view: &V,
     ) -> Result<MutableBorrow<'rec, <V::Model as Model>::Mutable>, ProjectGraphError> {
         match view.project_id()? {
             project if project == self.project => Ok(self.trx.edit::<V::Model>(view.entity())?),
-            project => Err(ProjectGraphError::OfAnotherProject { record: view.id(), project, name: None }),
+            project => Err(ProjectGraphError::OfAnotherProject { record: view.id(), project }),
         }
     }
 

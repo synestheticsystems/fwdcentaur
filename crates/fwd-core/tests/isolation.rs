@@ -316,8 +316,6 @@ async fn one_projects_graph_changes_none_of_the_others_records() -> Result<()> {
     assert!(matches!(edited, ProjectGraphError::OfAnotherProject { record, .. } if record == b.retry), "{edited:?}");
     let made = trx.create(&FormerId { project: beta.project(), former: "x".repeat(43), record: b.retry }).await;
     assert!(matches!(made, Err(ProjectGraphError::OtherProject { .. })), "{made:?}");
-    let named = alpha.ensure_own(&theirs).await.expect_err("named");
-    assert!(named.to_string().contains("project `beta`"), "{named}");
     // And operations on beta's records through alpha's graph change nothing of beta's.
     assert!(ops::transition(&alpha, a.daniel, b.retry, fwd_core::rules::Verb::Cancel, Some("no")).await.is_err());
     assert!(ops::assign(&alpha, a.daniel, b.cap, Some(a.alice)).await.is_err());
@@ -327,11 +325,15 @@ async fn one_projects_graph_changes_none_of_the_others_records() -> Result<()> {
     );
     assert_eq!(beta.get::<TaskView>(b.retry).await?.status()?, TaskStatus::InProgress);
     assert_eq!(ops::assignee_of(&beta.get::<TaskView>(b.cap).await?)?, None);
-    // A relation beta made, read on alpha's side, is refused there, naming beta.
+    // A relation beta made, read on alpha's side, is not alpha's to change: a command that
+    // retracts it runs in beta.
     let from_beta = ops::link(&beta, b.daniel, RelationKind::RelatesTo, b.cap, a.cap, None, false, json!({})).await?;
     let unlinked =
         ops::unlink(&alpha, a.daniel, RelationKind::RelatesTo, b.cap, a.cap, "no").await.expect_err("beta's");
-    assert!(unlinked.to_string().contains("project `beta`"), "{unlinked}");
+    assert!(
+        matches!(unlinked.downcast_ref(), Some(ProjectGraphError::OfAnotherProject { record, .. }) if *record == from_beta),
+        "{unlinked}"
+    );
     assert_eq!(beta.relation(from_beta).await?.status()?, RelationStatus::Accepted);
     Ok(())
 }

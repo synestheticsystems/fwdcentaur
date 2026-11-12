@@ -1,15 +1,15 @@
 //! Each reader of an id a record holds, where the record it names is in another project of the
 //! node: the reader follows it there and names that project beside the record (docs/DECISIONS.md,
 //! D176), and one the node does not hold is said to be one that cannot be followed here. Readiness
-//! weighs a dependency wherever it leads, a cycle through two projects is refused, and only the
-//! project that made a relation changes it.
+//! weighs a dependency wherever it leads, a cycle through two projects is refused, and a relation is
+//! changed in the project that made it, whichever projects its ends are in.
 
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateScope, CreateTask, MessageContext};
-use fwd_core::project_graph::ProjectGraph;
+use fwd_core::project_graph::{ProjectGraph, ProjectGraphError};
 use fwd_core::rules::{NotReadyReason, Readiness, Verb};
 use serde_json::json;
 use std::sync::Arc;
@@ -171,8 +171,8 @@ async fn a_far_author_assignee_and_scope_are_named_with_their_project() -> Resul
 }
 
 #[tokio::test]
-async fn a_relation_made_in_the_other_project_shows_on_this_projects_task_and_only_its_project_changes_it() -> Result<()>
-{
+async fn a_relation_made_in_the_other_project_shows_on_this_projects_task_and_is_changed_in_the_project_that_made_it(
+) -> Result<()> {
     let t = two().await?;
     let ours = task(&t.alpha, t.daniel, "Cap the retry delay").await?;
     let theirs = task(&t.beta, t.their_daniel, "Retry on disconnect").await?;
@@ -189,12 +189,48 @@ async fn a_relation_made_in_the_other_project_shows_on_this_projects_task_and_on
     let gone = ops::reference_json(&t.alpha, EntityId::random()).await?;
     assert_eq!((gone["kind"].as_str(), gone["followed"].as_bool()), (Some("unknown"), Some(false)));
 
+    // Beta's relation is changed through beta's graph, where a command that changes it runs, and
+    // alpha's transaction refuses it.
     let refused =
         ops::unlink(&t.alpha, t.daniel, RelationKind::DependsOn, theirs, ours, "no").await.expect_err("beta's");
-    assert!(refused.to_string().contains("project `beta`"), "{refused}");
-    let refused = ops::decide_relation(&t.alpha, t.daniel, relation, true, None).await.expect_err("beta's");
-    assert!(refused.to_string().contains("project `beta`"), "{refused}");
+    assert!(of_another_project(&refused, relation), "{refused}");
     assert_eq!(ops::unlink(&t.beta, t.their_daniel, RelationKind::DependsOn, theirs, ours, "done").await?, 1);
+    let proposed = ops::link(&t.beta, t.their_daniel, RelationKind::RelatesTo, theirs, ours, None, true, json!({}))
+        .await?;
+    let refused = ops::decide_relation(&t.alpha, t.daniel, proposed, true, None).await.expect_err("beta's");
+    assert!(of_another_project(&refused, proposed), "{refused}");
+    ops::decide_relation(&t.beta, t.their_daniel, proposed, true, None).await?;
+    assert_eq!(t.alpha.relation(proposed).await?.status()?, RelationStatus::Accepted);
+    Ok(())
+}
+
+/// Whether `refused` is a transaction's refusal to change `record`, a record of another project.
+fn of_another_project(refused: &anyhow::Error, record: EntityId) -> bool {
+    matches!(refused.downcast_ref(), Some(ProjectGraphError::OfAnotherProject { record: r, .. }) if *r == record)
+}
+
+/// Alpha's task made a step of beta's with `link` run in alpha is a relation of alpha's: it is on
+/// beta's task's checklist, and it is checked and unchecked through alpha's graph, where a command
+/// that checks it runs from either project, by the principal who checks it there; beta's graph
+/// changes none of it.
+#[tokio::test]
+async fn a_step_another_project_made_is_on_the_tasks_checklist_and_is_checked_in_the_project_that_made_it(
+) -> Result<()> {
+    let t = two().await?;
+    let ours = task(&t.alpha, t.daniel, "Cap the retry delay").await?;
+    let theirs = task(&t.beta, t.their_daniel, "Retry on disconnect").await?;
+    let step = ops::link(&t.alpha, t.daniel, RelationKind::StepOf, ours, theirs, None, false, json!({})).await?;
+    let checklist = ops::steps(&t.beta, theirs).await?;
+    assert_eq!(checklist.iter().map(ankurah::View::id).collect::<Vec<_>>(), vec![step]);
+
+    let refused = ops::check_step(&t.beta, t.their_daniel, step, true).await.expect_err("alpha's relation");
+    assert!(of_another_project(&refused, step), "{refused}");
+    ops::check_step(&t.alpha, t.alice, step, true).await?;
+    let checked = t.beta.relation(step).await?;
+    assert_eq!(checked.status()?, RelationStatus::Resolved);
+    assert_eq!(checked.closed_by()?.map(EntityId::from), Some(t.alice), "checked by alpha's implementer");
+    ops::check_step(&t.alpha, t.daniel, step, false).await?;
+    assert_eq!(t.beta.relation(step).await?.status()?, RelationStatus::Accepted);
     Ok(())
 }
 
