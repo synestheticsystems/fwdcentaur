@@ -5,8 +5,9 @@
 //!
 //! A daemon keeps every project it hosts in one node and one store (docs/DECISIONS.md, D135), so
 //! every record of the nine models a project's work is made of names its [`Project`] in a
-//! `project` field, set when the record is made; only moving the record to another project, which
-//! nothing does yet, changes it. That field groups a project's records: the project's graph
+//! `project` field, set when the record is made; only a task's move to another project
+//! (`crate::task_move`) changes it, for the task and what belongs to it. That field groups a
+//! project's records: the project's graph
 //! (`crate::project_graph`) adds it to every list, every live query and every creation, while the
 //! ids one record holds of another are followed whichever project that other is in (D176).
 //!
