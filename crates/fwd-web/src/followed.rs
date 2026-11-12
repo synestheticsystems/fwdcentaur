@@ -36,19 +36,22 @@ pub struct Leases {
 }
 
 impl Leases {
-    /// One more reader names `id`.
-    pub fn take(&mut self, id: EntityId) {
-        *self.readers.entry(id).or_default() += 1;
+    /// One more reader names `id`: true when no reader named it before.
+    pub fn take(&mut self, id: EntityId) -> bool {
+        let readers = self.readers.entry(id).or_default();
+        *readers += 1;
+        *readers == 1
     }
 
-    /// A reader of `id` is gone, and with the last of them the id goes.
-    pub fn give_back(&mut self, id: EntityId) {
-        if let Some(readers) = self.readers.get_mut(&id) {
-            *readers -= 1;
-            if *readers == 0 {
-                self.readers.remove(&id);
-            }
+    /// A reader of `id` is gone, and with the last of them the id goes: true when it went.
+    pub fn give_back(&mut self, id: EntityId) -> bool {
+        let Some(readers) = self.readers.get_mut(&id) else { return false };
+        *readers -= 1;
+        let gone = *readers == 0;
+        if gone {
+            self.readers.remove(&id);
         }
+        gone
     }
 
     /// The ids some reader names.
@@ -88,18 +91,20 @@ impl Reading {
     /// A reader names `id`: true when the query must be told, now that it is to read for an id it
     /// was not given, and no change is on its way already.
     pub fn take(&mut self, id: EntityId) -> bool {
-        self.leases.take(id);
-        self.wants_asking()
+        let named = self.leases.take(id);
+        self.wants_asking(named)
     }
 
     /// A reader of `id` is gone: true when the query must be told, as [`Reading::take`].
     pub fn give_back(&mut self, id: EntityId) -> bool {
-        self.leases.give_back(id);
-        self.wants_asking()
+        let gone = self.leases.give_back(id);
+        self.wants_asking(gone)
     }
 
-    fn wants_asking(&mut self) -> bool {
-        let wanted = !self.pending && self.leases.ids() != self.asked;
+    /// Whether the query must be told of the ids its readers name, now that they `changed`: a
+    /// change already on its way takes the ids as they are when it goes, so it is told once.
+    fn wants_asking(&mut self, changed: bool) -> bool {
+        let wanted = changed && !self.pending;
         self.pending |= wanted;
         wanted
     }
@@ -155,9 +160,10 @@ impl<V: InProjectView + Clone + 'static> Following<V> {
         &self.live
     }
 
-    /// The reader running now names `id`, until it runs again or leaves the page, when
-    /// `let_go` gives the id back ([`Following::give_back`]). A lookup made outside any reader,
-    /// as in an event handler, names nothing, since nothing would give the id back.
+    /// The reader running now names `id`, until it runs again or leaves the page, when `let_go`
+    /// gives the id back ([`Following::give_back`]): true when the query must be told
+    /// ([`Following::ask`]). A lookup made outside any reader, as in an event handler, names
+    /// nothing, since nothing would give the id back.
     pub fn name(&self, id: EntityId, let_go: impl FnOnce() + Send + Sync + 'static) -> bool {
         if Owner::current().is_none() {
             return false;
@@ -211,15 +217,15 @@ mod tests {
     #[test]
     fn an_id_is_followed_while_any_reader_names_it() {
         let mut leases = Leases::default();
-        leases.take(id(1));
-        leases.take(id(1));
+        assert!(leases.take(id(1)), "named for the first time");
+        assert!(!leases.take(id(1)));
         leases.take(id(2));
         assert_eq!(leases.ids(), [id(1), id(2)].into());
-        leases.give_back(id(1));
+        assert!(!leases.give_back(id(1)));
         assert_eq!(leases.ids(), [id(1), id(2)].into(), "a second reader still names it");
-        leases.give_back(id(1));
-        leases.give_back(id(3));
-        assert_eq!(leases.ids(), [id(2)].into(), "the last reader let it go; one never named changes nothing");
+        assert!(leases.give_back(id(1)), "the last reader let it go");
+        assert!(!leases.give_back(id(3)), "one never named changes nothing");
+        assert_eq!(leases.ids(), [id(2)].into());
     }
 
     #[test]
