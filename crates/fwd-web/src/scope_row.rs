@@ -24,7 +24,8 @@ pub const FOLLOWS: &[Link] = &[];
 
 /// The scope's name, to name it where it shows again.
 pub fn name(id: EntityId) -> Option<String> {
-    Some(format!("scope {}", store::scope(id)?.title().unwrap_or_default()))
+    let s = store::scope(id)?;
+    Some(format!("scope {}", store::named(s.title().unwrap_or_default(), &s)))
 }
 
 /// The lozenge mode: the scope's name in its green outline.
@@ -36,7 +37,7 @@ pub fn lozenge(id: EntityId) -> AnyView {
 pub fn list_item(id: EntityId) -> AnyView {
     (move || {
         let Some(s) = store::scope(id) else {
-            let absent = format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Scope)));
+            let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Scope)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
         view! {
@@ -83,7 +84,8 @@ pub fn ScopeRow(state: ThreadState, at: RowAt) -> impl IntoView {
     let id = at.id;
     // Changes only when the scope arrives or goes; the fields below redraw on their own.
     let scope = Memo::new(move |_| store::scope(id));
-    let title = move || scope.get().and_then(|s| s.title().ok()).unwrap_or_else(|| empty::absent(Some(Model::Scope)));
+    let title =
+        move || scope.get().and_then(|s| s.title().ok()).unwrap_or_else(|| empty::absent(id, Some(Model::Scope)));
     let status = move || scope.get().and_then(|s| s.status().ok());
     let branches = move || {
         scope.get().map(|s| ops::scope_branches(&s.context().map(Value::from).unwrap_or(Value::Null)).join(", "))

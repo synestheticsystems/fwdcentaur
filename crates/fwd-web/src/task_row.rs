@@ -11,7 +11,6 @@
 
 use crate::lozenges::{self, Target};
 use crate::referents::{Child, Listing, Models};
-use crate::route::{self, Route};
 use crate::thread::{self, Actions, Link, Model, Query, RowAt, ThreadState};
 use crate::{empty, fmt, labels, steps, store};
 use ankurah::EntityId;
@@ -77,7 +76,7 @@ pub const FOLLOWS: &[Link] = &[Link::Comments, Link::Concerns];
 /// The live query behind one of a task's links: its comments need one; the messages linked to it
 /// by relations come from the page's standing queries.
 pub fn open(parent: EntityId, link: Link) -> Option<Query> {
-    (link == Link::Comments).then(|| thread::messages_where("task = ?", parent))
+    (link == Link::Comments).then(|| thread::messages_about("task", parent))
 }
 
 /// The messages beneath the task `parent` through `link`.
@@ -140,7 +139,7 @@ fn concerning(parent: EntityId, link: Link) -> Listing<EntityId, Model, Link> {
 /// The task's short id and title, to name it where it shows again.
 pub fn name(id: EntityId) -> Option<String> {
     let task = store::task(id)?;
-    Some(format!("{} {}", fmt::short(id), task.title().unwrap_or_default()))
+    Some(format!("{} {}", fmt::short(id), store::named(task.title().unwrap_or_default(), &task)))
 }
 
 /// The lozenge mode: its title, struck through once it is closed.
@@ -153,7 +152,7 @@ pub fn lozenge(id: EntityId) -> AnyView {
 pub fn list_item(id: EntityId) -> AnyView {
     (move || {
         let Some(t) = store::task(id) else {
-            let absent = format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Task)));
+            let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Task)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
         let status = t.status().ok();
@@ -162,7 +161,7 @@ pub fn list_item(id: EntityId) -> AnyView {
             <span class="list-item task-item">
                 <span class="mono">{fmt::short(id)}</span>
                 " "
-                <a href=Route::task(id).hash()>{t.title().unwrap_or_default()}</a>
+                {lozenges::link_to_task(id, store::named(t.title().unwrap_or_default(), &t))}
                 {labels::pills(labels::of(&t))}
                 " "
                 {status.map(|s| view! { <span class=format!("pill status-{s}")>{fmt::status_label(s)}</span> })}
@@ -184,7 +183,10 @@ pub fn TaskRow(state: ThreadState, at: RowAt) -> impl IntoView {
     let id = at.id;
     // Changes only when the task arrives or goes; the fields below redraw on their own.
     let task = Memo::new(move |_| store::task(id));
-    let title = move || task.get().and_then(|t| t.title().ok()).unwrap_or_else(|| empty::absent(Some(Model::Task)));
+    let title = move || match task.get() {
+        Some(t) => store::named(t.title().unwrap_or_default(), &t),
+        None => empty::absent(id, Some(Model::Task)),
+    };
     let status = move || task.get().and_then(|t| t.status().ok());
     // The prose the card asks for, labelled; a field with nothing in it says nothing.
     let asked = at.card_task_fields();
@@ -203,7 +205,7 @@ pub fn TaskRow(state: ThreadState, at: RowAt) -> impl IntoView {
         <div class="task-ref">
             <span class="mono">{fmt::short(id)}</span>
             " "
-            <a href=Route::task(id).hash()>{title}</a>
+            <a href=move || lozenges::href(Target::Task(id))>{title}</a>
             {move || task.get().map(|t| labels::pills(labels::of(&t)))}
             " "
             {move || status().map(|s| view! { <span class=format!("pill status-{s}")>{fmt::status_label(s)}</span> })}
@@ -216,8 +218,9 @@ pub fn TaskRow(state: ThreadState, at: RowAt) -> impl IntoView {
     thread::frame(state, at, line, Actions { editor: None, activate: Some(open_task) })
 }
 
+/// Opens the task wherever it is: on its own project's page for a task of another project.
 fn open_task(id: EntityId) {
-    route::go(Route::task(id));
+    lozenges::follow(Target::Task(id));
 }
 
 #[cfg(test)]

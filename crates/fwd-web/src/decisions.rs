@@ -422,6 +422,7 @@ pub fn full(id: EntityId) -> AnyView {
 /// it, and a box for commenting.
 #[component]
 fn DecisionDetail(id: EntityId) -> impl IntoView {
+    Effect::new(move |_| lozenges::open_in_its_project(lozenges::Target::Decision(id)));
     // The head and the record, each redrawn whenever the decision changes.
     let head = move || {
         let Some(d) = store::decision(id) else {

@@ -145,7 +145,6 @@ fn TaskList(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoice>>) 
     let rows = move || {
         let wanted_scope = scope.get()?;
         let tasks = store::tasks();
-        let relations = store::relations();
         let messages = store::messages();
         let progress = steps::progress_by_task();
         let needle = search.get().to_lowercase();
@@ -175,7 +174,7 @@ fn TaskList(selected: Memo<Option<EntityId>>, scope: Memo<Option<ScopeChoice>>) 
                 if me.is_some_and(|me| me.is_none() || assignee != me) {
                     return None;
                 }
-                let ready = store::readiness_of(t, &tasks, &relations);
+                let ready = store::readiness(t);
                 if only_ready.get() && !ready.is_ready() {
                     return None;
                 }
@@ -338,6 +337,7 @@ pub fn TaskDetail(id: EntityId) -> impl IntoView {
     let pending = RwSignal::new(None::<Verb>);
     // The scope chosen in Start's picker, kept while the panel redraws.
     let chosen_scope = RwSignal::new(None::<EntityId>);
+    Effect::new(move |_| lozenges::open_in_its_project(lozenges::Target::Task(id)));
 
     let act = move |verb: Verb, note_text: Option<String>| {
         let Some(me) = session::me() else { return };
@@ -394,8 +394,6 @@ pub fn TaskDetail(id: EntityId) -> impl IntoView {
             return ().into_any();
         };
         let me = session::acting().get().map(|p| p.id());
-        let tasks = store::tasks();
-        let relations = store::relations();
         let status = t.status().unwrap_or(TaskStatus::Proposed);
         let needs_review = t.needs_review().unwrap_or(false);
         let context: Value = t.context().map(Into::into).unwrap_or(Value::Null);
@@ -407,7 +405,7 @@ pub fn TaskDetail(id: EntityId) -> impl IntoView {
             // The submitter never accepts their own work (rules::can_accept).
             .filter(|v| *v != Verb::Accept || submitted_by.is_none() || submitted_by != me)
             .collect();
-        let readiness = store::readiness_of(&t, &tasks, &relations);
+        let readiness = store::readiness(&t);
         let what = ops::text(t.what()).unwrap_or_default();
         let why = ops::text(t.why()).unwrap_or_default();
         let done_when = ops::text(t.done_when()).unwrap_or_default();
@@ -468,7 +466,7 @@ pub fn TaskDetail(id: EntityId) -> impl IntoView {
             {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
             <section class="prose">
                 <h4>"Readiness"</h4>
-                {readiness_view(&readiness, &tasks)}
+                {readiness_view(&readiness)}
             </section>
             {prose("What", what)}
             {prose("Why", why)}
@@ -541,11 +539,10 @@ fn TaskThread(id: EntityId, me: EntityId) -> impl IntoView {
     thread::rows_beneath(ThreadState::new(me), id, id, Models::one(Model::Task), Hooks::default())
 }
 
-fn readiness_view(r: &Readiness, tasks: &[TaskView]) -> AnyView {
-    let title = |id: EntityId| {
-        tasks.iter().find(|t| t.id() == id).and_then(|t| t.title().ok()).unwrap_or_else(|| fmt::short(id))
-    };
-    let link = |id: EntityId, text: String| view! { <a href=Route::task(id).hash()>{text}</a> };
+/// A task's readiness with its reasons, each task a reason names leading to it: a task of another
+/// project named with its project's name, as the command line names it, and leading there.
+fn readiness_view(r: &Readiness) -> AnyView {
+    let link = |id: EntityId| lozenges::link_to_task(id, store::task_title(id));
     match r {
         Readiness::Ready => view! { <p class="ready ready-yes">"Ready: nothing blocks it."</p> }.into_any(),
         Readiness::NotReady(reasons) => {
@@ -555,18 +552,14 @@ fn readiness_view(r: &Readiness, tasks: &[TaskView]) -> AnyView {
                     NotReadyReason::Status(s) => view! { <li>"status is " {fmt::status_label(*s)}</li> }.into_any(),
                     NotReadyReason::Held(why) => view! { <li>"on hold: " {why.clone()}</li> }.into_any(),
                     NotReadyReason::NotYetDue(date) => view! { <li>{not_before::words(*date)}</li> }.into_any(),
-                    NotReadyReason::BlockedBy(id) => view! { <li>"blocked by " {link(*id, title(*id))}</li> }.into_any(),
-                    NotReadyReason::DependencyClosed(id, s) => {
-                        view! { <li>"dependency " {link(*id, title(*id))} " is " {fmt::status_label(*s)} "; retract the relation or cancel this task"</li> }.into_any()
+                    NotReadyReason::BlockedBy(id) | NotReadyReason::BlockedByTaskIn { task: id, .. } => {
+                        view! { <li>"blocked by " {link(*id)}</li> }.into_any()
                     }
-                    NotReadyReason::BlockedByTaskIn { task, project } => {
-                        view! { <li>"blocked by " {fmt::short(*task)} " in project " {project.clone()}</li> }.into_any()
-                    }
-                    NotReadyReason::DependencyClosedIn { task, project, status } => {
-                        view! { <li>"dependency " {fmt::short(*task)} " in project " {project.clone()} " is " {fmt::status_label(*status)} "; retract the relation or cancel this task"</li> }.into_any()
+                    NotReadyReason::DependencyClosed(id, s) | NotReadyReason::DependencyClosedIn { task: id, status: s, .. } => {
+                        view! { <li>"dependency " {link(*id)} " is " {fmt::status_label(*s)} "; retract the relation or cancel this task"</li> }.into_any()
                     }
                     NotReadyReason::DependencyNotHeld(id) => {
-                        view! { <li>"dependency " {fmt::short(*id)} " cannot be followed here"</li> }.into_any()
+                        view! { <li>"dependency " {ops::not_followed(&id.to_base64())}</li> }.into_any()
                     }
                 })
                 .collect::<Vec<_>>();

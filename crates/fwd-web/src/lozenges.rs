@@ -20,9 +20,11 @@
 //! heading), a lozenge standing alone ([`single`]: a reference in a message's text, the assignee
 //! beside a task's scope), the one preview of whatever lozenge the pointer rests on or the
 //! keyboard is on ([`LozengePreview`]; on a touch screen the first tap opens it and it carries an
-//! "open" link), and where a click leads ([`destination`], [`follow`]). All of it reads the page's
-//! standing queries and opens none of its own. These are the lozenge mode of every kind
-//! (`modes.rs`).
+//! "open" link), and where a click leads ([`destination`], [`href`], [`follow`]). All of it reads the
+//! page's store and opens no query of its own. These are the lozenge mode of every kind
+//! (`modes.rs`). A record of another project, which a relation or a field can name (docs/DECISIONS.md,
+//! D176), is named with its project's name after it, as the command line names it ("Ship the
+//! connector in beta"), and its lozenge leads to it on its own project's page.
 
 use crate::referents::Models;
 use crate::route::{self, Route};
@@ -33,6 +35,7 @@ use fwd_core::anchor_name::{self, AnchorName};
 use fwd_core::file_mention::Version;
 use fwd_core::model::*;
 use fwd_core::ops;
+use fwd_core::project_graph::ProjectRecord;
 use fwd_core::rules::{NotReadyReason, Readiness};
 use leptos::prelude::*;
 use std::collections::{BTreeMap, HashSet};
@@ -641,9 +644,58 @@ pub fn follow(target: Target) {
     if revealed(target) {
         return;
     }
-    if let Some(to) = destination(target) {
-        route::go(to);
+    match far_project(target) {
+        None => {
+            if let Some(to) = destination(target) {
+                route::go(to);
+            }
+        }
+        Some(project) => {
+            if let Some(url) = destination(target).and_then(|to| session::url_in(&project.uuid.to_string(), &to)) {
+                session::load(&url);
+            }
+        }
     }
+}
+
+/// Shows the record `target` names on its own project's page when it is another project's, as a
+/// link to it would: what a panel does when a route opens it on a record of another project, which
+/// the writes of this page, made in its own project, would not reach. Nothing for one of the page's
+/// own, or on a page pinned to its project.
+pub fn open_in_its_project(target: Target) {
+    if far_project(target).is_some() {
+        follow(target);
+    }
+}
+
+/// The project of the record `target` names, when it is another than the page's: a link to it
+/// leads to that project's page.
+fn far_project(target: Target) -> Option<ProjectRecord> {
+    match target {
+        Target::Task(id) => store::task(id).and_then(|v| store::elsewhere(&v)),
+        Target::Decision(id) => store::decision(id).and_then(|v| store::elsewhere(&v)),
+        Target::Message(id) => store::message(id).and_then(|v| store::elsewhere(&v)),
+        Target::Scope(id) => store::scope(id).and_then(|v| store::elsewhere(&v)),
+        Target::Anchor(id) | Target::File(id, _) => store::anchor(id).and_then(|v| store::elsewhere(&v)),
+        Target::Principal(_) | Target::Unknown(_) => None,
+    }
+}
+
+/// Where a link to `target` leads ([`destination`]): its route on this page, or for a record of
+/// another project its route on that project's page, which loads as choosing the project in the
+/// header does (`session::url_in`); none for what leads nowhere, and none for a record of another
+/// project on a page pinned to its own (the VS Code webview).
+pub fn href(target: Target) -> Option<String> {
+    let to = destination(target)?;
+    match far_project(target) {
+        None => Some(to.hash()),
+        Some(project) => session::url_in(&project.uuid.to_string(), &to),
+    }
+}
+
+/// A link to the task `id` reading `text`, which leads to it wherever it is ([`href`]).
+pub fn link_to_task(id: EntityId, text: String) -> AnyView {
+    view! { <a href=move || href(Target::Task(id))>{text}</a> }.into_any()
 }
 
 fn is_question(id: EntityId) -> bool {
@@ -670,36 +722,29 @@ fn message_route(id: EntityId) -> Route {
     Route::inbox()
 }
 
-/// What the page knows of `id`, and when it was made, looked up by id in the page's standing
-/// queries; `readiness` asks whether a task is blocked, which only a dependency's lozenge shows.
+/// What the page knows of `id`, and when it was made, looked up by id in the page's store, the
+/// project's records first (`store::kind_of`); `readiness` asks whether a task is blocked, which
+/// only a dependency's lozenge shows.
 fn end(id: EntityId, readiness: bool) -> (End, Option<i64>) {
-    if let Some(d) = store::decision(id) {
-        let end =
-            End::Decision { number: d.number().unwrap_or(0), status: d.status().unwrap_or(DecisionStatus::Accepted) };
-        return (end, d.created().ok());
+    match store::kind_of(id) {
+        Some(Model::Decision) => store::decision(id).map_or((End::Unknown, None), |d| {
+            let status = d.status().unwrap_or(DecisionStatus::Accepted);
+            (End::Decision { number: d.number().unwrap_or(0), status }, d.created().ok())
+        }),
+        Some(Model::Task) => store::task(id).map_or((End::Unknown, None), |t| {
+            let blocked = readiness
+                && match store::readiness(&t) {
+                    Readiness::NotReady(reasons) => reasons.iter().any(|r| !matches!(r, NotReadyReason::Status(_))),
+                    _ => false,
+                };
+            (End::Task { status: t.status().unwrap_or(TaskStatus::Proposed), blocked }, t.created().ok())
+        }),
+        Some(Model::Message) => (End::Message, store::message(id).and_then(|m| m.created().ok())),
+        Some(Model::Scope) => (End::Scope, store::scope(id).and_then(|s| s.created().ok())),
+        Some(Model::Anchor) => (End::Anchor, store::anchor(id).and_then(|a| a.created().ok())),
+        Some(Model::Principal) => (End::Principal, None),
+        None => (End::Unknown, None),
     }
-    if let Some(t) = store::task(id) {
-        let blocked = readiness
-            && match store::readiness(&t) {
-                Readiness::NotReady(reasons) => reasons.iter().any(|r| !matches!(r, NotReadyReason::Status(_))),
-                _ => false,
-            };
-        let end = End::Task { status: t.status().unwrap_or(TaskStatus::Proposed), blocked };
-        return (end, t.created().ok());
-    }
-    if let Some(m) = store::message(id) {
-        return (End::Message, m.created().ok());
-    }
-    if let Some(s) = store::scope(id) {
-        return (End::Scope, s.created().ok());
-    }
-    if let Some(a) = store::anchor(id) {
-        return (End::Anchor, a.created().ok());
-    }
-    if store::principal(id).is_some() {
-        return (End::Principal, None);
-    }
-    (End::Unknown, None)
 }
 
 /// The plan for `id`'s lozenges, kept current from the page's standing queries. It changes only
@@ -906,7 +951,7 @@ fn element_view(
     glyph: &'static str,
     proposed: bool,
 ) -> AnyView {
-    let href = move || destination(target).map(|to| to.hash());
+    let href = move || href(target);
     // Each handler keeps the lozenge's element id, by which the preview finds it.
     let (entered, left, clicked_on, focused, blurred) =
         (element.clone(), element.clone(), element.clone(), element.clone(), element.clone());
@@ -962,22 +1007,24 @@ fn name_view(target: Target) -> AnyView {
             let principal = Memo::new(move |_| {
                 store::principal(id).map(|p| {
                     let agent = p.kind().ok() == Some(PrincipalKind::Agent);
-                    (p.handle().unwrap_or_default(), agent.then(|| person::role(&p)))
+                    (store::named(p.handle().unwrap_or_default(), &p), agent.then(|| person::role(&p)))
                 })
             });
             view! {
-                <span class="loz-who">{move || principal.get().map(|(handle, _)| handle).unwrap_or_else(|| fmt::short(id))}</span>
+                <span class="loz-who">{move || principal.get().map(|(handle, _)| handle).unwrap_or_else(|| store::unheld(id, Some(Model::Principal)))}</span>
                 {move || principal.get().and_then(|(_, role)| role).map(|role| view! { <span class="loz-mark">{role}</span> })}
             }
             .into_any()
         }
         Target::Decision(id) => {
             let decision = Memo::new(move |_| {
-                store::decision(id).map(|d| (d.number().unwrap_or(0), d.title().unwrap_or_default()))
+                store::decision(id).map(|d| {
+                    (d.number().unwrap_or(0), store::named(fmt::truncate(&d.title().unwrap_or_default(), 36), &d))
+                })
             });
             view! {
-                <span class="loz-num">{move || decision.get().map(|(n, _)| format!("D{n}")).unwrap_or_else(|| fmt::short(id))}</span>
-                <span class="loz-name">{move || decision.get().map(|(_, title)| fmt::truncate(&title, 36)).unwrap_or_default()}</span>
+                <span class="loz-num">{move || decision.get().map(|(n, _)| format!("D{n}")).unwrap_or_else(|| store::unheld(id, Some(Model::Decision)))}</span>
+                <span class="loz-name">{move || decision.get().map(|(_, title)| title).unwrap_or_default()}</span>
             }
             .into_any()
         }
@@ -989,7 +1036,7 @@ fn name_view(target: Target) -> AnyView {
                 })
             });
             view! {
-                <span class="loz-who">{move || message.get().map(|(a, _)| a).unwrap_or_else(|| fmt::short(id))}</span>
+                <span class="loz-who">{move || message.get().map(|(a, _)| a).unwrap_or_else(|| store::unheld(id, Some(Model::Message)))}</span>
                 <span class="loz-name">{move || message.get().map(|(_, words)| format!("“{words}”")).unwrap_or_default()}</span>
             }
             .into_any()
@@ -998,18 +1045,27 @@ fn name_view(target: Target) -> AnyView {
     }
 }
 
-/// A task's title, a scope's name or code's place, shortened for a lozenge; a short id while the
-/// page does not hold it.
+/// A task's title, a scope's name or code's place, shortened for a lozenge, with its project's name
+/// after it when it is another project's; a short id while the page does not hold it, and that it
+/// cannot be followed here once the daemon has answered that the node holds no such record.
 fn few_words(target: Target) -> String {
-    let (id, words) = match target {
-        Target::Task(id) => (id, store::task(id).and_then(|t| t.title().ok()).map(|t| fmt::truncate(&t, 44))),
-        Target::Scope(id) => (id, store::scope(id).and_then(|s| s.title().ok())),
-        Target::Anchor(id) => (id, anchor_row::name(id)),
-        Target::File(id, version) => (id, anchor_row::file_name(id, &version.version())),
-        Target::Principal(id) => (id, person::name(id)),
-        Target::Decision(id) | Target::Message(id) | Target::Unknown(id) => (id, None),
+    let (id, model, words) = match target {
+        Target::Task(id) => (
+            id,
+            Some(Model::Task),
+            store::task(id).map(|t| store::named(fmt::truncate(&t.title().unwrap_or_default(), 44), &t)),
+        ),
+        Target::Scope(id) => {
+            (id, Some(Model::Scope), store::scope(id).map(|s| store::named(s.title().unwrap_or_default(), &s)))
+        }
+        Target::Anchor(id) => (id, Some(Model::Anchor), anchor_row::name(id)),
+        Target::File(id, version) => (id, Some(Model::Anchor), anchor_row::file_name(id, &version.version())),
+        Target::Principal(id) => (id, Some(Model::Principal), person::name(id)),
+        Target::Decision(id) => (id, Some(Model::Decision), None),
+        Target::Message(id) => (id, Some(Model::Message), None),
+        Target::Unknown(id) => (id, None, None),
     };
-    words.unwrap_or_else(|| fmt::short(id))
+    words.unwrap_or_else(|| store::unheld(id, model))
 }
 
 /// How a message begins, in a few words.
@@ -1036,7 +1092,7 @@ fn plain_name(target: Target) -> String {
         Target::Principal(id) => person::name(id),
         Target::Unknown(_) => None,
     }
-    .unwrap_or_else(|| "something this page does not hold".into())
+    .unwrap_or_else(|| empty::absent(target.id(), None))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1285,13 +1341,14 @@ fn content(target: Target, pinned: bool) -> AnyView {
         Target::File(id, version) => file_preview(id, version),
         Target::Principal(id) => person_preview(id),
         Target::Unknown(id) => {
-            view! { <p class="muted">{move || format!("{}: {}", fmt::short(id), empty::absent(None))}</p> }.into_any()
+            view! { <p class="muted">{move || format!("{}: {}", fmt::short(id), empty::absent(id, None))}</p> }
+                .into_any()
         }
     };
     // A touch screen has no hover to preview with, so the first tap shows this; the link goes on.
-    let open = pinned.then(|| destination(target)).flatten().map(|to| {
+    let open = pinned.then(|| href(target)).flatten().map(|to| {
         view! {
-            <a class="btn tiny loz-open" href=to.hash()
+            <a class="btn tiny loz-open" href=to
                 on:click=move |ev| {
                     hide();
                     revealed_instead(&ev, target);
@@ -1306,7 +1363,7 @@ fn content(target: Target, pinned: bool) -> AnyView {
 fn task_preview(id: EntityId) -> AnyView {
     (move || {
         let Some(t) = store::task(id) else {
-            return view! { <p class="muted">{empty::absent(Some(Model::Task))}</p> }.into_any();
+            return view! { <p class="muted">{empty::absent(id, Some(Model::Task))}</p> }.into_any();
         };
         let status = t.status().ok();
         let priority = t.priority().ok().flatten().map(|p| format!("P{p}"));
@@ -1315,7 +1372,7 @@ fn task_preview(id: EntityId) -> AnyView {
         let why = ops::text(t.why()).unwrap_or_default();
         view! {
             <div class="loz-preview-head">
-                <span class="mono">{fmt::short(id)}</span>" "<strong>{t.title().unwrap_or_default()}</strong>
+                <span class="mono">{fmt::short(id)}</span>" "<strong>{store::named(t.title().unwrap_or_default(), &t)}</strong>
                 {crate::labels::pills(crate::labels::of(&t))}
             </div>
             <div class="pills">
@@ -1334,12 +1391,12 @@ fn task_preview(id: EntityId) -> AnyView {
 fn decision_preview(id: EntityId) -> AnyView {
     (move || {
         let Some(d) = store::decision(id) else {
-            return view! { <p class="muted">{empty::absent(Some(Model::Decision))}</p> }.into_any();
+            return view! { <p class="muted">{empty::absent(id, Some(Model::Decision))}</p> }.into_any();
         };
         let ruling = ops::text(d.decision()).unwrap_or_default();
         view! {
             <div class="loz-preview-head">
-                <span class="decision-number">{format!("D{}", d.number().unwrap_or(0))}</span>" "<strong>{d.title().unwrap_or_default()}</strong>
+                <span class="decision-number">{format!("D{}", d.number().unwrap_or(0))}</span>" "<strong>{store::named(d.title().unwrap_or_default(), &d)}</strong>
             </div>
             <div class="pills">
                 {d.status().ok().map(|s| view! { <span class=format!("pill decision-{s}")>{s.to_string()}</span> })}
@@ -1356,7 +1413,7 @@ fn decision_preview(id: EntityId) -> AnyView {
 fn message_preview(id: EntityId) -> AnyView {
     (move || {
         let Some(m) = store::message(id) else {
-            return view! { <p class="muted">{empty::absent(Some(Model::Message))}</p> }.into_any();
+            return view! { <p class="muted">{empty::absent(id, Some(Model::Message))}</p> }.into_any();
         };
         let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
         let to = message_row::addressee(&m);
@@ -1376,11 +1433,11 @@ fn message_preview(id: EntityId) -> AnyView {
 fn scope_preview(id: EntityId) -> AnyView {
     (move || {
         let Some(s) = store::scope(id) else {
-            return view! { <p class="muted">{empty::absent(Some(Model::Scope))}</p> }.into_any();
+            return view! { <p class="muted">{empty::absent(id, Some(Model::Scope))}</p> }.into_any();
         };
         let intention = ops::text(s.intention()).unwrap_or_default();
         view! {
-            <div class="loz-preview-head"><strong>{s.title().unwrap_or_default()}</strong></div>
+            <div class="loz-preview-head"><strong>{store::named(s.title().unwrap_or_default(), &s)}</strong></div>
             <div class="pills">
                 {s.status().ok().map(|st| view! { <span class=format!("pill scope-{st}")>{st.to_string()}</span> })}
             </div>
@@ -1394,7 +1451,7 @@ fn scope_preview(id: EntityId) -> AnyView {
 fn anchor_preview(id: EntityId) -> AnyView {
     (move || {
         let Some(a) = store::anchor(id) else {
-            return view! { <p class="muted">{empty::absent(Some(Model::Anchor))}</p> }.into_any();
+            return view! { <p class="muted">{empty::absent(id, Some(Model::Anchor))}</p> }.into_any();
         };
         let shown = anchor_row::Shown::of(&a);
         // Where the lines are now is per checkout, kept on the machine that resolved them, so the
@@ -1414,7 +1471,7 @@ fn anchor_preview(id: EntityId) -> AnyView {
 fn file_preview(id: EntityId, version: FileVersion) -> AnyView {
     (move || {
         let Some(a) = store::anchor(id) else {
-            return view! { <p class="muted">{empty::absent(Some(Model::Anchor))}</p> }.into_any();
+            return view! { <p class="muted">{empty::absent(id, Some(Model::Anchor))}</p> }.into_any();
         };
         let version = version.version();
         let name = AnchorName::file_at(&a.path().unwrap_or_default(), &version);
@@ -1443,12 +1500,12 @@ pub fn file_version_sentence(version: &Version) -> String {
 fn person_preview(id: EntityId) -> AnyView {
     (move || {
         let Some(p) = store::principal(id) else {
-            return view! { <p class="muted">{empty::absent(Some(Model::Principal))}</p> }.into_any();
+            return view! { <p class="muted">{empty::absent(id, Some(Model::Principal))}</p> }.into_any();
         };
         let inactive = !p.active().unwrap_or(false);
         view! {
             <div class="loz-preview-head">
-                <strong>{p.display_name().unwrap_or_default()}</strong>" "<span class="muted">{p.handle().unwrap_or_default()}</span>
+                <strong>{p.display_name().unwrap_or_default()}</strong>" "<span class="muted">{store::named(p.handle().unwrap_or_default(), &p)}</span>
             </div>
             <div class="pills">
                 <span class="pill">{person::role(&p)}</span>

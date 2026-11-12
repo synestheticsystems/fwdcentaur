@@ -7,14 +7,18 @@
 //! judged by the first answer said "Nothing waiting." while its cards were on their way. A page
 //! says "loading…" until the daemon has answered the standing queries (`store::standing_loaded`),
 //! and only then its words for having none. A row, a line in a list or a lozenge's preview naming
-//! an entity the page does not hold says the same in the entity's place, "loading…" and then that
-//! there is no such entity ("no such task"), where it went on saying "a task not loaded yet" after
-//! the daemon had answered (task 7dq1vEd_). Every page's words are here, so that they read alike
-//! and are tested together.
+//! an entity the page does not hold says the same in the entity's place, "loading…" until the daemon
+//! has answered for its id, wherever in the node its record might be, and then that no such entity
+//! can be followed here, as the command line says of an id a record holds that the node does not
+//! ("no task that can be followed here"), where it went on saying "a task not loaded yet" after the
+//! daemon had answered (task 7dq1vEd_). Every page's words are here, so that they read alike and
+//! are tested together.
 
+use crate::followed::Answer;
 use crate::scope_filter::ScopeChoice;
 use crate::store;
 use crate::thread::Model;
+use ankurah::EntityId;
 use leptos::prelude::*;
 
 /// What a page, or a thread's level beneath a row, says while what it shows is on its way.
@@ -121,39 +125,41 @@ pub fn Empty(#[prop(into)] nothing: Signal<Nothing>) -> impl IntoView {
     view! { <p class="empty">{move || says(&nothing.get(), store::standing_loaded())}</p> }
 }
 
-/// What a row, a line in a list or a lozenge's preview says in place of an entity the page does
-/// not hold, of the kind `model` names, or of a kind the page cannot tell (`None`), having nothing
-/// under the id to tell it by: [`says_absent`], following the daemon's answer to the standing
-/// queries. Asked inside a closure, it makes the closure a dependent of the answer, so the closure
-/// asks again once the daemon has answered.
-pub fn absent(model: Option<Model>) -> String {
-    says_absent(model, store::standing_loaded())
+/// What a row, a line in a list or a lozenge's preview says in place of `id`, an entity the page
+/// does not hold, of the kind `model` names, or of a kind the page cannot tell (`None`), having
+/// nothing under the id to tell it by: [`says_absent`], following the daemon's answer for the id
+/// (`store::answer`). Asked inside a closure, it makes the closure a dependent of the answer, so the
+/// closure asks again once the daemon has answered.
+pub fn absent(id: EntityId, model: Option<Model>) -> String {
+    says_absent(model, &store::answer(id, model))
 }
 
-/// "loading…" until the daemon has `answered` the standing queries, which hold every task,
-/// decision, message, scope, highlight and principal of the project, then that the project has no
-/// such entity of the kind `model` names, or for a kind the page cannot tell, that the page holds
-/// nothing under the id.
-fn says_absent(model: Option<Model>, answered: bool) -> String {
-    if !answered {
-        return LOADING.into();
+/// "loading…" until the daemon has answered for the id, wherever in the node its record might be,
+/// then that no entity of the kind `model` names, or of any kind for none, can be followed here, as
+/// the command line says of a record the node does not hold; or why the page cannot tell, when the
+/// read failed.
+fn says_absent(model: Option<Model>, answer: &Answer) -> String {
+    match answer {
+        Answer::Waiting => LOADING.into(),
+        Answer::Failed(reason) => format!("could not be read: {reason}"),
+        Answer::NotHeld => {
+            let kind = match model {
+                Some(Model::Task) => "task",
+                Some(Model::Decision) => "decision",
+                Some(Model::Message) => "message",
+                Some(Model::Scope) => "scope",
+                Some(Model::Anchor) => "highlight",
+                Some(Model::Principal) => "principal",
+                None => return "nothing that can be followed here".into(),
+            };
+            format!("no {kind} that can be followed here")
+        }
     }
-    let kind = match model {
-        Some(Model::Task) => "task",
-        Some(Model::Decision) => "decision",
-        Some(Model::Message) => "message",
-        Some(Model::Scope) => "scope",
-        Some(Model::Anchor) => "highlight",
-        Some(Model::Principal) => "principal",
-        None => return "not something this page holds".into(),
-    };
-    format!("no such {kind}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ankurah::EntityId;
 
     /// Every page's words for having nothing, as it says them once the daemon has answered.
     fn every_page() -> Vec<(Nothing, &'static str)> {
@@ -204,19 +210,21 @@ mod tests {
     }
 
     #[test]
-    fn an_entity_the_page_does_not_hold_is_loading_until_the_daemon_has_answered_and_then_no_such_entity() {
+    fn an_entity_the_page_does_not_hold_is_loading_until_the_daemon_has_answered_and_then_cannot_be_followed() {
         let every_kind = [
-            (Some(Model::Task), "no such task"),
-            (Some(Model::Decision), "no such decision"),
-            (Some(Model::Message), "no such message"),
-            (Some(Model::Scope), "no such scope"),
-            (Some(Model::Anchor), "no such highlight"),
-            (Some(Model::Principal), "no such principal"),
-            (None, "not something this page holds"),
+            (Some(Model::Task), "no task that can be followed here"),
+            (Some(Model::Decision), "no decision that can be followed here"),
+            (Some(Model::Message), "no message that can be followed here"),
+            (Some(Model::Scope), "no scope that can be followed here"),
+            (Some(Model::Anchor), "no highlight that can be followed here"),
+            (Some(Model::Principal), "no principal that can be followed here"),
+            (None, "nothing that can be followed here"),
         ];
         for (model, words) in every_kind {
-            assert_eq!(says_absent(model, false), LOADING, "{model:?}, before the daemon has answered");
-            assert_eq!(says_absent(model, true), words, "{model:?}, once it has");
+            assert_eq!(says_absent(model, &Answer::Waiting), LOADING, "{model:?}, before the daemon has answered");
+            assert_eq!(says_absent(model, &Answer::NotHeld), words, "{model:?}, once it has");
         }
+        let failed = Answer::Failed("the daemon refused the query".into());
+        assert_eq!(says_absent(Some(Model::Task), &failed), "could not be read: the daemon refused the query");
     }
 }

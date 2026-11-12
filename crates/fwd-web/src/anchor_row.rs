@@ -31,7 +31,7 @@ pub const FOLLOWS: &[Link] = &[Link::AnchorComments];
 
 /// The live query behind a highlight's threads.
 pub fn open(parent: EntityId, link: Link) -> Option<Query> {
-    (link == Link::AnchorComments).then(|| thread::messages_where("anchor = ?", parent))
+    (link == Link::AnchorComments).then(|| thread::messages_about("anchor", parent))
 }
 
 /// The messages beneath the highlight `parent` through `link`: each that is on it and answers no
@@ -97,7 +97,8 @@ impl Shown {
 
 /// `path:lines`, to name a highlight where it shows again and in its lozenge.
 pub fn name(id: EntityId) -> Option<String> {
-    Some(AnchorName::of(&store::anchor(id)?).place)
+    let a = store::anchor(id)?;
+    Some(store::named(AnchorName::of(&a).place, &a))
 }
 
 /// The path of the whole-file highlight `id` and the version a mention names it at, `docs/cli.md
@@ -151,7 +152,7 @@ pub fn lozenge(id: EntityId) -> AnyView {
 pub fn list_item(id: EntityId) -> AnyView {
     (move || {
         let Some(a) = store::anchor(id) else {
-            let absent = format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Anchor)));
+            let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Anchor)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
         let name = AnchorName::of(&a);
@@ -203,7 +204,7 @@ fn AnchorRow(state: ThreadState, at: RowAt) -> impl IntoView {
     let head = move || {
         anchor.with(|shown| match shown {
             Some(shown) => shown.heading(),
-            None => format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Anchor))),
+            None => format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Anchor))),
         })
     };
     let text = move || anchor.with(|shown| shown.as_ref().map(text_view));

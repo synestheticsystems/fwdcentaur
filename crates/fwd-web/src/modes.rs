@@ -105,22 +105,12 @@ pub fn kind(models: &Models<Model>) -> Option<&'static Kind> {
     kinds().choose(models).copied()
 }
 
-/// Whether one of the page's standing queries holds an entity.
-type Holds = fn(EntityId) -> bool;
-
-/// The models the entity `id` carries, as the page's standing queries hold it; none while they do
-/// not (not arrived yet, or of a kind the page has no query for). Each entity carries one model
-/// today, so the first collection holding the id answers.
+/// The models the entity `id` carries, as the page holds it (`store::kind_of`): the project's
+/// records first, then those it names in other projects; none while nothing holds it (not arrived
+/// yet, of a kind the page reads nothing of, or held by no project of the node). Each entity carries
+/// one model today, so the kind holding the id answers.
 pub fn models_of(id: EntityId) -> Models<Model> {
-    let held: [(Model, Holds); 6] = [
-        (Model::Task, |id| store::task(id).is_some()),
-        (Model::Decision, |id| store::decision(id).is_some()),
-        (Model::Message, |id| store::message(id).is_some()),
-        (Model::Scope, |id| store::scope(id).is_some()),
-        (Model::Anchor, |id| store::anchor(id).is_some()),
-        (Model::Principal, |id| store::principal(id).is_some()),
-    ];
-    held.into_iter().find(|(_, holds)| holds(id)).map(|(model, _)| Models::one(model)).unwrap_or_default()
+    store::kind_of(id).map(Models::one).unwrap_or_default()
 }
 
 /// Draws `id`, carrying `models`, in the mode `wanted` inside something drawn in the mode
@@ -173,7 +163,7 @@ pub fn full(id: EntityId, models: &Models<Model>) -> AnyView {
 fn fallback(mode: Mode, id: EntityId, models: &Models<Model>) -> AnyView {
     let named = (!models.is_empty())
         .then(|| models.iter().map(|model| format!("{model:?}").to_lowercase()).collect::<Vec<_>>().join(", "));
-    let carried = move || named.clone().unwrap_or_else(|| empty::absent(None));
+    let carried = move || named.clone().unwrap_or_else(|| empty::absent(id, None));
     match mode {
         Mode::Lozenge => lozenges::single(lozenges::Target::Unknown(id)),
         Mode::ListItem | Mode::Embedded => view! {
