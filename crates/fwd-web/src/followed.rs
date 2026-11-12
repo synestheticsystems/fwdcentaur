@@ -1,10 +1,11 @@
 //! The records the page names and does not list, wherever in the node they are: the far end of a
 //! relation, the author of a message and the assignee of a task when they are another project's,
 //! a notification's target in another project, a relation a notification is about that another
-//! project made, and, on the wallboard, a prerequisite of a card that its selection leaves out. A project is a grouping and a filter on what a list shows, and it does
-//! not stop a reference from being followed (docs/DECISIONS.md, D176), so the page reads such a
-//! record as the command line does (`fwd_core::project_graph::ProjectGraph::follow`): with its
-//! project, which the page names beside it, or as one that cannot be followed here.
+//! project made, and, on the wallboard, a prerequisite of a card that its selection leaves out. A
+//! project is a grouping and a filter on what a list shows, and it does not stop a reference from
+//! being followed (docs/DECISIONS.md, D176), so the page reads such a record as the command line
+//! does (`fwd_core::project_graph::ProjectGraph::follow`): with its project, which the page names
+//! beside it, or as one that cannot be followed here.
 //!
 //! The page follows what its readers name, for as long as they name it. A lookup that its standing
 //! queries cannot answer (`store::task` and its siblings) takes a lease on the id for the closure
