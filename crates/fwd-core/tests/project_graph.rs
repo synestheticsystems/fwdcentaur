@@ -1,7 +1,10 @@
 //! A project's record in the daemon's store (`fwd_core::project_graph`): the daemon makes one per
 //! project as it first hosts it, and finds that one again at every later start, with the name the
 //! index gives; a client finds it by the project's UUID, and a UUID the store holds no record of is
-//! refused.
+//! refused. And the reads a project's graph makes beyond its own records: an id a record holds,
+//! followed into whichever project its record is in; the relations that touch a record, whichever
+//! project made them, which only that project changes; and the ids of every project, which an id
+//! someone types may name.
 
 use ankurah::{policy::DEFAULT_CONTEXT, Context, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
