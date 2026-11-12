@@ -22,6 +22,7 @@ use fwd_core::model::{RelationKind, RelationView};
 use fwd_core::ops::{self, Kind};
 use fwd_core::project_graph::{Followed, ProjectGraph, Whose};
 use fwd_core::rules;
+use fwd_core::task_move;
 
 const TASK: &[Kind] = &[Kind::Task];
 const SCOPE: &[Kind] = &[Kind::Scope];
@@ -41,6 +42,9 @@ enum PlacedBy<'a> {
     /// The relations `from -kind-> to` that hold (`unlink`), which the project that made them
     /// changes, whichever projects their ends are in.
     Relations { from: &'a str, kind: RelationKind, to: &'a str },
+    /// The tasks `task move` moves to the project `to`, into its scope `to_scope`, which run in the
+    /// project of those not there already (`task_move::place`).
+    Moving { tasks: &'a [String], to: &'a str, to_scope: Option<&'a str> },
 }
 
 /// The record `command` acts on, which places it, as typed on its command line; none for a command
@@ -70,6 +74,9 @@ fn placed_by(command: &Command) -> Option<PlacedBy<'_>> {
             | TaskCommand::Release { id }
             | TaskCommand::Explain { id } => record(id, TASK),
             TaskCommand::Amend(a) => record(&a.id, TASK),
+            TaskCommand::Move { ids, to, to_scope, .. } => {
+                Some(PlacedBy::Moving { tasks: ids, to, to_scope: to_scope.as_deref() })
+            }
             TaskCommand::Create(_) | TaskCommand::List { .. } | TaskCommand::Next { .. } => None,
         },
         Command::Step { command } => match command {
@@ -207,6 +214,20 @@ pub(crate) async fn runs_in(
                 ),
             };
             Ok(RunsIn { project, because: format!("`{from} {kind} {to}`"), typed })
+        }
+        Some(PlacedBy::Moving { tasks, to, to_scope }) => {
+            let mut located = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                located.push((task, ops::locate(graph, task, TASK).await?));
+            }
+            let records: Vec<EntityId> = located.iter().map(|(_, found)| found.id).collect();
+            let destination = task_move::Destination::named(graph, to, to_scope).await?;
+            let project = task_move::place(graph, &records, &destination).await?;
+            // The note names a task of the project the move runs in, the first typed.
+            let first =
+                located.iter().find(|(_, found)| found.project == project).map_or(&tasks[0], |(typed, _)| *typed);
+            let typed = located.iter().map(|(task, found)| Typed::of(task, TASK, found.id)).collect();
+            Ok(RunsIn { project, because: format!("`{first}`"), typed })
         }
         None => match scope.filter(|_| !project_typed) {
             Some(scope) => {

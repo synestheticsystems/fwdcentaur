@@ -20,6 +20,7 @@ use fwd_core::project::{self, Checkout, InitOptions, NamedProject, Paths, Resolv
 use fwd_core::project_graph::{Followed, ProjectGraph, Whose};
 use fwd_core::rules::{self, DecisionMove, Verb};
 use fwd_core::subject;
+use fwd_core::task_move;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::IsTerminal;
@@ -963,6 +964,38 @@ enum TaskCommand {
     Explain {
         #[arg(allow_hyphen_values = true)]
         id: String,
+    },
+    /// Move tasks to another project, each with everything that belongs to it: its messages and
+    /// their replies, the relations from it and from its messages, its checklist's steps, and the
+    /// former ids of all of these. No connection is cut, copied or rewritten: what points at a
+    /// task, what it depends on, the decisions it cites and every person or agent it names go on
+    /// naming what they named, a person or an agent of the project it left shown with that
+    /// project's name. Its scopes of the project it leaves are taken off it, and it is worked in
+    /// the scope --to-scope names there, which a project with an active scope requires. Each moved
+    /// task gets a comment by you saying where it came from and went, with --note, which tells the
+    /// task's people as a comment does. The command runs in the tasks' project, as you are there,
+    /// and anyone who may amend a task there may move it. Run it again to finish a move that
+    /// stopped partway; a task already wholly there is reported so.
+    ///
+    /// Example:
+    ///   fwd task move --to Ankurah --to-scope "Ankurah Commons" --note "Commons work" brrBkooZ ZZERWe7h
+    Move {
+        /// The tasks, by id, the start of one or a former id: all of one project, or in the
+        /// destination already. Flags go before them: an id may start with `-`, so every word after
+        /// the first id is read as another id.
+        #[arg(allow_hyphen_values = true, required = true)]
+        ids: Vec<String>,
+        /// The project they move to: its name, as `fwd project list` gives it, or its id.
+        #[arg(long)]
+        to: String,
+        /// The scope of that project the tasks are worked in there: its title, its id or the start
+        /// of it.
+        #[arg(long)]
+        to_scope: Option<String>,
+        /// Why they move, kept in the comment that records the move; `@handle` and `[[<id>]]` name
+        /// what they name in a comment.
+        #[arg(long)]
+        note: Option<String>,
     },
 }
 
@@ -2056,6 +2089,7 @@ const JOINING: &[(&str, Writes)] = &[
     ("task hold", Writes::Yes),
     ("task release", Writes::Yes),
     ("task explain", Writes::No),
+    ("task move", Writes::Yes),
     ("step add", Writes::Yes),
     ("step list", Writes::No),
     ("step check", Writes::Yes),
@@ -3850,6 +3884,82 @@ async fn task_json(app: &App, id: EntityId) -> Result<Value> {
     ops::json_of_task(&t, Some(&r))
 }
 
+/// What `fwd task move` answers: the project the tasks went to and its scope, and for each task its
+/// id and title, the project it was in, whether this run moved it or found it there already, how
+/// many of each kind of what belongs to it the run took in, the scopes it was taken off and those
+/// it is worked in, each named as `task show` names a scope, and the comment that records the move.
+async fn moved_json(graph: &ProjectGraph, to: &task_move::Destination, moved: &[task_move::Moved]) -> Result<Value> {
+    let scope = to.scope.as_ref().map(|(id, title)| json!({"id": id.to_base64(), "title": title}));
+    let mut tasks = Vec::with_capacity(moved.len());
+    for m in moved {
+        let scopes = |ids: Vec<EntityId>| async move {
+            let mut named = Vec::with_capacity(ids.len());
+            for id in ids {
+                named.push(ops::reference_json(graph, id).await?);
+            }
+            anyhow::Ok(Value::Array(named))
+        };
+        let title = match graph.follow::<TaskView>(m.task).await? {
+            Followed::Held { found, .. } => json!(found.title()?),
+            Followed::NotHeld => Value::Null,
+        };
+        let brought = m.brought;
+        tasks.push(json!({
+            "id": m.task.to_base64(),
+            "title": title,
+            "from": m.from.name,
+            "moved": m.moved,
+            "brought": {
+                "messages": brought.messages,
+                "relations": brought.relations,
+                "steps": brought.steps,
+                "former_ids": brought.former_ids,
+            },
+            "taken_off": scopes(m.taken_off.clone()).await?,
+            "worked_in": scopes(m.worked_in.clone()).await?,
+            "comment": m.comment.map(|c| c.to_base64()),
+        }));
+    }
+    Ok(json!({"to": {"project": to.project.name, "id": to.project.uuid.to_string(), "scope": scope}, "tasks": tasks}))
+}
+
+/// `fwd task move`'s answer for people: where the tasks went, then a line per task saying what the
+/// run moved of it, or that it was there already.
+fn moved_text(v: &Value) -> String {
+    let to = v["to"]["project"].as_str().unwrap_or_default();
+    let mut lines = vec![match v["to"]["scope"]["title"].as_str() {
+        Some(scope) => format!("To {to}, in the scope {scope}:"),
+        None => format!("To {to}, in no scope:"),
+    }];
+    let count = |n: u64, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+    for t in v["tasks"].as_array().into_iter().flatten() {
+        let id: String = t["id"].as_str().unwrap_or_default().chars().take(8).collect();
+        let task = format!("{id} \"{}\"", t["title"].as_str().unwrap_or_default());
+        let b = &t["brought"];
+        let n = |key: &str| b[key].as_u64().unwrap_or(0);
+        let brought = format!(
+            "{}, {}, {} and {}",
+            count(n("messages"), "message"),
+            count(n("relations"), "relation"),
+            count(n("steps"), "step"),
+            count(n("former_ids"), "former id")
+        );
+        let names = |key: &str| {
+            t[key].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str()).collect::<Vec<_>>().join(", ")
+        };
+        lines.push(if t["moved"] == json!(true) {
+            let off = names("taken_off");
+            let off = if off.is_empty() { String::new() } else { format!("; taken off {off}") };
+            format!("  moved {task} from {}: the task, {brought}{off}", t["from"].as_str().unwrap_or_default())
+        } else if ["messages", "relations", "steps", "former_ids"].iter().all(|k| n(k) == 0) {
+            format!("  {task} is there already")
+        } else {
+            format!("  {task} is there already; took in what was left behind: {brought}")
+        });
+    }
+    lines.join("\n")
+}
+
 /// Everything `fwd task show` prints: the task's fields, its assignee's handle and the scopes it is
 /// worked in ([`with_scopes`]), then its checklist and how much of it is checked.
 async fn task_details(app: &App, id: EntityId) -> Result<Value> {
@@ -4930,6 +5040,19 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 v["messages"] = Value::Array(with_authors(graph, messages).await?);
                 with_scopes(graph, &mut v, id, false).await?;
                 app.print(v)
+            }
+            TaskCommand::Move { ids, to, to_scope, note } => {
+                let tasks = app.ids(&ids, &[Kind::Task]).await?;
+                let destination = task_move::Destination::named(graph, &to, to_scope.as_deref()).await?;
+                let moved = task_move::move_tasks(graph, app.me, &tasks, &destination, note.as_deref()).await?;
+                let answer = moved_json(graph, &destination, &moved).await?;
+                match app.format {
+                    Format::Text => {
+                        println!("{}", moved_text(&answer));
+                        Ok(())
+                    }
+                    _ => app.print(answer),
+                }
             }
         },
         Command::Step { command } => match command {
