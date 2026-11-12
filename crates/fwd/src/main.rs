@@ -3381,16 +3381,30 @@ async fn message_anywhere(graph: &ProjectGraph, id: EntityId) -> Result<MessageV
     }
 }
 
-/// Prints what `reply` and `forward` posted, `mid`, under `record` ([`made_json`]), and beside it as
+/// Prints what `reply` and `forward` posted, under `record` ([`made_json`]), and beside it as
 /// `settled` the notification they were given and settled, so that an agent that meant to act on a
-/// notification sees whether it did: given a message's id, the answer has no `settled`.
-async fn print_reply(app: &App, mid: EntityId, settled: Option<EntityId>) -> Result<()> {
+/// notification sees whether it did: given a message's id, the answer has no `settled`. A
+/// notification left unread after the message was made is said beside the answer
+/// ([`unsettled_note`]), which is the message made, as it is.
+async fn print_reply(app: &App, made: &str, posted: ops::Posted) -> Result<()> {
     let graph = app.graph();
-    let mut made = made_json(message_json(graph, &message_anywhere(graph, mid).await?).await?);
-    if let Some(n) = settled {
-        made["settled"] = json!(n.to_base64());
+    let mut answer = made_json(message_json(graph, &message_anywhere(graph, posted.message).await?).await?);
+    match posted.settling {
+        ops::Settling::Nothing => {}
+        ops::Settling::Settled(n) => answer["settled"] = json!(n.to_base64()),
+        ops::Settling::Unread { notification, why } => app.note(unsettled_note(made, notification, &why)),
     }
-    app.print_made(made, to_text)
+    app.print_made(answer, to_text)
+}
+
+/// What `reply` and `forward` say beside the message they `made` ("reply", "forward") when the
+/// notification they were given stays unread, for `why`: that the message was made all the same,
+/// so that no one runs the command again and posts it twice, and how to mark the notification read.
+fn unsettled_note(made: &str, notification: EntityId, why: &anyhow::Error) -> String {
+    let short = short_id(&notification.to_base64());
+    format!(
+        "NOTE: the {made} was made, but its notification {short} could not be marked read ({why:#}); `fwd read {short}` marks it read, and running this command again would make the {made} twice"
+    )
 }
 
 /// `supervisor`, the supervisor role's word until 2026-09-29 (docs/DECISIONS.md, D113, "An agent's
@@ -5434,7 +5448,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
         }
         Command::Reply { id, text } => {
             let (reply_to, notification) = message_behind(app, &id, true).await?;
-            let mid = ops::post_settling(
+            let posted = ops::post_settling(
                 graph,
                 app.me,
                 &text,
@@ -5443,7 +5457,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 notification,
             )
             .await?;
-            print_reply(app, mid, notification).await
+            print_reply(app, "reply", posted).await
         }
         Command::Forward { id, to, note } => {
             let (original, notification) = message_behind(app, &id, true).await?;
@@ -5471,9 +5485,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
             if mc.asks_project && app.scope_typed {
                 mc.asks_scope = app.scope;
             }
-            let mid = ops::post_settling(graph, app.me, &body, original_view.priority()?, mc, notification).await?;
-            say_waiting(app, mid).await?;
-            print_reply(app, mid, notification).await
+            let posted = ops::post_settling(graph, app.me, &body, original_view.priority()?, mc, notification).await?;
+            say_waiting(app, posted.message).await?;
+            print_reply(app, "forward", posted).await
         }
         Command::Cite { entity, decision, note } => {
             let from = app.id(&entity, &[Kind::Task, Kind::Message, Kind::Decision]).await?;
@@ -6475,6 +6489,24 @@ mod tests {
         assert_eq!(made_json(task.clone()), beside);
         let principal = json!({"id": "P", "handle": "impl-alice"});
         assert_eq!(made_json(principal.clone()), json!({"record": principal, "id": "P", "handle": "impl-alice"}));
+    }
+
+    /// A reply made whose notification could not be marked read after it says that the reply was
+    /// made, why the notification stays unread, how to mark it read, and that running the command
+    /// again would make the reply twice. Rendered alone: no test makes the node refuse the second
+    /// of the two transactions honestly (`ops::post_settling`), which would take a policy agent
+    /// that refuses the write.
+    #[test]
+    fn a_reply_made_whose_notification_stayed_unread_says_it_was_made_and_why_it_stayed() {
+        let notification = EntityId::from_bytes([7; 32]);
+        let short = short_id(&notification.to_base64());
+        let why = anyhow!("the daemon refused the write").context("marking the notification read");
+        assert_eq!(
+            unsettled_note("reply", notification, &why),
+            format!(
+                "NOTE: the reply was made, but its notification {short} could not be marked read (marking the notification read: the daemon refused the write); `fwd read {short}` marks it read, and running this command again would make the reply twice"
+            )
+        );
     }
 
     /// `fwd task show --include` takes `relations` and `messages`, several with commas or the flag

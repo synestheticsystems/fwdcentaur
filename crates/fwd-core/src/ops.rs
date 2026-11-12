@@ -3281,8 +3281,10 @@ pub async fn post_message(
 /// message behind it may be another project's: one a message of another project caused, or one
 /// that stayed when the task it is about moved to another project. The reply is made in that
 /// message's project ([`post_message`]), and the notification is marked read in its own project,
-/// in a transaction after the reply's, so that a failure between the two leaves the reply made and
-/// the notification unread, as the next command that settles it finds it.
+/// in a transaction after the reply's. Once the reply is made it is never reported as a failure,
+/// since a caller that took it for one and posted again would post it twice: a failure of the
+/// second transaction leaves the notification unread, as the next command that settles it finds
+/// it, and [`Posted::settling`] says why.
 pub async fn post_settling(
     graph: &ProjectGraph,
     author: EntityId,
@@ -3290,7 +3292,7 @@ pub async fn post_settling(
     priority: Priority,
     mc: MessageContext,
     settles: Option<EntityId>,
-) -> Result<EntityId> {
+) -> Result<Posted> {
     let mut unread = None;
     if let Some(n) = settles {
         let view: NotificationView = graph.get(n).await.context("the notification being acted on")?;
@@ -3309,7 +3311,7 @@ pub async fn post_settling(
     let post = Post::prepare(graph, author, content, priority, mc).await?;
     let made_in = post.made_in.clone();
     let trx = made_in.begin();
-    let id = post.write(&trx).await?;
+    let message = post.write(&trx).await?;
     let elsewhere = match unread {
         Some(view) if made_in.owns(&view) => {
             trx.edit(&view)?.status()?.set(&NotificationStatus::Read)?;
@@ -3318,12 +3320,43 @@ pub async fn post_settling(
         unread => unread,
     };
     trx.commit().await?;
-    if let Some(view) = elsewhere {
-        let trx = graph.begin();
-        trx.edit(&view)?.status()?.set(&NotificationStatus::Read)?;
-        trx.commit().await?;
-    }
-    Ok(id)
+    let settling = match (settles, elsewhere) {
+        (None, _) => Settling::Nothing,
+        (Some(notification), None) => Settling::Settled(notification),
+        (Some(notification), Some(view)) => match mark_read(graph, &view).await {
+            Ok(()) => Settling::Settled(notification),
+            Err(why) => Settling::Unread { notification, why },
+        },
+    };
+    Ok(Posted { message, settling })
+}
+
+/// Marks the notification `view` shows read, in `graph`, its project.
+async fn mark_read(graph: &ProjectGraph, view: &NotificationView) -> Result<()> {
+    let trx = graph.begin();
+    trx.edit(view)?.status()?.set(&NotificationStatus::Read)?;
+    Ok(trx.commit().await?)
+}
+
+/// What [`post_settling`] made: the message it posted, and what became of the notification it was
+/// posted through.
+#[derive(Debug)]
+pub struct Posted {
+    pub message: EntityId,
+    pub settling: Settling,
+}
+
+/// What became of the notification a message was posted through ([`post_settling`]).
+#[derive(Debug)]
+pub enum Settling {
+    /// The message was posted by its own id, through no notification.
+    Nothing,
+    /// The notification is settled: marked read with the message or after it, or read or
+    /// dismissed already.
+    Settled(EntityId),
+    /// The notification stays unread: marking it read in its own project, after the message was
+    /// made in another, failed, for `why`. The message stands.
+    Unread { notification: EntityId, why: anyhow::Error },
 }
 
 /// A message [`post_message`] has checked and not yet written: its text with every reference
