@@ -67,12 +67,13 @@ pub fn addressee(m: &MessageView) -> Option<String> {
     Some(to.parse::<EntityId>().map(store::handle_of).unwrap_or_else(|_| to.to_string()))
 }
 
-/// Who wrote the message and how it begins, to name it where it shows again.
+/// Who wrote the message and how it begins, to name it where it shows again, with its project's
+/// name after it when it is another project's, which its author's does not tell.
 pub fn name(id: EntityId) -> Option<String> {
     let m = store::message(id)?;
     let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
     let text = references::plain(&ops::text(m.content()).unwrap_or_default());
-    Some(format!("{author} “{}”", fmt::truncate(&text, 60)))
+    Some(store::named(format!("{author} “{}”", fmt::truncate(&text, 60)), &m))
 }
 
 /// The lozenge mode: its author and its first words.

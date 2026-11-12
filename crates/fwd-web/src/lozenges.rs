@@ -991,15 +991,22 @@ fn element_view(
 /// The entity's name in a few words, as its lozenge shows it: a task by its title, a ruling as
 /// `D<n>` and its title, a message by its author and how it begins, a scope by its name, code as
 /// `path:lines`, a file a mention names by its path and the version named, a person by the
-/// handle, with the role or "agent" beside an agent's.
+/// handle, with the role or "agent" beside an agent's. A record of another project is named with
+/// that project's name after it (`store::named`): a message's and a highlight's own project, which
+/// their author's does not tell.
 fn name_view(target: Target) -> AnyView {
     match target {
         Target::File(id, version) => {
-            let path = Memo::new(move |_| store::anchor(id).and_then(|a| a.path().ok()));
-            let named = anchor_name::file_version(&version.version());
+            let file = Memo::new(move |_| {
+                let named = anchor_name::file_version(&version.version());
+                match store::anchor(id) {
+                    Some(a) => (a.path().ok(), store::named(named, &a)),
+                    None => (None, named),
+                }
+            });
             view! {
-                <span class="loz-name">{move || path.get().unwrap_or_else(|| fmt::short(id))}</span>
-                <span class="loz-version">{named}</span>
+                <span class="loz-name">{move || file.get().0.unwrap_or_else(|| fmt::short(id))}</span>
+                <span class="loz-version">{move || file.get().1}</span>
             }
             .into_any()
         }
@@ -1032,12 +1039,13 @@ fn name_view(target: Target) -> AnyView {
             let message = Memo::new(move |_| {
                 store::message(id).map(|m| {
                     let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
-                    (author, first_words(&references::plain(&ops::text(m.content()).unwrap_or_default())))
+                    let words = first_words(&references::plain(&ops::text(m.content()).unwrap_or_default()));
+                    (author, store::named(format!("“{words}”"), &m))
                 })
             });
             view! {
                 <span class="loz-who">{move || message.get().map(|(a, _)| a).unwrap_or_else(|| store::unheld(id, Some(Model::Message)))}</span>
-                <span class="loz-name">{move || message.get().map(|(_, words)| format!("“{words}”")).unwrap_or_default()}</span>
+                <span class="loz-name">{move || message.get().map(|(_, words)| words).unwrap_or_default()}</span>
             }
             .into_any()
         }

@@ -103,9 +103,11 @@ pub fn name(id: EntityId) -> Option<String> {
 
 /// The path of the whole-file highlight `id` and the version a mention names it at, `docs/cli.md
 /// e13b8e2`, to name a file a message names (`fwd_core::file_mention`) where it shows again and in
-/// its lozenge; none while the page does not hold the highlight.
+/// its lozenge, with its project's name after it when the highlight is another project's; none
+/// while the page does not hold the highlight.
 pub fn file_name(id: EntityId, version: &Version) -> Option<String> {
-    Some(AnchorName::file_at(&store::anchor(id)?.path().ok()?, version).text())
+    let a = store::anchor(id)?;
+    Some(store::named(AnchorName::file_at(&a.path().ok()?, version).text(), &a))
 }
 
 /// The page's messages on the highlight `id`.
