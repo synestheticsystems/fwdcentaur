@@ -747,6 +747,34 @@ async fn a_scope_of_the_other_project_is_followed_as_a_reference_and_runs_a_comm
     Ok(())
 }
 
+/// A whole id typed as the scope a command works in names a scope or nothing: a task of either
+/// project, the task the command starts among them, and an id the node holds nothing by are each
+/// refused with the sentence that refuses any id naming no scope, where the scope places a command
+/// that acts on no one record (`ask`), where it is read for a command its record placed (`task
+/// start`), and where it is the scope a scope command acts on too (`scope show`), and neither
+/// project changes: the task does not start, comes to be worked in nothing, and no question is
+/// asked.
+#[tokio::test]
+async fn a_whole_id_that_names_no_scope_is_refused_as_the_scope_a_command_works_in_and_nothing_is_written() -> Result<()>
+{
+    let Two { daemon, a, b, alpha, beta } = Two::new().await?;
+    let before = (records(&alpha.graph).await?, records(&beta.graph).await?);
+    let nowhere = EntityId::random().to_base64();
+    for not_a_scope in [a.cap.as_str(), b.cap.as_str(), nowhere.as_str()] {
+        let starting = ["--scope", not_a_scope, "task", "start", a.cap.as_str()];
+        let asking = ["--scope", not_a_scope, "ask", "who takes the TLS part?"];
+        let showing = ["--scope", not_a_scope, "scope", "show", not_a_scope];
+        for args in [&starting[..], &asking[..], &showing[..]] {
+            let refused = daemon.output(&daemon.alpha, args)?.expect_err("no scope has that id");
+            let refusal = format!("no scope has the id {not_a_scope}");
+            assert!(refused.contains(&refusal), "fwd {}: {refused}", args.join(" "));
+        }
+    }
+    let after = (records(&alpha.graph).await?, records(&beta.graph).await?);
+    assert!(after == before, "nothing was written in either project");
+    Ok(())
+}
+
 /// A `--project` typed on the command line is never overridden by a scope: given alpha by
 /// `--project` and beta's scope by `--scope`, a command that acts on no one record runs in alpha,
 /// saying nothing, and the scope is followed as a reference, so the task it makes is alpha's and

@@ -4041,6 +4041,62 @@ async fn a_scope_is_named_by_its_title_or_its_id() -> Result<()> {
     Ok(())
 }
 
+/// The scope a command line names by its id, as `--scope` names the scope a command works in, is a
+/// scope: named by its whole id or the start of it, it is found with its project; a whole id that
+/// names a task, a decision or nothing the node holds is refused, where an id typed for a task is
+/// taken as it is.
+#[tokio::test]
+async fn a_scope_named_by_its_id_must_be_a_scope() -> Result<()> {
+    let graph = project().await?;
+    let c = cast(&graph).await?;
+    let here = ops::Located { id: c.scope, project: fwd_core::project_graph::Whose::This };
+    assert_eq!(ops::locate_scope(&graph, &c.scope.to_base64()).await?, here);
+    assert_eq!(ops::locate_scope(&graph, &c.scope.to_base64()[..8]).await?, here);
+    let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
+    let d = ops::create_decision(&graph, c.daniel, ruling("Bill per seat")).await?;
+    for not_a_scope in [t, d, EntityId::random()] {
+        let err = ops::locate_scope(&graph, &not_a_scope.to_base64()).await.expect_err("no scope").to_string();
+        assert_eq!(err, format!("no scope has the id {not_a_scope}"));
+    }
+    Ok(())
+}
+
+/// A start given as the scope it is made in a record that is no scope, another task, the task
+/// itself or an id the node holds nothing by, is refused before anything is written, as `link`
+/// refuses a `worked_in` to it: the task stays open, unassigned and worked in no scope, where a
+/// `worked_in` to it would be read as a scope. Given a scope, it starts there.
+#[tokio::test]
+async fn a_start_in_something_that_is_no_scope_is_refused_and_writes_nothing() -> Result<()> {
+    let graph = project().await?;
+    let c = cast(&graph).await?;
+    let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
+    let other = ops::create_task(&graph, c.daniel, task("Retry on disconnect")).await?;
+    let short = |id: EntityId| id.to_base64().chars().take(8).collect::<String>();
+    let nowhere = EntityId::random();
+    let refusals = [
+        (other, "refused: `worked_in` joins a task to a scope, not a task to a task".to_string()),
+        (t, "refused: `worked_in` joins a task to a scope, not a task to a task".to_string()),
+        (
+            nowhere,
+            format!(
+                "refused: `worked_in` joins a task to a scope, and `{}` names nothing the node holds",
+                short(nowhere)
+            ),
+        ),
+    ];
+    for (not_a_scope, refusal) in refusals {
+        let err = ops::start(&graph, c.implementer, t, Some(not_a_scope)).await.expect_err("no scope").to_string();
+        assert_eq!(err, refusal);
+    }
+    let view: TaskView = graph.get(t).await?;
+    assert_eq!((view.status()?, ops::assignee_of(&view)?), (TaskStatus::Open, None), "the task did not start");
+    let worked_in = ops::relations_from(&graph, t, Some(RelationKind::WorkedIn)).await?;
+    assert!(worked_in.is_empty(), "and came to be worked in nothing: {} relations", worked_in.len());
+    ops::start(&graph, c.implementer, t, Some(c.scope)).await?;
+    assert_eq!(ops::worked_in(&graph, t).await?, vec![c.scope], "given a scope, it starts there");
+    Ok(())
+}
+
 /// The exported log lists the rulings that govern the whole project first, then each scope's under
 /// the scope's name, the scopes by name; each keeps its number, and each entry names the scope it
 /// governs.

@@ -2293,12 +2293,17 @@ pub async fn next_task(graph: &ProjectGraph, me: EntityId, scope: Option<EntityI
 /// `scope`, the caller's active scope, a task worked in no scope comes to be worked in it, a task
 /// worked in it (among other scopes or alone) starts as it is, and a task none of whose scopes is
 /// it is refused, naming them and how to switch to one (`rules::can_start_in`). Without one (a
-/// person need not have a scope) the task's scope relations stay as they are. Until 2026-10-03 the
-/// start also wrote the caller's scope into the task's context (`scope_id`), which routing read
-/// for a task worked in no scope; nothing reads it now, and the `worked_in` a start makes records
-/// where the task was started, by whom and when.
+/// person need not have a scope) the task's scope relations stay as they are. A `scope` that is no
+/// scope the node holds is refused before anything is written, as [`link`] refuses a `worked_in`
+/// to it, since every reader of a task's `worked_in` takes its target for a scope. Until
+/// 2026-10-03 the start also wrote the caller's scope into the task's context (`scope_id`), which
+/// routing read for a task worked in no scope; nothing reads it now, and the `worked_in` a start
+/// makes records where the task was started, by whom and when.
 pub async fn start(graph: &ProjectGraph, by: EntityId, task: EntityId, scope: Option<EntityId>) -> Result<()> {
     let view: TaskView = graph.get(task).await?;
+    if let Some(scope) = scope {
+        check_ends(graph, RelationKind::WorkedIn, task, scope).await?;
+    }
     match rules::can_start(view.status()?, assignee_of(&view)?, by) {
         Err(rules::RuleError::AssignedToAnother { assignee }) => bail!(
             "task is assigned to {}; only its assignee starts it (`fwd task assign <task> @<you>` first)",
@@ -5045,12 +5050,22 @@ pub async fn resolve_scope(graph: &ProjectGraph, name: &str) -> Result<EntityId>
     if wanted.parse::<EntityId>().is_err() && !may_start_an_id(wanted) {
         return Err(unnamed());
     }
-    let found = match locate(graph, wanted, &[Kind::Scope]).await {
-        Err(e) if e.is::<UnmatchedPrefix>() => return Err(unnamed()),
-        found => found?,
-    };
+    match locate_scope(graph, wanted).await {
+        Err(e) if e.is::<UnmatchedPrefix>() => Err(unnamed()),
+        found => Ok(found?.id),
+    }
+}
+
+/// The scope a command line names by its id: its whole id, the first six characters or more of
+/// it, or an id it had before it was renumbered, naming a scope of any project, as every id
+/// someone types does ([`locate`]), with the project it is in. A whole id that names no scope the
+/// node holds, nothing or a record of another kind, is refused, "no scope has the id <id>", where
+/// [`locate`] would take it as it is, so that it is never written where a scope belongs: the scope
+/// a task is worked in, or the scope a question asks.
+pub async fn locate_scope(graph: &ProjectGraph, typed: &str) -> Result<Located> {
+    let found = locate(graph, typed, &[Kind::Scope]).await?;
     match graph.follow::<ScopeView>(found.id).await? {
-        Followed::Held { record, .. } => Ok(record),
+        Followed::Held { .. } => Ok(found),
         Followed::NotHeld => bail!("no scope has the id {}", found.id),
     }
 }

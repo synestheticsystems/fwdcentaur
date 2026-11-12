@@ -243,12 +243,13 @@ enum Failed {
 }
 
 /// Places `command`, which started in `graph`'s project, where it runs: in the project of the
-/// record it acts on ([`placed_by`]), found in whichever project it is (`ops::locate`). Without
-/// one, it runs where it started when that is the project a `--project` typed on its command line
-/// names (`project_typed`), which no scope overrides, the scope being then a reference like any
-/// other; else in the project of `scope`, the scope it works in as typed (`--scope` or `FWD_SCOPE`
-/// for the CLI, `scope` for the MCP), named by its id or the start of it; otherwise where it
-/// started, the project FWD_PROJECT or the directory names, or an MCP call's `project`. A task
+/// record it acts on ([`placed_by`]), found in whichever project it is (`ops::locate`; a scope's id
+/// refused when it names no scope, `ops::locate_scope`). Without one, it runs where it started
+/// when that is the project a `--project` typed on its command line names (`project_typed`), which
+/// no scope overrides, the scope being then a reference like any other; else in the project of
+/// `scope`, the scope it works in as typed (`--scope` or `FWD_SCOPE` for the CLI, `scope` for the
+/// MCP), named by its id or the start of it, and refused when that names no scope; otherwise where
+/// it started, the project FWD_PROJECT or the directory names, or an MCP call's `project`. A task
 /// move is placed under the node's move lock, which the daemon's runtime folder in `paths` holds,
 /// telling `waiting` first when another move holds it (`task_move::MoveLock`).
 pub(crate) async fn runs_in(
@@ -261,7 +262,12 @@ pub(crate) async fn runs_in(
 ) -> Result<RunsIn> {
     match placed_by(command) {
         Some(PlacedBy::Record { typed, kinds }) => {
-            let found = ops::locate(graph, typed, kinds).await?;
+            // A scope's id names a scope or is refused, so that every scope placing finds is one,
+            // as the scope the command works in may be what placing found (`scope_named`).
+            let found = match kinds {
+                SCOPE => ops::locate_scope(graph, typed).await?,
+                kinds => ops::locate(graph, typed, kinds).await?,
+            };
             Ok(RunsIn {
                 project: found.project,
                 because: format!("`{typed}`"),
@@ -323,7 +329,7 @@ pub(crate) async fn runs_in(
         }
         None => match scope.filter(|_| !project_typed) {
             Some(scope) => {
-                let found = ops::locate(graph, scope, SCOPE).await?;
+                let found = ops::locate_scope(graph, scope).await?;
                 Ok(RunsIn {
                     project: found.project,
                     because: format!("the scope `{scope}`"),
@@ -413,12 +419,12 @@ pub(crate) fn typed_record(typed: &[Typed], text: &str, kinds: &[Kind]) -> Optio
 }
 
 /// The scope a command works in, typed as `scope` (`--scope`, `FWD_SCOPE`, the MCP's `scope`): as
-/// placing the command found it, else read in `graph` as any id typed is, in whichever project it is
-/// (`ops::resolve_id`).
+/// placing the command found it, else read in `graph` as any id typed is, in whichever project it is,
+/// and refused unless it names a scope (`ops::locate_scope`), which placing a command checks too.
 pub(crate) async fn scope_named(graph: &ProjectGraph, typed: &[Typed], scope: &str) -> Result<EntityId> {
     match typed_record(typed, scope, SCOPE) {
         Some(record) => Ok(record),
-        None => ops::resolve_id(graph, scope, SCOPE).await,
+        None => Ok(ops::locate_scope(graph, scope).await?.id),
     }
 }
 
