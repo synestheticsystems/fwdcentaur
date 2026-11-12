@@ -635,16 +635,13 @@ mod tests {
     }
 
     /// `who` asks no one in particular, of no scope, as `fwd ask` without `--to` does where it finds
-    /// no scope, a moment after whatever came before, so that the questions are ordered by when
-    /// they were asked.
+    /// no scope.
     async fn ask(graph: &ProjectGraph, who: EntityId, text: &str) -> Result<EntityId> {
         ask_in(graph, who, text, None).await
     }
 
-    /// `who` asks no one in particular, of `scope`, as `fwd ask --scope` does, a moment after
-    /// whatever came before.
+    /// `who` asks no one in particular, of `scope`, as `fwd ask --scope` does.
     async fn ask_in(graph: &ProjectGraph, who: EntityId, text: &str, scope: Option<EntityId>) -> Result<EntityId> {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let asked = MessageContext { asks_project: true, asks_scope: scope, ..Default::default() };
         ops::post_message(graph, who, text, Priority::Now, asked).await
     }
@@ -667,8 +664,9 @@ mod tests {
         Ok(Event::Principal(view, standing))
     }
 
-    /// The questions `who` has been asked, read or not, each with why, in the order they were
-    /// asked.
+    /// The questions `who` has been asked, read or not, each with why, in the order of their ids,
+    /// which [`in_order`] gives the questions a test expects: what reaches whom is the test's
+    /// subject, not the order of clocks that may read alike.
     async fn asked(graph: &ProjectGraph, who: EntityId) -> Result<Vec<(EntityId, String)>> {
         let mut found = Vec::new();
         for n in ops::inbox(graph, who, false).await? {
@@ -677,11 +675,15 @@ mod tests {
             }
             let originator: Value = n.originator()?.into();
             let question: EntityId = originator["message_id"].as_str().expect("it names its question").parse()?;
-            let when = graph.get::<MessageView>(question).await?.created()?;
-            found.push((when, question, originator["why"].as_str().unwrap_or_default().to_string()));
+            found.push((question, originator["why"].as_str().unwrap_or_default().to_string()));
         }
-        found.sort();
-        Ok(found.into_iter().map(|(_, question, why)| (question, why)).collect())
+        Ok(in_order(found))
+    }
+
+    /// `questions` in the order of their ids, as [`asked`] gives them.
+    fn in_order(mut questions: Vec<(EntityId, String)>) -> Vec<(EntityId, String)> {
+        questions.sort();
+        questions
     }
 
     /// `who` reads every notification it has.
@@ -742,7 +744,7 @@ mod tests {
         // triage-b takes Docs as well, and hears of the question that waited there, and no other.
         ops::serve(&graph, "triage-b", ops::Serves::Scope(docs)).await?;
         handle(&node, principal(&graph, b).await?, &mut statuses).await?;
-        assert_eq!(asked(&graph, b).await?, vec![triage(in_storage), triage(in_docs)]);
+        assert_eq!(asked(&graph, b).await?, in_order(vec![triage(in_storage), triage(in_docs)]));
         // An agent endorsed for the whole project hears of the question asked of no scope.
         let whole = ops::add_principal(
             &graph,
@@ -762,7 +764,7 @@ mod tests {
         handle(&node, principal(&graph, a).await?, &mut statuses).await?;
         let later = ask_in(&graph, daniel, "and the notifications?", Some(replication)).await?;
         handle(&node, message(&graph, later).await?, &mut statuses).await?;
-        assert_eq!(asked(&graph, whole).await?, vec![triage(of_no_scope), triage(later)]);
+        assert_eq!(asked(&graph, whole).await?, in_order(vec![triage(of_no_scope), triage(later)]));
         assert_eq!(asked(&graph, a).await?, vec![triage(in_replication)]);
         Ok(())
     }
@@ -813,7 +815,7 @@ mod tests {
         handle(&node, message(&graph, third).await?, &mut statuses).await?;
         ops::set_role(&graph, "impl-alice", AgentRole::Triage, Some(ops::Serves::ProjectWide)).await?;
         handle(&node, principal(&graph, alice).await?, &mut statuses).await?;
-        assert_eq!(asked(&graph, alice).await?, vec![triage(second), triage(third)]);
+        assert_eq!(asked(&graph, alice).await?, in_order(vec![triage(second), triage(third)]));
 
         // Alice reads them and is retired; a fourth waits; triage-4 succeeds her, and hears of it.
         read_all(&graph, alice).await?;
@@ -852,14 +854,14 @@ mod tests {
         handle(&node, principal(&graph, first).await?, &mut statuses).await?;
         let held = ask(&graph, daniel, "is Windows in scope?").await?;
         handle(&node, message(&graph, held).await?, &mut statuses).await?;
-        assert_eq!(asked(&graph, first).await?, vec![triage(waited), triage(held)]);
+        assert_eq!(asked(&graph, first).await?, in_order(vec![triage(waited), triage(held)]));
 
         // triage-2 succeeds it, unread: both questions move to triage-2, and neither is told again.
         let second = ops::add_successor(&graph, "triage-2", None, None, None, None, None, "triage-1").await?.successor;
         for p in [first, second] {
             handle(&node, principal(&graph, p).await?, &mut statuses).await?;
         }
-        assert_eq!(asked(&graph, second).await?, vec![triage(waited), triage(held)]);
+        assert_eq!(asked(&graph, second).await?, in_order(vec![triage(waited), triage(held)]));
 
         // It reads them, and Bob, an implementer, succeeds it: he hears of neither.
         read_all(&graph, second).await?;
