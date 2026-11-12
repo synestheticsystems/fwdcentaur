@@ -661,15 +661,19 @@ async fn a_recipient_of_another_project_replies_and_forwards_through_her_notific
 /// A forward asked of no one in particular, made through beta's notification of a comment of
 /// alpha's, is a message of alpha's thread, made in alpha and routed by alpha's rules, so the
 /// forwarder is told where it was made and which project's triage agents would answer it, and the
-/// guidance's commands go to that project. Asking no scope, it is answered in alpha: with none
-/// serving alpha and one serving beta whole, it waits in alpha, and the commands are for alpha.
-/// Asking a scope of beta's that no agent serves, once beta's agent has retired, it is answered in
-/// beta, where the command ran: it waits there, and no command is sent to alpha, where an agent
-/// made would never be asked.
+/// guidance's commands go to that project. Asking a scope, it is answered by that scope's triage
+/// agent, else by the one that serves that scope's project whole, both read in the scope's own
+/// project; asking none, or a scope the node does not hold, by the one that serves alpha whole.
+/// With none serving alpha and one serving beta whole, a forward that asks no scope waits in
+/// alpha, and so does one about a task whose `worked_in` names an id that is no scope, as an older
+/// build wrote for a `--scope` given any whole id: the commands are for alpha. Asking a scope of
+/// beta's that no agent serves, once beta's agent has retired, it is answered in beta, where the
+/// command ran: it waits there, and no command is sent to alpha, where an agent made would never be
+/// asked.
 #[tokio::test]
 async fn a_forward_made_in_another_projects_thread_says_whether_it_waits_where_it_is_answered() -> Result<()> {
     let daemon = Daemon::new()?;
-    let beta = daemon.client(&daemon.beta).await?;
+    let (alpha, beta) = (daemon.client(&daemon.alpha).await?, daemon.client(&daemon.beta).await?);
     let triage = ["--as", "triage-bot", "principal", "add", "triage-bot", "--role", "triage", "--project-wide"];
     daemon.json(&daemon.beta, &triage)?;
     let alice: EntityId = daemon
@@ -689,6 +693,39 @@ async fn a_forward_made_in_another_projects_thread_says_whether_it_waits_where_i
         "{made_in_alpha}, asked of the project, until an agent serves it or the whole project `alpha`, and reaches that agent then."
     );
     assert!(said.contains(&waits), "{said}");
+    assert!(said.contains("run them there with `--project 'alpha'`, or from one of its checkouts."), "{said}");
+
+    // `link` and `task start` refuse a `worked_in` to what is no scope, so it is written by hand.
+    let unscoped = daemon.made(&daemon.alpha, &["task", "create", "Cap the retry delay"])?;
+    let person = ops::person_by_handle(&alpha.graph, "dnorman").await?;
+    let trx = alpha.graph.begin();
+    trx.create(&Relation {
+        project: alpha.graph.project(),
+        kind: RelationKind::WorkedIn,
+        from_id: unscoped.parse()?,
+        to_id: EntityId::random(),
+        status: RelationStatus::Accepted,
+        created_by: ankurah::property::Ref::new(person),
+        created: fwd_core::now_ms(),
+        via: ankurah::property::Json::new(json!({})),
+        note: None,
+        position: None,
+        closed_by: None,
+        closed: None,
+        closed_reason: None,
+    })
+    .await?;
+    trx.commit().await?;
+    let comment = daemon.made(&daemon.alpha, &["comment", &unscoped, &mention])?;
+    let told = hers.told_of(&comment).await?.to_base64();
+    let args = ["--as", "impl-alice", "forward", &told, "--note", "who takes this?"];
+    let (forwarded, said) = daemon.json_and_said(&daemon.beta, &args)?;
+    assert_eq!(forwarded["record"]["project"], "alpha", "{forwarded}");
+    assert!(said.contains(&format!("{made_in_alpha}, asked of the scope ")), "{said}");
+    assert!(
+        said.contains("until an agent serves it or the whole project `alpha`, and reaches that agent then."),
+        "{said}"
+    );
     assert!(said.contains("run them there with `--project 'alpha'`, or from one of its checkouts."), "{said}");
 
     daemon.json(&daemon.beta, &["principal", "retire", "triage-bot"])?;

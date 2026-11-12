@@ -3579,11 +3579,17 @@ async fn triage_guidance(graph: &ProjectGraph, scope: Option<EntityId>) -> Resul
     if ops::triage_for(graph, scope).await?.is_some() {
         return Ok(None);
     }
+    Ok(Some(triage_subagent_guidance(graph, scope).await?))
+}
+
+/// The guidance on creating a triage subagent for `scope`, or for what concerns no scope when it is
+/// none (`fwd_core::guidance::triage_subagent`), the scope named as `graph`'s project names it.
+async fn triage_subagent_guidance(graph: &ProjectGraph, scope: Option<EntityId>) -> Result<String> {
     let named = match scope {
         Some(scope) => Some((scope_title(graph, Some(scope)).await?.unwrap_or_default(), short_id(&scope.to_base64()))),
         None => None,
     };
-    Ok(Some(fwd_core::guidance::triage_subagent(named.as_ref().map(|(t, id)| (t.as_str(), id.as_str())))))
+    Ok(fwd_core::guidance::triage_subagent(named.as_ref().map(|(t, id)| (t.as_str(), id.as_str()))))
 }
 
 /// A scope as the sentences on standard error name it: its title in quotes and the first eight
@@ -3612,9 +3618,11 @@ async fn say_waiting(app: &App, message: &MessageView) {
 /// None for a message that asks someone, or whose scope a triage agent answers for. The question
 /// is read as routing reads it, by the rules of its own project, which for a forward through a
 /// notification is the project of the message it forwards, whichever project `graph`, the one the
-/// command ran in and `here` names, is: it is answered by the triage agents of the project of the
-/// scope it asks, else of its own project ([`ops::triage_for`]), where the guidance's commands are
-/// run. Each of those two projects is named when it is not the command's.
+/// command ran in and `here` names, is ([`ops::triage_for`]): asking a scope, it is answered by
+/// that scope's triage agent, else by the one that serves that scope's project whole, both read in
+/// the scope's own project; asking none, or a scope the node does not hold, by the one that serves
+/// the message's project whole. The guidance's commands are run in that project, and it and the
+/// message's project are each named when they are not the command's.
 async fn waiting_notice(graph: &ProjectGraph, here: &str, message: &MessageView) -> Result<Option<String>> {
     let mc = MessageContext::from_view(message)?;
     if !mc.asks_project {
@@ -3622,11 +3630,10 @@ async fn waiting_notice(graph: &ProjectGraph, here: &str, message: &MessageView)
     }
     let made_in = graph.graph_of(message)?;
     let scope = fwd_core::routing::asked_scope(&made_in, &mc).await?;
-    // A scope's triage agents are read in the scope's own project through any graph, which then
-    // names the scope as the command's project does; for no scope, the agent that serves the
-    // message's project whole answers.
-    let answering = if scope.is_some() { graph } else { &made_in };
-    let Some(guidance) = triage_guidance(answering, scope).await? else { return Ok(None) };
+    if ops::triage_for(&made_in, scope).await?.is_some() {
+        return Ok(None);
+    }
+    let guidance = triage_subagent_guidance(graph, scope).await?;
     let whom = match scope {
         Some(scope) => format!("of the scope {}", scope_words(graph, scope).await?),
         None => "of the project".to_string(),
