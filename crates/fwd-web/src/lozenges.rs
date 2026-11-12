@@ -993,7 +993,8 @@ fn element_view(
 /// `path:lines`, a file a mention names by its path and the version named, a person by the
 /// handle, with the role or "agent" beside an agent's. A record of another project is named with
 /// that project's name after it (`store::named`): a message's and a highlight's own project, which
-/// their author's does not tell.
+/// their author's does not tell, a message's author named with theirs only when it is another
+/// still (`store::handle_beside`).
 fn name_view(target: Target) -> AnyView {
     match target {
         Target::File(id, version) => {
@@ -1038,7 +1039,8 @@ fn name_view(target: Target) -> AnyView {
         Target::Message(id) => {
             let message = Memo::new(move |_| {
                 store::message(id).map(|m| {
-                    let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+                    let author =
+                        m.author().ok().map(|a| store::handle_beside(EntityId::from(a), &m)).unwrap_or_default();
                     let words = first_words(&references::plain(&ops::text(m.content()).unwrap_or_default()));
                     (author, store::named(format!("“{words}”"), &m))
                 })

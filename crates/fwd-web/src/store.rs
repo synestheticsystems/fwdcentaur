@@ -1031,6 +1031,19 @@ pub fn handle_of(id: EntityId) -> String {
     }
 }
 
+/// The handle of `author`, who wrote `record`, beside the record's name where that names the
+/// record's own project ([`named`]): the author's project is named only when it is neither the
+/// page's nor the record's, which the record's name tells already ("alice “ship it” in beta", not
+/// "alice in beta “ship it” in beta"); otherwise as [`handle_of`] names a principal.
+pub fn handle_beside<V: InProjectView>(author: EntityId, record: &V) -> String {
+    match principal(author) {
+        Some(p) if p.project_id().is_ok_and(|theirs| record.project_id().is_ok_and(|its| its == theirs)) => {
+            p.handle().unwrap_or_default()
+        }
+        _ => handle_of(author),
+    }
+}
+
 /// The scope a task is worked in, named for a list: its name, with its project's name after it when
 /// it is another project's, or the start of its id while the page does not hold it. Until 2026-09-29
 /// its owner's handle followed the name; a scope has no owner now (docs/DECISIONS.md, D108, "A scope

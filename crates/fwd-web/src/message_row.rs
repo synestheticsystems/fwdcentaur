@@ -68,10 +68,11 @@ pub fn addressee(m: &MessageView) -> Option<String> {
 }
 
 /// Who wrote the message and how it begins, to name it where it shows again, with its project's
-/// name after it when it is another project's, which its author's does not tell.
+/// name after it when it is another project's, which its author's does not tell, and the author's
+/// own only when it is another still (`store::handle_beside`).
 pub fn name(id: EntityId) -> Option<String> {
     let m = store::message(id)?;
-    let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+    let author = m.author().ok().map(|a| store::handle_beside(EntityId::from(a), &m)).unwrap_or_default();
     let text = references::plain(&ops::text(m.content()).unwrap_or_default());
     Some(store::named(format!("{author} “{}”", fmt::truncate(&text, 60)), &m))
 }
