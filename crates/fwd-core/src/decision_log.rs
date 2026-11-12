@@ -12,7 +12,7 @@
 use crate::calendar::{local_offset_ms, parse_day, DAY_MS};
 use crate::model::*;
 use crate::ops;
-use crate::project_graph::ProjectGraph;
+use crate::project_graph::{Followed, ProjectGraph};
 use crate::rules::DecisionMove;
 use ankurah::EntityId;
 use anyhow::Result;
@@ -266,17 +266,17 @@ pub async fn entries(graph: &ProjectGraph) -> Result<Vec<Entry>> {
         let id = d.id();
         let mut decided_in = Vec::new();
         for (_, to) in cites.iter().filter(|(from, to)| *from == id && !number.contains_key(to)) {
-            if let Ok(t) = graph.get::<TaskView>(*to).await {
-                decided_in.push(format!("task “{}”", t.title().unwrap_or_default()));
-            } else if let Ok(m) = graph.get::<MessageView>(*to).await {
+            // What it was decided in, followed wherever in the node it is, with its project's name
+            // when that is another (docs/DECISIONS.md, D176).
+            if let Followed::Held { project, found: t, .. } = graph.follow::<TaskView>(*to).await? {
+                decided_in.push(ops::in_project(format!("task “{}”", t.title().unwrap_or_default()), &project));
+            } else if let Followed::Held { project, found: m, .. } = graph.follow::<MessageView>(*to).await? {
                 let content = ops::text(m.content()).unwrap_or_default();
                 let words: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
                 let short: String = words.chars().take(80).collect();
                 let more = if words.chars().count() > 80 { "…" } else { "" };
-                decided_in.push(format!(
-                    "the message “{short}{more}” by {}",
-                    m.author().map(|a| handle(a.into())).unwrap_or_default()
-                ));
+                let by = ops::handle_of(graph, m.author()?.into()).await?;
+                decided_in.push(ops::in_project(format!("the message “{short}{more}” by {by}"), &project));
             }
         }
         let numbered = |pairs: Vec<EntityId>| -> Vec<i64> {

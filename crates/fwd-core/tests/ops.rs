@@ -4325,12 +4325,12 @@ async fn worked_in_joins_a_task_to_a_scope() -> Result<()> {
     let link = |from, to| ops::link(&graph, e.by, RelationKind::WorkedIn, from, to, None, false, serde_json::json!({}));
     assert_eq!(
         link(e.other_task, gone).await.unwrap_err().to_string(),
-        format!("refused: `worked_in` joins a task to a scope, and `{}` names nothing in this project", short(gone))
+        format!("refused: `worked_in` joins a task to a scope, and `{}` names nothing the node holds", short(gone))
     );
     assert_eq!(
         link(lost, gone).await.unwrap_err().to_string(),
         format!(
-            "refused: `worked_in` joins a task to a scope, and `{}` and `{}` name nothing in this project",
+            "refused: `worked_in` joins a task to a scope, and `{}` and `{}` name nothing the node holds",
             short(lost),
             short(gone)
         )
@@ -4401,7 +4401,7 @@ async fn creates_only(
     let gone = EntityId::random();
     let refused = ops::create_task(graph, e.by, made(gone)).await.expect_err("a target that is nothing").to_string();
     let short: String = gone.to_base64().chars().take(8).collect();
-    assert_eq!(refused, format!("refused: `{kind}` joins {joins}, and `{short}` names nothing in this project"));
+    assert_eq!(refused, format!("refused: `{kind}` joins {joins}, and `{short}` names nothing the node holds"));
     assert_eq!(tasks().await?, before, "a refused task is not made");
     for to in right {
         let task = ops::create_task(graph, e.by, made(*to)).await?;

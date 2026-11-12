@@ -94,15 +94,21 @@ impl Availability {
         // at all. Here only holds and prerequisites matter, so no date is given to judge, and the
         // present that would judge one goes unread.
         let card = TaskSnapshot { id, status: TaskStatus::Open, hold, not_before: None };
-        match rules::readiness(&card, dependencies, 0) {
+        let dependencies: Vec<rules::Dependency> =
+            dependencies.iter().map(|(task, status)| rules::Dependency::Here(*task, *status)).collect();
+        match rules::readiness(&card, &dependencies, 0) {
             Readiness::Ready => {}
             Readiness::Unknown(_) => availability.unknown = true,
             Readiness::NotReady(reasons) => {
                 for reason in reasons {
                     match reason {
                         NotReadyReason::Held(_) => availability.held = true,
-                        NotReadyReason::BlockedBy(_) => availability.blocked = true,
-                        NotReadyReason::DependencyClosed(_, _) => availability.dependency_issue = true,
+                        NotReadyReason::BlockedBy(_) | NotReadyReason::BlockedByTaskIn { .. } => {
+                            availability.blocked = true
+                        }
+                        NotReadyReason::DependencyClosed(_, _)
+                        | NotReadyReason::DependencyClosedIn { .. }
+                        | NotReadyReason::DependencyNotHeld(_) => availability.dependency_issue = true,
                         NotReadyReason::Status(_) | NotReadyReason::NotYetDue(_) => {}
                     }
                 }

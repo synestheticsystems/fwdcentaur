@@ -54,3 +54,93 @@ async fn a_client_finds_the_project_by_its_uuid_and_no_project_the_store_has_no_
     assert!(matches!(refused, ProjectGraphError::NotHosted(id) if id == unknown), "{refused:?}");
     Ok(())
 }
+
+/// Two projects' graphs over one store in memory.
+async fn two() -> Result<(ProjectGraph, ProjectGraph)> {
+    let ctx = store().await?;
+    let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
+    let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
+    Ok((alpha, beta))
+}
+
+/// A task of `graph`'s project, made by `by`, titled `title`.
+async fn task(graph: &ProjectGraph, by: ankurah::EntityId, title: &str) -> Result<ankurah::EntityId> {
+    fwd_core::ops::create_task(graph, by, fwd_core::ops::CreateTask { title: title.into(), ..Default::default() }).await
+}
+
+#[tokio::test]
+async fn following_an_id_reads_its_record_in_whichever_project_with_that_projects_name() -> Result<()> {
+    use fwd_core::model::{FormerId, PrincipalKind, TaskView};
+    use fwd_core::project_graph::{Followed, Whose};
+    let (alpha, beta) = two().await?;
+    let person = fwd_core::ops::ensure_principal(&beta, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let theirs = task(&beta, person, "Retry on disconnect").await?;
+    let ours = task(&alpha, person, "Cap the retry delay").await?;
+
+    match alpha.follow::<TaskView>(theirs).await? {
+        Followed::Held { record, project: Whose::Other(p), found } => {
+            assert_eq!((record, p.name.as_str(), found.title()?), (theirs, "beta", "Retry on disconnect".into()));
+        }
+        other => panic!("beta's task, followed from alpha: {other:?}"),
+    }
+    assert!(matches!(alpha.follow::<TaskView>(ours).await?, Followed::Held { project: Whose::This, .. }));
+    let nothing = ankurah::EntityId::random();
+    assert!(
+        matches!(alpha.follow::<TaskView>(nothing).await?, Followed::NotHeld),
+        "an id the node holds no record for"
+    );
+    assert!(matches!(alpha.follow::<TaskView>(person).await?, Followed::NotHeld), "a record of another model");
+
+    // An id beta's task had before it was renumbered, which beta keeps, names the task it is now.
+    let former = ankurah::EntityId::random();
+    let trx = beta.begin();
+    trx.create(&FormerId { project: beta.project(), former: former.to_base64(), record: theirs }).await?;
+    trx.commit().await?;
+    assert!(matches!(alpha.follow::<TaskView>(former).await?, Followed::Held { record, .. } if record == theirs));
+    assert!(matches!(alpha.follow_any(former).await?, Followed::Held { record, .. } if record == theirs));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_records_relations_are_read_by_its_id_whichever_project_made_them_and_a_list_by_project() -> Result<()> {
+    use fwd_core::model::{PrincipalKind, RelationKind, RelationView};
+    use fwd_core::ops;
+    let (alpha, beta) = two().await?;
+    let person = ops::ensure_principal(&alpha, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let ours = task(&alpha, person, "Cap the retry delay").await?;
+    let theirs = task(&beta, person, "Retry on disconnect").await?;
+    let made_in_beta =
+        ops::link(&beta, person, RelationKind::DependsOn, theirs, ours, None, false, serde_json::json!({})).await?;
+
+    let to_ours = alpha.relations_to(ours, Some(RelationKind::DependsOn)).await?;
+    assert_eq!(to_ours.iter().map(ankurah::View::id).collect::<Vec<_>>(), vec![made_in_beta]);
+    assert_eq!(alpha.relations_from(theirs, None).await?.len(), 1, "read on beta's task through alpha's graph too");
+    assert_eq!(alpha.relation(made_in_beta).await?.from_id()?, theirs);
+    let listed: Vec<RelationView> = alpha.all().await?;
+    assert!(listed.is_empty(), "alpha's list of relations holds those alpha made: {}", listed.len());
+    assert_eq!(beta.all::<RelationView>().await?.len(), 1);
+
+    // Only the project that made it changes it: alpha names beta when it refuses.
+    let refused = alpha.ensure_own(&to_ours[0]).await.expect_err("beta's relation");
+    assert!(refused.to_string().contains("project `beta`"), "{refused}");
+    assert!(beta.ensure_own(&to_ours[0]).await.is_ok());
+    assert!(!alpha.owns(&to_ours[0]) && beta.owns(&to_ours[0]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_ids_a_typed_id_may_name_are_every_projects_with_their_project() -> Result<()> {
+    use fwd_core::model::{PrincipalKind, TaskView};
+    use fwd_core::project_graph::Whose;
+    let (alpha, beta) = two().await?;
+    let person = fwd_core::ops::ensure_principal(&alpha, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let ours = task(&alpha, person, "Cap").await?;
+    let theirs = task(&beta, person, "Retry").await?;
+    let every = alpha.ids_in_every_project::<TaskView>().await?;
+    let (alpha_record, beta_record) = (*alpha.project(), *beta.project());
+    assert!(every.contains(&(ours, alpha_record)) && every.contains(&(theirs, beta_record)), "{every:?}");
+    let named = alpha.projects_named(&[alpha_record, beta_record]).await?;
+    assert_eq!(named[0], (alpha_record, Whose::This));
+    assert!(matches!(&named[1], (record, Whose::Other(p)) if *record == beta_record && p.name == "beta"));
+    Ok(())
+}

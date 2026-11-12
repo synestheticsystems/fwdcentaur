@@ -1,9 +1,11 @@
 //! Two projects in one node, as the daemon keeps every project it hosts (docs/DECISIONS.md, D135),
-//! holding look-alike records: the same handles, titles, scope names and decision numbers. Nothing
-//! read, resolved, routed or made through one project's graph ever holds or touches a record of the
-//! other (D38): not a list, a lookup by id or by the start of one, a former id, a decision number,
-//! a reference in a text, a routing plan, nor a live query, before or after it was opened, in the
-//! shapes the page, the wallboard and `fwd watch` open them.
+//! holding look-alike records: the same handles, titles, scope names and decision numbers. A
+//! project is a grouping and the filter of every list, not a wall (D176, D181): every list and every
+//! live query of one project holds that project's records alone, in the shapes the page, the
+//! wallboard and `fwd watch` open them, before or after it was opened, and routing in one project
+//! tells that project's principals alone; while an id someone types, an id a record holds and a
+//! record's relations reach a record of the other project, and what they give says which project it
+//! is in. One project's graph changes none of the other's records.
 
 use ankurah::changes::ChangeSet;
 use ankurah::error::RetrievalError;
@@ -14,7 +16,7 @@ use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateDecision, CreateScope, CreateTask, Kind, MessageContext};
-use fwd_core::project_graph::{InProjectView, ProjectGraph, ProjectGraphError};
+use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, ProjectGraphError, Whose};
 use fwd_core::query::with_id;
 use fwd_core::{decision_log, naming, routing};
 use serde_json::json;
@@ -169,7 +171,7 @@ fn ids_of<V: View>(views: &[V]) -> Vec<EntityId> {
 }
 
 #[tokio::test]
-async fn every_read_of_one_project_holds_its_own_records_and_none_of_the_others() -> Result<()> {
+async fn every_list_of_one_project_holds_its_own_records_and_none_of_the_others() -> Result<()> {
     let (alpha, beta) = two_projects().await?;
     let a = populate(&alpha).await?;
     populate(&beta).await?;
@@ -194,14 +196,10 @@ async fn every_read_of_one_project_holds_its_own_records_and_none_of_the_others(
     assert_eq!(ids_of(&ready), vec![a.cap]);
     let open: Vec<TaskView> = alpha.fetch("status = 'open'").await?;
     none_of(&others, "the open tasks", ids_of(&open));
-    let edges = ops::holding_edges(&alpha, RelationKind::DependsOn).await?;
-    none_of(&others, "the dependencies", edges.iter().flat_map(|e| [e.id, e.from, e.to]));
-    assert_eq!(edges.len(), 1);
-    none_of(&others, "the relations from a task", ids_of(&ops::relations_from(&alpha, a.retry, None).await?));
-    none_of(&others, "the relations to a task", ids_of(&ops::relations_to(&alpha, a.cap, None).await?));
-    assert_eq!(ops::worked_in(&alpha, a.retry).await?, vec![a.scope]);
-    assert_eq!(ids_of(&ops::steps(&alpha, a.retry).await?).len(), 1);
-    none_of(&others, "the steps", ops::steps(&alpha, a.retry).await?.iter().map(|r| r.from_id().expect("an end")));
+    let relations: Vec<RelationView> = alpha.all().await?;
+    none_of(&others, "every relation", ids_of(&relations));
+    let dependencies: Vec<RelationView> = alpha.fetch("kind = 'depends_on'").await?;
+    assert_eq!(ids_of(&dependencies).len(), 1);
     let about = ops::messages_about(&alpha, "task", a.retry).await?;
     none_of(&others, "the messages on a task", ids_of(&about));
     assert_eq!(about.len(), 1);
@@ -218,58 +216,98 @@ async fn every_read_of_one_project_holds_its_own_records_and_none_of_the_others(
     Ok(())
 }
 
+/// Fails unless `project` is beta, as the graph of alpha names it.
+fn beta_named(project: &Whose) {
+    assert!(matches!(project, Whose::Other(p) if p.name == "beta"), "{project:?}");
+}
+
 #[tokio::test]
-async fn a_record_of_the_other_project_is_never_found_resolved_edited_or_made() -> Result<()> {
+async fn a_typed_id_a_held_id_and_a_records_relations_reach_the_other_project_and_name_it() -> Result<()> {
     let (alpha, beta) = two_projects().await?;
     let a = populate(&alpha).await?;
     let b = populate(&beta).await?;
 
-    // By its whole id: not found, as an id that names nothing is not.
-    let nothing = EntityId::random();
-    let absent = alpha.get::<TaskView>(nothing).await.expect_err("an id that names nothing");
-    assert!(matches!(absent, RetrievalError::EntityNotFound(id) if id == nothing), "{absent:?}");
-    let refused = alpha.get::<TaskView>(b.retry).await.expect_err("beta's task");
-    assert!(matches!(refused, RetrievalError::EntityNotFound(id) if id == b.retry), "{refused:?}");
-    for id in [b.daniel, b.retry, b.question, b.decision, b.scope, b.anchor] {
-        assert_eq!(ops::kind_of(&alpha, id).await, None, "{id}");
-        assert_eq!(ops::describe(&alpha, id).await, None, "{id}");
-    }
-    // By the start of its id, its number, or a former id, whole or as a prefix.
+    // An id someone types, whole, by its start, or as a former id whole or as a prefix, names
+    // beta's record, and says it is beta's; D1 is alpha's own, since a number is its project's.
     let start = |id: EntityId| id.to_base64()[..8].to_string();
-    for (named, kinds) in [(start(b.retry), ops::ANY), (start(b.question), ops::ANY), (start(b.cited), ops::ANY)] {
-        let found = ops::resolve_id(&alpha, &named, kinds).await;
-        assert!(found.is_err(), "`{named}` names nothing in alpha: {found:?}");
+    for (named, record) in [
+        (b.retry.to_base64(), b.retry),
+        (start(b.retry), b.retry),
+        (start(b.question), b.question),
+        (b.cited.to_base64(), b.retry),
+        (start(b.cited), b.retry),
+    ] {
+        let found = ops::locate(&alpha, &named, ops::ANY).await?;
+        assert_eq!(found.id, record, "`{named}` names beta's record");
+        beta_named(&found.project);
     }
+    assert_eq!(ops::locate(&alpha, &start(a.retry), ops::ANY).await?.project, Whose::This);
     assert_eq!(ops::resolve_id(&alpha, "D1", &[Kind::Decision]).await?, a.decision, "D1 is alpha's own D1");
     assert_eq!(ops::resolve_id(&alpha, &a.cited.to_base64(), ops::ANY).await?, a.retry, "alpha's own former id");
-    let other_former = ops::resolve_id(&alpha, &b.cited.to_base64(), ops::ANY).await?;
-    assert_ne!(other_former, b.retry, "beta's former id names nothing of beta's in alpha");
-    assert_eq!(ops::kind_of(&alpha, other_former).await, None);
 
-    // Named in a text: refused, as an id that names nothing is.
-    for typed in [format!("see [[{}]]", b.retry), format!("see [[{}]]", start(b.retry)), format!("see [[{}]]", b.cited)]
-    {
-        let posted = ops::post_message(&alpha, a.daniel, &typed, Priority::Next, MessageContext::default()).await;
-        assert!(posted.is_err(), "{typed} names nothing in alpha");
+    // An id a record holds is followed into beta, which every reader names beside the record.
+    for id in [b.daniel, b.retry, b.question, b.decision, b.scope, b.anchor] {
+        assert!(ops::kind_of(&alpha, id).await.is_some(), "{id}");
+        let (_, name) = ops::describe(&alpha, id).await.expect("described");
+        assert!(name.ends_with(" in beta"), "{name}");
+        assert_eq!(ops::reference_json(&alpha, id).await["project"], "beta");
     }
+    assert!(matches!(alpha.follow::<TaskView>(b.retry).await?, Followed::Held { project: Whose::Other(_), .. }));
+    // Named in a text: alpha's message names beta's task, and a handle both projects have names
+    // alpha's principal, since a handle is its project's.
     let posted =
-        ops::post_message(&alpha, a.daniel, "ask @impl-alice", Priority::Next, MessageContext::default()).await?;
+        ops::post_message(&alpha, a.daniel, &format!("see [[{}]]", start(b.retry)), Priority::Next, Default::default())
+            .await?;
+    assert_eq!(ops::text(alpha.get::<MessageView>(posted).await?.content())?, format!("see [[{}]]", b.retry));
+    let posted = ops::post_message(&alpha, a.daniel, "ask @impl-alice", Priority::Next, Default::default()).await?;
     let stored = ops::text(alpha.get::<MessageView>(posted).await?.content())?;
     assert_eq!(stored, format!("ask [[{}]]", a.alice), "a handle both projects have names alpha's");
 
-    // Changed or made through alpha's graph: refused.
+    // A relation made in alpha joins alpha's task to beta's, and shows on beta's task wherever
+    // its relations are read.
+    let link = ops::link(&alpha, a.daniel, RelationKind::DependsOn, a.cap, b.cap, None, false, json!({})).await?;
+    assert!(ids_of(&ops::relations_to(&beta, b.cap, None).await?).contains(&link));
+    assert!(ids_of(&ops::relations_from(&alpha, a.cap, None).await?).contains(&link));
+    let dependency = ops::dependencies(&alpha, a.cap).await?;
+    assert!(
+        matches!(dependency.as_slice(), [fwd_core::rules::Dependency::Elsewhere { project, .. }] if project == "beta")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_projects_graph_changes_none_of_the_others_records() -> Result<()> {
+    let (alpha, beta) = two_projects().await?;
+    let a = populate(&alpha).await?;
+    let b = populate(&beta).await?;
+
+    // Read by its id through alpha's graph, beta's record is not alpha's to change: a command whose
+    // subject it is runs in beta.
+    let refused = alpha.get::<TaskView>(b.retry).await.expect_err("beta's task");
+    assert!(matches!(refused, RetrievalError::EntityNotFound(id) if id == b.retry), "{refused:?}");
     let theirs: TaskView = beta.get(b.retry).await?;
     let trx = alpha.begin();
-    assert!(trx.edit(&theirs).is_err(), "alpha's transaction edits none of beta's records");
+    let edited = trx.edit(&theirs).map(|_| ()).expect_err("alpha's transaction edits none of beta's records");
+    assert!(matches!(edited, ProjectGraphError::OfAnotherProject { record, .. } if record == b.retry), "{edited:?}");
     let made = trx.create(&FormerId { project: beta.project(), former: "x".repeat(43), record: b.retry }).await;
     assert!(matches!(made, Err(ProjectGraphError::OtherProject { .. })), "{made:?}");
+    let named = alpha.ensure_own(&theirs).await.expect_err("named");
+    assert!(named.to_string().contains("project `beta`"), "{named}");
     // And operations on beta's records through alpha's graph change nothing of beta's.
     assert!(ops::transition(&alpha, a.daniel, b.retry, fwd_core::rules::Verb::Cancel, Some("no")).await.is_err());
     assert!(ops::assign(&alpha, a.daniel, b.cap, Some(a.alice)).await.is_err());
-    assert!(ops::add_step(&alpha, a.daniel, b.retry, a.anchor).await.is_err());
+    assert!(
+        ops::add_step(&alpha, a.daniel, b.retry, a.anchor).await.is_ok(),
+        "alpha's step on beta's task is alpha's relation"
+    );
     assert_eq!(beta.get::<TaskView>(b.retry).await?.status()?, TaskStatus::InProgress);
     assert_eq!(ops::assignee_of(&beta.get::<TaskView>(b.cap).await?)?, None);
-    assert_eq!(ops::steps(&beta, b.retry).await?.len(), 1);
+    // A relation beta made, read on alpha's side, is refused there, naming beta.
+    let from_beta = ops::link(&beta, b.daniel, RelationKind::RelatesTo, b.cap, a.cap, None, false, json!({})).await?;
+    let unlinked =
+        ops::unlink(&alpha, a.daniel, RelationKind::RelatesTo, b.cap, a.cap, "no").await.expect_err("beta's");
+    assert!(unlinked.to_string().contains("project `beta`"), "{unlinked}");
+    assert_eq!(beta.relation(from_beta).await?.status()?, RelationStatus::Accepted);
     Ok(())
 }
 
@@ -481,9 +519,10 @@ async fn a_record_moved_to_the_other_project_leaves_the_first_and_appears_in_the
         assert!(!held.contains(&task) && !held.contains(&comment), "alpha's {} still holds what moved", opened.name);
     }
     assert!(alpha.get::<TaskView>(task).await.is_err() && alpha.get::<MessageView>(comment).await.is_err());
-    assert_eq!(ops::kind_of(&alpha, task).await, None);
     assert!(ops::messages_about(&alpha, "task", task).await?.is_empty());
-    assert!(ops::resolve_id(&alpha, &task.to_base64()[..8], ops::ANY).await.is_err());
+    let typed = ops::locate(&alpha, &task.to_base64()[..8], ops::ANY).await?;
+    assert_eq!(typed.id, task, "its id, typed in alpha, names it in beta");
+    beta_named(&typed.project);
     let theirs_now = |name: &str| (theirs.0.iter().find(|o| o.name == name).expect("a query").holds)();
     assert!(theirs_now("tasks").contains(&task) && theirs_now("messages").contains(&comment));
     assert_eq!(beta.get::<TaskView>(task).await?.title()?, "Move me");

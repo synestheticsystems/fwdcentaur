@@ -8,7 +8,7 @@
 use crate::former_ids::FormerIds;
 use crate::model::*;
 use crate::naming;
-use crate::project_graph::{ProjectGraph, ProjectTransaction};
+use crate::project_graph::{Followed, ProjectGraph, ProjectTransaction, Referent, Whose};
 use crate::query::{with_id, with_ids, with_string};
 use crate::references::Named;
 use crate::rules::{self, DecisionMove, Edge, Readiness, TaskSnapshot, Verb};
@@ -502,7 +502,7 @@ pub async fn add_principal(
         );
     }
     if let (Some(subject), None, Some(bound)) = (subject, &existing, acting) {
-        let bound = at_handle(graph, bound).await;
+        let bound = at_handle(graph, bound).await?;
         let bound = bound.trim_start_matches('@');
         bail!(
             "this command runs as {}, which is @{bound} already, and a subject binds one principal, so an agent names itself once: to select another role, `fwd principal role {bound} <role>`; an agent relaunched to carry on another's job names itself once and succeeds it, `fwd principal succeed <its name>`",
@@ -635,7 +635,7 @@ pub async fn bind_principal(
         );
     }
     if let Some(successor) = p.succeeded_by()?.map(EntityId::from) {
-        let successor = at_handle(graph, successor).await;
+        let successor = at_handle(graph, successor).await?;
         bail!(
             "`@{handle}` was succeeded by {successor}, who carries on its job: an agent relaunched to carry it on names itself as the successor of {successor}, `fwd principal add <name> --succeeds {}`",
             successor.trim_start_matches('@')
@@ -686,7 +686,7 @@ pub async fn admin_bind(graph: &ProjectGraph, name: &str, subject: &str) -> Resu
         );
     }
     if let Some(successor) = p.succeeded_by()?.map(EntityId::from) {
-        bail!("`@{handle}` was succeeded by {}, who carries on its job", at_handle(graph, successor).await);
+        bail!("`@{handle}` was succeeded by {}, who carries on its job", at_handle(graph, successor).await?);
     }
     match p.subject().ok().flatten() {
         Some(bound) if bound == subject => return Ok(p.id()),
@@ -864,7 +864,7 @@ pub async fn add_successor(
         );
     }
     if let (Some(subject), Some(bound)) = (subject, acting) {
-        let bound = at_handle(graph, bound).await;
+        let bound = at_handle(graph, bound).await?;
         bail!(
             "this command runs as {}, which is {bound} already, and a subject binds one principal: it carries on another's job with `fwd principal succeed <its name>`",
             subject::words(subject)
@@ -935,7 +935,7 @@ async fn predecessor(
         );
     }
     if let Some(before) = old.succeeded_by()?.map(EntityId::from) {
-        let before_handle = at_handle(graph, before).await;
+        let before_handle = at_handle(graph, before).await?;
         if Some(before) == heir {
             bail!("{before_handle} succeeded `@{old_handle}` already");
         }
@@ -1246,50 +1246,83 @@ pub async fn person_by_handle(graph: &ProjectGraph, name: &str) -> Result<Entity
     }
 }
 
-/// `@handle` for a principal, or the start of its id when it cannot be read: how a refusal names
-/// a person.
-async fn at_handle(graph: &ProjectGraph, principal: EntityId) -> String {
-    match graph.get::<PrincipalView>(principal).await.ok().and_then(|p| p.handle().ok()) {
-        Some(handle) => format!("@{handle}"),
-        None => principal.to_base64().chars().take(8).collect(),
+/// A principal's handle as a reader is shown it, followed wherever in the node the principal is
+/// (docs/DECISIONS.md, D176): its handle, with its project's name after it when that is another
+/// (`alice in beta`), since a handle names someone else there; the start of its id, said to be one
+/// that cannot be followed here, when the node does not hold it ([`not_followed`]).
+pub async fn handle_of(graph: &ProjectGraph, principal: EntityId) -> Result<String> {
+    Ok(match graph.follow::<PrincipalView>(principal).await? {
+        Followed::Held { project, found, .. } => in_project(found.handle()?, &project),
+        Followed::NotHeld => not_followed(&principal.to_base64()),
+    })
+}
+
+/// `@` and the handle [`handle_of`] shows: how a refusal names a person.
+async fn at_handle(graph: &ProjectGraph, principal: EntityId) -> Result<String> {
+    Ok(format!("@{}", handle_of(graph, principal).await?))
+}
+
+/// `name`, the name of a record of `project`, as a reader of another project's graph is shown it:
+/// with that project's name after it (`Connector in beta`), since a title, a handle or a decision's
+/// number names something else in another project.
+pub fn in_project(name: String, project: &Whose) -> String {
+    match project {
+        Whose::This => name,
+        Whose::Other(p) => format!("{name} in {}", p.name),
     }
+}
+
+/// How a reader is shown an id a record holds that the node holds no record for: the start of the
+/// id, and that it cannot be followed here.
+pub fn not_followed(id: &str) -> String {
+    format!("{} (cannot be followed here)", id.chars().take(8).collect::<String>())
 }
 
 // ---------------------------------------------------------------------------------------------
 // Relations
 
-/// The relations of `kind` that hold for the rules (`rules::holds`): the accepted ones, and for
-/// steps the checked ones as well.
-pub async fn holding_edges(graph: &ProjectGraph, kind: RelationKind) -> Result<Vec<Edge>> {
-    let mut views: Vec<RelationView> = graph.fetch(format!("kind = '{kind}' AND status = 'accepted'").as_str()).await?;
-    if kind == RelationKind::StepOf {
-        views.extend(graph.fetch::<RelationView>(format!("kind = '{kind}' AND status = 'resolved'").as_str()).await?);
+/// The relations of `kind` that hold for the rules (`rules::holds`: the accepted ones, and for
+/// steps the checked ones as well) that lead on from `start`, however far, wherever each was made:
+/// what a new relation of `kind` to `start` would close a cycle along. Read record by record, since
+/// a dependency, a parent or a step may lead into another project (docs/DECISIONS.md, D176), so a
+/// cycle through several projects is refused as one within a project is.
+pub async fn edges_reachable(graph: &ProjectGraph, kind: RelationKind, start: EntityId) -> Result<Vec<Edge>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut ahead = vec![start];
+    let mut out = Vec::new();
+    while let Some(at) = ahead.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        for r in graph.relations_from(at, Some(kind)).await? {
+            if rules::holds(kind, r.status()?) {
+                let edge = edge_of(&r)?;
+                ahead.push(edge.to);
+                out.push(edge);
+            }
+        }
     }
-    views.iter().map(edge_of).collect()
+    Ok(out)
 }
 
 pub fn edge_of(v: &RelationView) -> Result<Edge> {
     Ok(Edge { id: v.id(), kind: v.kind()?, from: v.from_id()?, to: v.to_id()?, status: v.status()? })
 }
 
+/// The relations from `from`, of `kind` when one is given, whichever project made them
+/// (`ProjectGraph::relations_from`).
 pub async fn relations_from(
     graph: &ProjectGraph,
     from: EntityId,
     kind: Option<RelationKind>,
 ) -> Result<Vec<RelationView>> {
-    let pred = match kind {
-        Some(k) => format!("from_id = ? AND kind = '{k}'"),
-        None => "from_id = ?".to_string(),
-    };
-    Ok(graph.fetch(with_id(&pred, from)?).await?)
+    Ok(graph.relations_from(from, kind).await?)
 }
 
+/// The relations to `to`, of `kind` when one is given, whichever project made them
+/// (`ProjectGraph::relations_to`).
 pub async fn relations_to(graph: &ProjectGraph, to: EntityId, kind: Option<RelationKind>) -> Result<Vec<RelationView>> {
-    let pred = match kind {
-        Some(k) => format!("to_id = ? AND kind = '{k}'"),
-        None => "to_id = ?".to_string(),
-    };
-    Ok(graph.fetch(with_id(&pred, to)?).await?)
+    Ok(graph.relations_to(to, kind).await?)
 }
 
 /// What one end of a relation may be ([`Join`]).
@@ -1414,13 +1447,14 @@ pub fn ends_refused(
         .collect();
     Some(match (nothing.as_slice(), from.1, to.1) {
         ([], Some(from), Some(to)) => format!("`{kind}` joins {joined}, not {} to {}", one(from), one(to)),
-        ([id], ..) => format!("`{kind}` joins {joined}, and {id} names nothing in this project"),
-        (both, ..) => format!("`{kind}` joins {joined}, and {} name nothing in this project", both.join(" and ")),
+        ([id], ..) => format!("`{kind}` joins {joined}, and {id} names nothing the node holds"),
+        (both, ..) => format!("`{kind}` joins {joined}, and {} name nothing the node holds", both.join(" and ")),
     })
 }
 
 /// Refuses a relation of `kind` from `from` to `to` whose ends are not of kinds it joins
-/// ([`ends_refused`]), reading what each id names in the project, a notification included.
+/// ([`ends_refused`]), reading what each id names wherever in the node it is, a notification
+/// included.
 async fn check_ends(graph: &ProjectGraph, kind: RelationKind, from: EntityId, to: EntityId) -> Result<()> {
     if joins(kind).iter().all(|j| j.from == End::Anything && j.to == End::Anything) {
         return Ok(());
@@ -1431,12 +1465,14 @@ async fn check_ends(graph: &ProjectGraph, kind: RelationKind, from: EntityId, to
     }
 }
 
-/// What `id` names in the project, as a relation's end, a notification included: none when it
-/// names nothing here.
+/// What `id` names wherever in the node it is, as a relation's end, a notification included: a
+/// relation's end may be a record of any project (docs/DECISIONS.md, D176). None when the node
+/// holds nothing by that id.
 async fn end_kind(graph: &ProjectGraph, id: EntityId) -> Option<Kind> {
     match kind_of(graph, id).await {
         Some(kind) => Some(kind),
-        None => graph.get::<NotificationView>(id).await.is_ok().then_some(Kind::Notification),
+        None => matches!(graph.follow::<NotificationView>(id).await, Ok(Followed::Held { .. }))
+            .then_some(Kind::Notification),
     }
 }
 
@@ -1483,6 +1519,7 @@ pub async fn link(
         let already = relations_from(graph, from, Some(RelationKind::Cites)).await?;
         if let Some(r) = already.iter().find(|r| r.to_id().ok() == Some(to) && standing(r)) {
             if !propose && r.status()? == RelationStatus::Proposed {
+                graph.ensure_own(r).await?;
                 let trx = graph.begin();
                 let m = trx.edit(r)?;
                 m.status()?.set(&RelationStatus::Accepted)?;
@@ -1494,13 +1531,13 @@ pub async fn link(
             return Ok(r.id());
         }
     }
-    if kind == RelationKind::Supersedes && graph.get::<DecisionView>(to).await.is_ok() {
+    if kind == RelationKind::Supersedes && matches!(graph.follow::<DecisionView>(to).await?, Followed::Held { .. }) {
         bail!(
             "a decision is superseded with `fwd decision supersede <old> <new> --note \"...\"`, which also marks it superseded and records why"
         );
     }
     if rules::must_be_acyclic(kind) {
-        let edges = holding_edges(graph, kind).await?;
+        let edges = edges_reachable(graph, kind, to).await?;
         if let Some(cycle) = rules::would_close_cycle(kind, from, to, &edges) {
             bail!(
                 "refused: {kind} {from} -> {to} would close a cycle: {}",
@@ -1563,7 +1600,9 @@ fn new_relation(
 /// reason. Returns how many. A supersession of one decision by another is refused: retracting it
 /// would leave the old decision Superseded with no successor, and nothing moves a superseded
 /// decision back, so a supersession is never undone; a new decision supersedes the successor
-/// instead.
+/// instead. A relation another project made, which this project's record holds as one of its
+/// relations, is refused, naming that project: only the project that made it changes it
+/// (`ProjectGraph::ensure_own`).
 pub async fn unlink(
     graph: &ProjectGraph,
     by: EntityId,
@@ -1581,12 +1620,16 @@ pub async fn unlink(
         }
     }
     let candidates = relations_from(graph, from, Some(kind)).await?;
+    let mut holding = Vec::new();
+    for r in candidates.iter().filter(|r| r.to_id().ok() == Some(to)) {
+        if rules::holds(kind, r.status()?) {
+            graph.ensure_own(r).await?;
+            holding.push(r);
+        }
+    }
     let mut n = 0;
     let trx = graph.begin();
-    for r in candidates.iter().filter(|r| r.to_id().ok() == Some(to)) {
-        if !rules::holds(kind, r.status()?) {
-            continue;
-        }
+    for r in holding {
         let m = trx.edit(r)?;
         m.status()?.set(&RelationStatus::Retracted)?;
         m.closed_by()?.set(&Some(Ref::new(by)))?;
@@ -1638,6 +1681,9 @@ pub async fn change_scopes(
     if adding.is_empty() && leaving.is_empty() {
         return Ok(());
     }
+    for r in &leaving {
+        graph.ensure_own(*r).await?;
+    }
     let t = now();
     let via = json!({"actor_id": by.to_base64()});
     let trx = graph.begin();
@@ -1664,6 +1710,8 @@ pub async fn change_scopes(
     Ok(())
 }
 
+/// Approves or rejects the proposed relation `relation`; one another project made is refused,
+/// naming that project, as [`unlink`] refuses it.
 pub async fn decide_relation(
     graph: &ProjectGraph,
     by: EntityId,
@@ -1671,12 +1719,13 @@ pub async fn decide_relation(
     approve: bool,
     reason: Option<&str>,
 ) -> Result<()> {
-    let r: RelationView = graph.get(relation).await?;
+    let r = graph.relation(relation).await?;
+    graph.ensure_own(&r).await?;
     if r.status()? != RelationStatus::Proposed {
         bail!("relation {relation} is {}, not proposed", r.status()?);
     }
     if approve && rules::must_be_acyclic(r.kind()?) {
-        let edges = holding_edges(graph, r.kind()?).await?;
+        let edges = edges_reachable(graph, r.kind()?, r.to_id()?).await?;
         if let Some(cycle) = rules::would_close_cycle(r.kind()?, r.from_id()?, r.to_id()?, &edges) {
             bail!(
                 "refused: approving would close a cycle: {}",
@@ -1759,7 +1808,8 @@ fn step_via(by: EntityId) -> Value {
 /// moves alone. Checking a checked step, or unchecking an unchecked one, leaves the step as it is.
 /// Returns what moved. Like a check before D99, it tells no one.
 pub async fn check_step(graph: &ProjectGraph, by: EntityId, edge: EntityId, check: bool) -> Result<rules::Changes> {
-    let r: RelationView = graph.get(edge).await.context("that step")?;
+    let r = graph.relation(edge).await.context("that step")?;
+    graph.ensure_own(&r).await?;
     let from = r.from_id()?;
     let highlight = r.kind()? == RelationKind::StepOf && graph.get::<CodeAnchorView>(from).await.is_ok();
     let (messages, mut relations) =
@@ -1801,7 +1851,8 @@ pub async fn remove_step(
 ) -> Result<rules::Retired> {
     let view: TaskView = graph.get(task).await.context("that task")?;
     let title = view.title()?;
-    let r: RelationView = graph.get(edge).await.context("that step")?;
+    let r = graph.relation(edge).await.context("that step")?;
+    graph.ensure_own(&r).await?;
     if r.kind()? != RelationKind::StepOf || r.to_id()? != task {
         bail!("that is not a step on the checklist of \"{title}\"");
     }
@@ -1813,8 +1864,8 @@ pub async fn remove_step(
     let (creator, assignee) = (EntityId::from(view.created_by()?), assignee_of(&view)?);
     if rules::can_remove_step(creator, assignee, by).is_err() {
         let ask = match assignee.filter(|a| *a != creator) {
-            Some(a) => format!("{} or {}", at_handle(graph, creator).await, at_handle(graph, a).await),
-            None => at_handle(graph, creator).await,
+            Some(a) => format!("{} or {}", at_handle(graph, creator).await?, at_handle(graph, a).await?),
+            None => at_handle(graph, creator).await?,
         };
         bail!("only the creator and the assignee of \"{title}\" take a step off its checklist; ask {ask}");
     }
@@ -1890,12 +1941,11 @@ pub async fn first_thread(graph: &ProjectGraph, anchor: EntityId) -> Result<Opti
 }
 
 /// The messages on the highlight `anchor` and its `step_of` relations: what moves together when one
-/// of them moves.
+/// of them moves. A step another project made, of the highlight on one of that project's tasks, is
+/// left out: only the project that made a relation changes it, so it stays as it is.
 async fn highlight_parts(graph: &ProjectGraph, anchor: EntityId) -> Result<(Vec<MessageView>, Vec<RelationView>)> {
-    Ok((
-        messages_about(graph, "anchor", anchor).await?,
-        relations_from(graph, anchor, Some(RelationKind::StepOf)).await?,
-    ))
+    let steps = graph.relations_from(anchor, Some(RelationKind::StepOf)).await?;
+    Ok((messages_about(graph, "anchor", anchor).await?, steps.into_iter().filter(|r| graph.owns(r)).collect()))
 }
 
 /// Writes `changes` in one transaction: each message it resolves gets `by` and the time as who
@@ -2027,15 +2077,15 @@ pub async fn create_task(graph: &ProjectGraph, by: EntityId, spec: CreateTask) -
         }
     }
     // Pre-check every dependency before writing anything.
-    let dep_edges = holding_edges(graph, RelationKind::DependsOn).await?;
-    let sub_edges = holding_edges(graph, RelationKind::SubtaskOf).await?;
     for after in &spec.after {
-        if rules::would_close_cycle(RelationKind::DependsOn, probe, *after, &dep_edges).is_some() {
+        let edges = edges_reachable(graph, RelationKind::DependsOn, *after).await?;
+        if rules::would_close_cycle(RelationKind::DependsOn, probe, *after, &edges).is_some() {
             bail!("refused: depending on {after} would close a cycle");
         }
     }
     if let Some(under) = spec.under {
-        if rules::would_close_cycle(RelationKind::SubtaskOf, probe, under, &sub_edges).is_some() {
+        let edges = edges_reachable(graph, RelationKind::SubtaskOf, under).await?;
+        if rules::would_close_cycle(RelationKind::SubtaskOf, probe, under, &edges).is_some() {
             bail!("refused: nesting under {under} would close a cycle");
         }
     }
@@ -2091,20 +2141,26 @@ pub async fn create_task(graph: &ProjectGraph, by: EntityId, spec: CreateTask) -
     Ok(task)
 }
 
-/// The accepted `depends_on` targets of a task with their statuses (`None` when unavailable).
-pub async fn dependencies(graph: &ProjectGraph, task: EntityId) -> Result<Vec<(EntityId, Option<TaskStatus>)>> {
-    let rels = relations_from(graph, task, Some(RelationKind::DependsOn)).await?;
+/// The accepted `depends_on` targets of a task, each followed wherever in the node it leads
+/// (`ProjectGraph::follow`, docs/DECISIONS.md, D176): a task of the project with its status, a task
+/// of another project with that project's name and its status, and a target the node holds no task
+/// for, which cannot be followed here.
+pub async fn dependencies(graph: &ProjectGraph, task: EntityId) -> Result<Vec<rules::Dependency>> {
     let mut out = Vec::new();
-    for r in rels {
+    for r in graph.relations_from(task, Some(RelationKind::DependsOn)).await? {
         if r.status()? != RelationStatus::Accepted {
             continue;
         }
         let target: EntityId = r.to_id()?;
-        let status = match graph.get::<TaskView>(target).await {
-            Ok(t) => t.status().ok(),
-            Err(_) => None,
-        };
-        out.push((target, status));
+        out.push(match graph.follow::<TaskView>(target).await? {
+            Followed::Held { record, project: Whose::This, found } => {
+                rules::Dependency::Here(record, Some(found.status()?))
+            }
+            Followed::Held { record, project: Whose::Other(p), found } => {
+                rules::Dependency::Elsewhere { task: record, project: p.name, status: found.status()? }
+            }
+            Followed::NotHeld => rules::Dependency::NotHeld(target),
+        });
     }
     Ok(out)
 }
@@ -2190,15 +2246,17 @@ pub async fn ready_tasks(graph: &ProjectGraph, me: Option<EntityId>) -> Result<V
     Ok(ranked.into_iter().map(|(_, _, t)| t).collect())
 }
 
-/// The scopes a task is worked in ([`worked_in`]), each with what the start rule needs to name it.
+/// The scopes a task is worked in ([`worked_in`]), each followed wherever in the node it is, with
+/// what the start rule needs to name it: its title, with its project's name when that is another,
+/// and its status; a scope the node does not hold is named as one that cannot be followed here.
 async fn scopes_worked_in(graph: &ProjectGraph, task: EntityId) -> Result<Vec<rules::ScopeSnapshot>> {
     let mut out = Vec::new();
     for id in worked_in(graph, task).await? {
-        let scope = graph.get::<ScopeView>(id).await.ok();
-        out.push(rules::ScopeSnapshot {
-            id,
-            title: scope.as_ref().and_then(|s| s.title().ok()).unwrap_or_default(),
-            status: scope.as_ref().and_then(|s| s.status().ok()),
+        out.push(match graph.follow::<ScopeView>(id).await? {
+            Followed::Held { project, found, .. } => {
+                rules::ScopeSnapshot { id, title: in_project(found.title()?, &project), status: Some(found.status()?) }
+            }
+            Followed::NotHeld => rules::ScopeSnapshot { id, title: not_followed(&id.to_base64()), status: None },
         });
     }
     Ok(out)
@@ -2233,7 +2291,7 @@ pub async fn start(graph: &ProjectGraph, by: EntityId, task: EntityId, scope: Op
     match rules::can_start(view.status()?, assignee_of(&view)?, by) {
         Err(rules::RuleError::AssignedToAnother { assignee }) => bail!(
             "task is assigned to {}; only its assignee starts it (`fwd task assign <task> @<you>` first)",
-            at_handle(graph, assignee).await
+            at_handle(graph, assignee).await?
         ),
         other => other?,
     }
@@ -3384,10 +3442,10 @@ pub async fn edit_message(graph: &ProjectGraph, by: EntityId, message: EntityId,
     let successors = crate::routing::Successors::load(graph).await?.chain(author);
     match rules::can_edit_message(author, &successors, by) {
         Err(rules::RuleError::NeitherAuthorNorSuccessor { author, successor }) => {
-            let author = at_handle(graph, author).await;
+            let author = at_handle(graph, author).await?;
             let (written_by, ask) = match successor {
                 Some(successor) => {
-                    let successor = at_handle(graph, successor).await;
+                    let successor = at_handle(graph, successor).await?;
                     (format!("{author}'s, whom {successor} succeeded"), successor)
                 }
                 None => (format!("{author}'s"), author),
@@ -3625,7 +3683,7 @@ async fn resolve_reference(graph: &ProjectGraph, written: &crate::references::Wr
         Written::Bracketed(inner) => match inner.parse::<EntityId>() {
             Ok(id) => match current_record(graph, id).await {
                 Some((record, _)) => Ok(record),
-                None => bail!("nothing in this project has that id"),
+                None => bail!("nothing the node holds has that id"),
             },
             Err(_) => resolve_id(graph, inner, MENTIONABLE).await,
         },
@@ -3636,64 +3694,75 @@ async fn resolve_reference(graph: &ProjectGraph, written: &crate::references::Wr
 pub const MENTIONABLE: &[Kind] =
     &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scope, Kind::Anchor, Kind::Relation, Kind::Principal];
 
-/// Which of the [`MENTIONABLE`] kinds `id` is, if any.
+/// Which of the [`MENTIONABLE`] kinds the record `id` is, wherever in the node it is: an id names
+/// a record of any project (docs/DECISIONS.md, D176, D181). None when the node holds no record by
+/// that id.
 pub async fn kind_of(graph: &ProjectGraph, id: EntityId) -> Option<Kind> {
-    for kind in MENTIONABLE {
-        let found = match kind {
-            Kind::Task => graph.get::<TaskView>(id).await.is_ok(),
-            Kind::Message => graph.get::<MessageView>(id).await.is_ok(),
-            Kind::Decision => graph.get::<DecisionView>(id).await.is_ok(),
-            Kind::Scope => graph.get::<ScopeView>(id).await.is_ok(),
-            Kind::Anchor => graph.get::<CodeAnchorView>(id).await.is_ok(),
-            Kind::Relation => graph.get::<RelationView>(id).await.is_ok(),
-            Kind::Principal => graph.get::<PrincipalView>(id).await.is_ok(),
-            Kind::Notification => false,
-        };
-        if found {
-            return Some(*kind);
-        }
+    match reference(graph, id).await {
+        Ok(Reference::Followed { record, kind, .. }) if record == id => Some(kind),
+        _ => None,
     }
-    None
 }
 
-/// The record `id` names in the project, with its kind: the record itself, or, for an id it had
-/// before it was renumbered, which a text written before then stores (`former_ids`), the record it
-/// is now. None when `id` names nothing here.
+/// The record `id` names wherever in the node it is, with its kind: the record itself, or, for an
+/// id it had before it was renumbered, which a text written before then stores (`former_ids`), the
+/// record it is now. None when `id` names nothing the node holds.
 pub async fn current_record(graph: &ProjectGraph, id: EntityId) -> Option<(EntityId, Kind)> {
-    if let Some(kind) = kind_of(graph, id).await {
-        return Some((id, kind));
+    match reference(graph, id).await {
+        Ok(Reference::Followed { record, kind, .. }) => Some((record, kind)),
+        _ => None,
     }
-    let record = FormerIds::named_in(graph, &id.to_base64()).await.ok()??;
-    Some((record, kind_of(graph, record).await?))
 }
 
 /// What something is and a name to show for it, as a reference or a step reads: a person as
 /// `@handle`, a task and a scope by title, a decision as `D12 (title)`, code as `path:lines` and a
-/// whole file as its path, a message by its first words, a relation by its kind. An id the record
-/// had before it was renumbered names the record as its id does. None when `id` names nothing here.
+/// whole file as its path, a message by its first words, a relation by its kind ([`named`]); a
+/// record of another project with that project's name after it ([`in_project`]), since a title, a
+/// handle or a decision's number names something else there. An id the record had before it was
+/// renumbered names the record as its id does. None when `id` names nothing the node holds.
 pub async fn describe(graph: &ProjectGraph, id: EntityId) -> Option<(Kind, String)> {
-    let (id, kind) = current_record(graph, id).await?;
-    let name = match kind {
-        Kind::Task => graph.get::<TaskView>(id).await.ok()?.title().ok()?,
-        Kind::Decision => {
-            let d = graph.get::<DecisionView>(id).await.ok()?;
-            format!("D{} ({})", d.number().ok()?, d.title().ok()?)
+    match reference(graph, id).await {
+        Ok(Reference::Followed { kind, name, project, .. }) => Some((kind, in_project(name, &project))),
+        _ => None,
+    }
+}
+
+/// A record's kind and the name [`describe`] gives it, from what was read of it.
+pub fn named(referent: &Referent) -> (Kind, String) {
+    match referent {
+        Referent::Task { title, .. } => (Kind::Task, title.clone()),
+        Referent::Decision { number, title, .. } => (Kind::Decision, format!("D{number} ({title})")),
+        Referent::Scope { title, .. } => (Kind::Scope, title.clone()),
+        Referent::Anchor { path, lines } => {
+            (Kind::Anchor, crate::anchor_name::place(path, crate::anchor_name::lines(*lines)))
         }
-        Kind::Scope => graph.get::<ScopeView>(id).await.ok()?.title().ok()?,
-        Kind::Anchor => {
-            let a = graph.get::<CodeAnchorView>(id).await.ok()?;
-            crate::anchor_name::place(&a.path().ok()?, crate::anchor_name::lines(lines_of(&a).ok()?))
+        Referent::Message { words, .. } => (Kind::Message, format!("“{words}”")),
+        Referent::Relation { kind } => (Kind::Relation, format!("a {kind} relation")),
+        Referent::Principal { handle } => (Kind::Principal, format!("@{handle}")),
+    }
+}
+
+/// A record whose id another record holds, as a reader is shown it: what
+/// [`ProjectGraph::follow_any`] found, named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reference {
+    /// The node holds it: its id now, its kind, its name as [`named`] gives it, and its project,
+    /// which a reader names beside a record of another project.
+    Followed { record: EntityId, kind: Kind, name: String, project: Whose },
+    /// The node holds no record by that id: shown as one that cannot be followed here.
+    NotFollowed,
+}
+
+/// The record `id`, which a record holds, named for a reader wherever in the node it is
+/// (docs/DECISIONS.md, D176): [`ProjectGraph::follow_any`], named as [`named`] names things.
+pub async fn reference(graph: &ProjectGraph, id: EntityId) -> Result<Reference> {
+    Ok(match graph.follow_any(id).await? {
+        Followed::Held { record, project, found } => {
+            let (kind, name) = named(&found);
+            Reference::Followed { record, kind, name, project }
         }
-        Kind::Message => {
-            let m = graph.get::<MessageView>(id).await.ok()?;
-            let words = crate::reason::first_words(&text(m.content()).unwrap_or_default(), crate::reason::NAME_WORDS);
-            format!("“{words}”")
-        }
-        Kind::Relation => format!("a {} relation", graph.get::<RelationView>(id).await.ok()?.kind().ok()?),
-        Kind::Principal => format!("@{}", graph.get::<PrincipalView>(id).await.ok()?.handle().ok()?),
-        Kind::Notification => return None,
-    };
-    Some((kind, name))
+        Followed::NotHeld => Reference::NotFollowed,
+    })
 }
 
 /// The references of a stored message text, in order, as the JSON of a message lists them: each
@@ -3714,9 +3783,11 @@ pub async fn describe_named(graph: &ProjectGraph, named: &Named) -> Option<(Kind
     let (kind, name) = describe(graph, named.id).await?;
     match &named.version {
         Some(version) if kind == Kind::Anchor => {
-            let (anchor, _) = current_record(graph, named.id).await?;
-            let a = graph.get::<CodeAnchorView>(anchor).await.ok()?;
-            Some((kind, crate::anchor_name::AnchorName::file_at(&a.path().ok()?, version).text()))
+            let Ok(Followed::Held { project, found, .. }) = graph.follow::<CodeAnchorView>(named.id).await else {
+                return None;
+            };
+            let at = crate::anchor_name::AnchorName::file_at(&found.path().ok()?, version).text();
+            Some((kind, in_project(at, &project)))
         }
         _ => Some((kind, name)),
     }
@@ -3728,13 +3799,11 @@ pub async fn describe_named(graph: &ProjectGraph, named: &Named) -> Option<(Kind
 /// before its records were renumbered names a former id, which `former_id` gives beside the id of
 /// the record it names now.
 pub async fn named_json(graph: &ProjectGraph, named: &Named) -> Value {
-    let (kind, name) = match describe_named(graph, named).await {
-        Some((kind, name)) => (kind.name(), name),
-        None => ("unknown", named.id.to_base64()),
-    };
-    let current = current_record(graph, named.id).await.map_or(named.id, |(record, _)| record);
-    let mut v = json!({"id": current.to_base64(), "kind": kind, "name": name});
-    if current != named.id {
+    let mut v = reference_json(graph, named.id).await;
+    if let Some((_, name)) = describe_named(graph, named).await {
+        v["name"] = json!(name);
+    }
+    if v["id"] != json!(named.id.to_base64()) {
         v["former_id"] = json!(named.id.to_base64());
     }
     if let Some(version) = &named.version {
@@ -3743,15 +3812,22 @@ pub async fn named_json(graph: &ProjectGraph, named: &Named) -> Value {
     v
 }
 
-/// One thing named for a reader who holds only its id, as a message's references and a batch's
-/// steps list it: its id, kind and name ([`describe`]); something that cannot be read (gone, or
-/// not synced here) has kind `unknown` and its id as its name.
+/// One thing named for a reader who holds only its id, as a message's references, a relation's
+/// other end and a batch's steps list it, wherever in the node it is: its id (now, where `id` was
+/// one it had before it was renumbered), kind and name ([`describe`]), and `project`, the name of
+/// its project when that is another. Something the node does not hold has kind `unknown`, a name
+/// saying it cannot be followed here ([`not_followed`]), and `followed` false.
 pub async fn reference_json(graph: &ProjectGraph, id: EntityId) -> Value {
-    let (kind, name) = match describe(graph, id).await {
-        Some((kind, name)) => (kind.name(), name),
-        None => ("unknown", id.to_base64()),
-    };
-    json!({"id": id.to_base64(), "kind": kind, "name": name})
+    match reference(graph, id).await {
+        Ok(Reference::Followed { record, kind, name, project }) => {
+            let mut v = json!({"id": record.to_base64(), "kind": kind.name(), "name": in_project(name, &project)});
+            if let Whose::Other(p) = project {
+                v["project"] = json!(p.name);
+            }
+            v
+        }
+        _ => json!({"id": id.to_base64(), "kind": "unknown", "name": not_followed(&id.to_base64()), "followed": false}),
+    }
 }
 
 /// A stored message text for reading in a terminal: a person as `@handle`, anything else as its
@@ -3949,8 +4025,8 @@ async fn own_notification(graph: &ProjectGraph, view: &NotificationView, by: Ent
         Err(rules::RuleError::NotTheRecipient { notification, recipient }) => bail!(
             "notification {} is {}'s, not {}'s, and a principal reads, dismisses, replies through or forwards only its own notifications, as the page marks no card of another's read: {instead}",
             notification.to_base64().chars().take(8).collect::<String>(),
-            at_handle(graph, recipient).await,
-            at_handle(graph, by).await,
+            at_handle(graph, recipient).await?,
+            at_handle(graph, by).await?,
         ),
         other => Ok(other?),
     }
@@ -4377,16 +4453,17 @@ pub enum Citable {
     Decision,
 }
 
-/// Whether `id` is a task, a message or a decision, the three things a `cites` relation joins.
+/// Whether `id` is a task, a message or a decision, the three things a `cites` relation joins,
+/// wherever in the node it is.
 pub async fn citable(graph: &ProjectGraph, id: EntityId) -> Result<Option<Citable>> {
-    Ok(if graph.get::<DecisionView>(id).await.is_ok() {
-        Some(Citable::Decision)
-    } else if graph.get::<TaskView>(id).await.is_ok() {
-        Some(Citable::Task)
-    } else if graph.get::<MessageView>(id).await.is_ok() {
-        Some(Citable::Message)
-    } else {
-        None
+    Ok(match reference(graph, id).await? {
+        Reference::Followed { record, kind, .. } if record == id => match kind {
+            Kind::Decision => Some(Citable::Decision),
+            Kind::Task => Some(Citable::Task),
+            Kind::Message => Some(Citable::Message),
+            _ => None,
+        },
+        _ => None,
     })
 }
 
@@ -4399,7 +4476,7 @@ pub async fn cite(
     decision: EntityId,
     note: Option<&str>,
 ) -> Result<EntityId> {
-    if graph.get::<DecisionView>(decision).await.is_err() {
+    if !matches!(graph.follow::<DecisionView>(decision).await?, Followed::Held { .. }) {
         bail!("{decision} is not a decision; `fwd cite` names what cites first and the decision second");
     }
     link(graph, by, RelationKind::Cites, from, decision, note, false, json!({"actor_id": by.to_base64()})).await
@@ -4620,20 +4697,18 @@ impl Kind {
         }
     }
 
-    /// The ids of every entity of this kind in the project.
-    async fn ids(self, graph: &ProjectGraph) -> Result<Vec<EntityId>> {
-        fn ids<V: ankurah::model::View>(found: Vec<V>) -> Vec<EntityId> {
-            found.iter().map(|v| v.id()).collect()
-        }
+    /// The id of every record of this kind in the node, with the record of its project: what a
+    /// typed id may name (`ProjectGraph::ids_in_every_project`).
+    async fn ids_in_every_project(self, graph: &ProjectGraph) -> Result<Vec<(EntityId, EntityId)>> {
         Ok(match self {
-            Kind::Task => ids::<TaskView>(graph.all().await?),
-            Kind::Message => ids::<MessageView>(graph.all().await?),
-            Kind::Decision => ids::<DecisionView>(graph.all().await?),
-            Kind::Scope => ids::<ScopeView>(graph.all().await?),
-            Kind::Anchor => ids::<CodeAnchorView>(graph.all().await?),
-            Kind::Relation => ids::<RelationView>(graph.all().await?),
-            Kind::Notification => ids::<NotificationView>(graph.all().await?),
-            Kind::Principal => ids::<PrincipalView>(graph.all().await?),
+            Kind::Task => graph.ids_in_every_project::<TaskView>().await?,
+            Kind::Message => graph.ids_in_every_project::<MessageView>().await?,
+            Kind::Decision => graph.ids_in_every_project::<DecisionView>().await?,
+            Kind::Scope => graph.ids_in_every_project::<ScopeView>().await?,
+            Kind::Anchor => graph.ids_in_every_project::<CodeAnchorView>().await?,
+            Kind::Relation => graph.ids_in_every_project::<RelationView>().await?,
+            Kind::Notification => graph.ids_in_every_project::<NotificationView>().await?,
+            Kind::Principal => graph.ids_in_every_project::<PrincipalView>().await?,
         })
     }
 }
@@ -4644,51 +4719,82 @@ pub const ANY: &[Kind] = &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scop
 /// The shortest prefix of an id that a command line takes for the whole id.
 pub const MIN_PREFIX: usize = 6;
 
-/// An entity named on a command line: its full id; `D<number>` for a decision; or a prefix of at
-/// least six characters of the id of exactly one entity among `kinds`. An id the entity had before
-/// it was renumbered (`former_ids`) counts as its id, whole or as a prefix, beside its current one.
-/// A full id is taken as it is (the command then says whether it can use it), or for a former id
-/// as the entity it names now; a prefix that matches several entities is refused with each of them
-/// listed, and one that matches none is refused plainly. `D<number>` is read as a decision's number
-/// first. With five digits or more it is also long enough to be the start of an id, and it is
-/// tried as one when no decision has that number; while one has, it names that decision, which a
-/// command that takes no decision refuses.
+/// An entity named on a command line, as [`locate`] finds it, by its id alone.
 pub async fn resolve_id(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result<EntityId> {
-    if may_start_an_id(s) {
-        if let Some(record) = FormerIds::named_in(graph, s).await? {
-            return Ok(record);
-        }
-    }
+    Ok(locate(graph, s, kinds).await?.id)
+}
+
+/// An id someone typed, resolved ([`locate`]): the record it names, and the project that record
+/// is in, where a command whose subject it is runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub id: EntityId,
+    pub project: Whose,
+}
+
+/// An entity named on a command line, in whichever project it is (docs/DECISIONS.md, D181: an id
+/// someone types is never declined for being another project's): its full id; `D<number>` for a
+/// decision of this project, since a decision's number is its own project's; or a prefix of at
+/// least six characters of the id of exactly one entity among `kinds`, of any project. An id the
+/// entity had before it was renumbered (`former_ids`), kept by any project, counts as its id, whole
+/// or as a prefix, beside its current one. A full id is taken as it is (the command then says
+/// whether it can use it), or for a former id as the entity it names now; a prefix that matches
+/// several entities is refused with each of them listed, with its project when that is another,
+/// and one that matches none is refused plainly. `D<number>` is read as a decision's number first.
+/// With five digits or more it is also long enough to be the start of an id, and it is tried as
+/// one when no decision has that number; while one has, it names that decision, which a command
+/// that takes no decision refuses.
+pub async fn locate(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result<Located> {
     if let Ok(id) = s.parse::<EntityId>() {
-        return Ok(id);
+        return Ok(match graph.follow_any(id).await? {
+            Followed::Held { record, project, .. } => Located { id: record, project },
+            Followed::NotHeld => Located { id, project: Whose::This },
+        });
     }
     let numbered: Vec<EntityId> = match rules::decision_number(s) {
         Some(n) => decisions(graph).await?.iter().filter(|d| d.number().ok() == Some(n)).map(|d| d.id()).collect(),
         None => Vec::new(),
     };
-    // The entities of `kinds`, and the former ids, read only when the name can start an id and no
-    // decision's number took it.
-    let mut found = Vec::new();
+    // The entities of `kinds` and the former ids of every project, read only when the name can
+    // start an id and no decision's number took it.
+    let mut found: Vec<(EntityId, Kind)> = Vec::new();
+    let mut project_of: std::collections::HashMap<EntityId, EntityId> = std::collections::HashMap::new();
     let mut former = FormerIds::default();
     if numbered.is_empty() && may_start_an_id(s) {
         for kind in kinds {
-            found.extend(kind.ids(graph).await?.into_iter().map(|id| (id, *kind)));
+            for (id, project) in kind.ids_in_every_project(graph).await? {
+                found.push((id, *kind));
+                project_of.insert(id, project);
+            }
         }
-        former = FormerIds::of(graph).await?;
+        former = FormerIds::from_views(&graph.former_ids_in_every_project().await?);
     }
-    name_to_id(s, kinds, &numbered, &found, &former)
+    let mut projects: Vec<EntityId> = project_of.values().copied().collect();
+    projects.sort();
+    projects.dedup();
+    let whose: std::collections::HashMap<EntityId, Whose> =
+        graph.projects_named(&projects).await?.into_iter().collect();
+    let other = |id: EntityId| match project_of.get(&id).and_then(|p| whose.get(p)) {
+        Some(Whose::Other(p)) => Some(p.name.clone()),
+        _ => None,
+    };
+    let id = name_to_id(s, kinds, &numbered, &found, &former, &other)?;
+    let project = project_of.get(&id).and_then(|p| whose.get(p)).cloned().unwrap_or(Whose::This);
+    Ok(Located { id, project })
 }
 
-/// The entity a name stands for by [`resolve_id`]'s rule, among entities already in hand, as the
+/// The entity a name stands for by [`locate`]'s rule, among entities already in hand, as the
 /// page's pickers hold them: `numbered` has the decisions with the number a `D<number>` name
 /// gives, `found` each entity the name may start the id of, with its kind (one of a kind not in
-/// `kinds` is passed over), and `former` the project's former ids.
+/// `kinds` is passed over), `former` the former ids, and `project_of` the name of an entity's
+/// project when that is another, which a refusal that lists several entities names beside each.
 pub fn name_to_id(
     s: &str,
     kinds: &[Kind],
     numbered: &[EntityId],
     found: &[(EntityId, Kind)],
     former: &FormerIds,
+    project_of: &dyn Fn(EntityId) -> Option<String>,
 ) -> Result<EntityId> {
     if let Some(record) = former.named(s) {
         return Ok(record);
@@ -4734,9 +4840,17 @@ pub fn name_to_id(
             let start = |id: &str| id.chars().take(s.len() + 4).collect::<String>();
             let listed: Vec<String> = several
                 .iter()
-                .map(|(id, kind, cited)| match cited {
-                    None => format!("{} {}", kind.name(), start(&id.to_base64())),
-                    Some(cited) => format!("{} {} (formerly {})", kind.name(), start(&id.to_base64()), start(cited)),
+                .map(|(id, kind, cited)| {
+                    let named = match cited {
+                        None => format!("{} {}", kind.name(), start(&id.to_base64())),
+                        Some(cited) => {
+                            format!("{} {} (formerly {})", kind.name(), start(&id.to_base64()), start(cited))
+                        }
+                    };
+                    match project_of(*id) {
+                        Some(project) => format!("{named} in {project}"),
+                        None => named,
+                    }
                 })
                 .collect();
             bail!("`{s}` starts the ids of {} entities ({}); give more of the id", several.len(), listed.join(", "))

@@ -902,56 +902,63 @@ pub async fn gather(graph: &ProjectGraph, n: &NotificationView, reader: Option<E
             return Ok(parts);
         }
         for (want, id) in wanted {
-            fetch(graph, &mut fetched, want, id).await;
+            fetch(graph, &mut fetched, want, id).await?;
         }
     }
     Ok(sentence(&fetched, recipient, reply, t, &target, &originator))
 }
 
-/// Fetches one name into `f`; a name that cannot be read (another kind of entity, or gone) is
+/// Fetches one name into `f`, following the record wherever in the node it is (`ProjectGraph::
+/// follow`): a record of another project is named with that project's name after it (`alice in
+/// beta`, `D12 (Use SQLite in beta)`), since a handle, a title or a number names something else
+/// there. A name that cannot be read (another kind of entity, or one the node does not hold) is
 /// left out, and the sentence says "a task" or "someone" in its place.
-async fn fetch(graph: &ProjectGraph, f: &mut Fetched, want: Want, id: EntityId) {
+async fn fetch(graph: &ProjectGraph, f: &mut Fetched, want: Want, id: EntityId) -> Result<()> {
+    use crate::ops::in_project;
+    use crate::project_graph::Followed::Held;
     match want {
         Want::Handle => {
-            if let Some(h) = graph.get::<PrincipalView>(id).await.ok().and_then(|p| p.handle().ok()) {
-                f.handles.insert(id, h);
+            if let Held { project, found, .. } = graph.follow::<PrincipalView>(id).await? {
+                f.handles.insert(id, in_project(found.handle()?, &project));
             }
         }
         Want::Task => {
-            if let Some(title) = graph.get::<TaskView>(id).await.ok().and_then(|t| t.title().ok()) {
-                f.tasks.insert(id, title);
+            if let Held { project, found, .. } = graph.follow::<TaskView>(id).await? {
+                f.tasks.insert(id, in_project(found.title()?, &project));
             }
         }
         Want::Decision => {
-            if let Ok(d) = graph.get::<DecisionView>(id).await {
-                f.decisions.insert(id, (d.number().unwrap_or(0), d.title().unwrap_or_default()));
+            if let Held { project, found, .. } = graph.follow::<DecisionView>(id).await? {
+                f.decisions.insert(id, (found.number()?, in_project(found.title()?, &project)));
             }
         }
         Want::Scope => {
-            if let Some(title) = graph.get::<ScopeView>(id).await.ok().and_then(|s| s.title().ok()) {
-                f.scopes.insert(id, title);
+            if let Held { project, found, .. } = graph.follow::<ScopeView>(id).await? {
+                f.scopes.insert(id, in_project(found.title()?, &project));
             }
         }
         Want::Anchor => {
-            if let Ok(a) = graph.get::<CodeAnchorView>(id).await {
-                if let (Ok(path), Ok(lines)) = (a.path(), crate::ops::lines_of(&a)) {
-                    f.anchors.insert(id, (path, lines));
-                }
+            if let Held { found, .. } = graph.follow::<CodeAnchorView>(id).await? {
+                f.anchors.insert(id, (found.path()?, crate::ops::lines_of(&found)?));
             }
         }
         Want::Message => {
-            if let Ok(m) = graph.get::<MessageView>(id).await {
-                f.messages.insert(id, MessageFacts::of(&m));
+            if let Held { found, .. } = graph.follow::<MessageView>(id).await? {
+                f.messages.insert(id, MessageFacts::of(&found));
             }
         }
-        Want::Relation => {
-            if let Ok(r) = graph.get::<RelationView>(id).await {
-                if let (Ok(kind), Ok(from), Ok(to)) = (r.kind(), r.from_id(), r.to_id()) {
-                    f.relations.insert(id, RelationFacts { kind, from, to });
-                }
+        Want::Relation => match graph.relation(id).await {
+            Ok(r) => {
+                f.relations.insert(id, RelationFacts { kind: r.kind()?, from: r.from_id()?, to: r.to_id()? });
             }
-        }
+            Err(
+                ankurah::error::RetrievalError::EntityNotFound(_)
+                | ankurah::error::RetrievalError::MissingComponent { .. },
+            ) => {}
+            Err(e) => return Err(e.into()),
+        },
     }
+    Ok(())
 }
 
 /// The batch a notification lists beneath its sentence, on its inbox card and in `fwd inbox`

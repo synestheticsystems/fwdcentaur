@@ -738,7 +738,7 @@ fn readiness_from(
     relations: &[RelationView],
     status: impl Fn(EntityId) -> Option<TaskStatus>,
 ) -> Readiness {
-    let deps: Vec<(EntityId, Option<TaskStatus>)> = relations
+    let deps: Vec<rules::Dependency> = relations
         .iter()
         .filter(|r| {
             r.from_id().ok() == Some(task.id())
@@ -746,7 +746,7 @@ fn readiness_from(
                 && r.status().ok() == Some(RelationStatus::Accepted)
         })
         .filter_map(|r| r.to_id().ok())
-        .map(|to| (to, status(to)))
+        .map(|to| rules::Dependency::Here(to, status(to)))
         .collect();
     let snapshot = TaskSnapshot {
         id: task.id(),

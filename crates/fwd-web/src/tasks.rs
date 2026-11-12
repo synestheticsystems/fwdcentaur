@@ -559,6 +559,15 @@ fn readiness_view(r: &Readiness, tasks: &[TaskView]) -> AnyView {
                     NotReadyReason::DependencyClosed(id, s) => {
                         view! { <li>"dependency " {link(*id, title(*id))} " is " {fmt::status_label(*s)} "; retract the relation or cancel this task"</li> }.into_any()
                     }
+                    NotReadyReason::BlockedByTaskIn { task, project } => {
+                        view! { <li>"blocked by " {fmt::short(*task)} " in project " {project.clone()}</li> }.into_any()
+                    }
+                    NotReadyReason::DependencyClosedIn { task, project, status } => {
+                        view! { <li>"dependency " {fmt::short(*task)} " in project " {project.clone()} " is " {fmt::status_label(*status)} "; retract the relation or cancel this task"</li> }.into_any()
+                    }
+                    NotReadyReason::DependencyNotHeld(id) => {
+                        view! { <li>"dependency " {fmt::short(*id)} " cannot be followed here"</li> }.into_any()
+                    }
                 })
                 .collect::<Vec<_>>();
             view! { <ul class="reasons">{items}</ul> }.into_any()
