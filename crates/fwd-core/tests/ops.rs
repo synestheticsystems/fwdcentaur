@@ -4028,7 +4028,11 @@ async fn a_scope_is_named_by_its_title_or_its_id() -> Result<()> {
     let err = ops::resolve_scope(&graph, &nowhere.to_base64()).await.unwrap_err().to_string();
     assert_eq!(err, format!("no scope has the id {nowhere}"));
     let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
-    assert!(ops::resolve_scope(&graph, &t.to_base64()).await.is_err(), "a task is not a scope");
+    let err = ops::resolve_scope(&graph, &t.to_base64()).await.expect_err("a task is not a scope").to_string();
+    assert_eq!(err, format!("no scope has the id {t}"));
+    let d = ops::create_decision(&graph, c.daniel, ruling("Bill per seat")).await?;
+    let err = ops::resolve_scope(&graph, &d.to_base64()).await.expect_err("a decision is not a scope").to_string();
+    assert_eq!(err, format!("no scope has the id {d}"));
     let twin = ops::create_scope(&graph, c.implementer, named_scope("cloud hosting")).await?;
     let err = ops::resolve_scope(&graph, "Cloud Hosting").await.unwrap_err().to_string();
     assert!(err.starts_with("2 scopes have the title `Cloud Hosting` ("), "{err}");

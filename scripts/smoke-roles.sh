@@ -446,7 +446,7 @@ check "list names the scope a ruling governs" "$("$F" decision list --format tex
 check "show says what a ruling governs" "$("$F" decision show "D$NA" --format text | grep -c ' · governs the whole project · ')" "1"
 check "an unknown scope is refused, saying so" "$("$F" decision attach "D$NS" "Retry wrok" 2>&1 | grep -c 'no scope has the title `Retry wrok` or an id starting with it')" "1"
 NS_ID=$("$F" decision show "D$NS" --format json | j "d['id']")
-check "so is a whole id that names no scope, which list would otherwise answer with nothing" "$("$F" decision list --attached "$NS_ID" 2>&1 | grep -c "no scope of this project has the id $NS_ID")" "1"
+check "so is a whole id that names no scope, which list would otherwise answer with nothing" "$("$F" decision list --attached "$NS_ID" 2>&1 | grep -c "^Error: no scope has the id $NS_ID$")" "1"
 check "export lists a scope's rulings under its name, after the project-wide ones" "$("$F" decision export | python3 -c "import sys; t = sys.stdin.read(); print(0 <= t.find('\n## Project-wide\n') < t.find('\n## Retry work\n') < t.find('- **D$NS: Reconnects log each attempt** (process, governs Retry work, '))")" "True"
 "$F" decision detach "D$NS" >/dev/null
 check "detach makes a ruling project-wide again" "$("$F" decision show "D$NS" --format json | j "d['scope']")" "None"
