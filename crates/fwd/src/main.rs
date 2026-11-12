@@ -3385,21 +3385,63 @@ async fn message_anywhere(graph: &ProjectGraph, id: EntityId) -> Result<MessageV
     }
 }
 
-/// Prints what `reply` and `forward` posted, under `record` ([`made_json`]), and beside it as
-/// `settled` the notification they were given and settled, so that an agent that meant to act on a
-/// notification sees whether it did: given a message's id, the answer has no `settled`. When the
-/// notification stays unread after the message was made, the answer is the message made all the
-/// same, and a note beside it says why ([`unsettled_note`]). `what` names the message: "reply" or
+/// Prints the message `reply` or `forward` made, `posted`, as made, whatever fails after it was: a
+/// caller that took the command for a failure and ran it again would make the message twice. The
+/// message is read back where it was made, for the answer, which names it by its id alone when that
+/// fails ([`reply_answer`]); what became of the notification it was posted through is said first,
+/// from what posting returned; and once the answer is printed, a forward asked of no one says
+/// whether it waits for a triage agent ([`say_waiting`]). `what` names the message: "reply" or
 /// "forward".
 async fn print_reply(app: &App, what: &str, posted: ops::Posted) -> Result<()> {
     let graph = app.graph();
-    let mut answer = made_json(message_json(graph, &message_anywhere(graph, posted.message).await?).await?);
-    match posted.settling {
-        ops::Settling::NoNotification => {}
-        ops::Settling::Settled(n) => answer["settled"] = json!(n.to_base64()),
-        ops::Settling::Unread { notification, why } => app.note(unsettled_note(what, notification, &why)),
+    let read = async {
+        let message = message_anywhere(graph, posted.message).await?;
+        let printed = message_json(graph, &message).await?;
+        Ok::<_, anyhow::Error>((message, printed))
+    };
+    let (printed, message) = match read.await {
+        Ok((message, printed)) => (Ok(printed), Some(message)),
+        Err(why) => (Err(why), None),
+    };
+    let (answer, notes) = reply_answer(what, posted, printed);
+    for note in notes {
+        app.note(note);
     }
-    app.print_made(answer, to_text)
+    app.print_made(answer, to_text)?;
+    if let Some(message) = &message {
+        say_waiting(app, message).await;
+    }
+    Ok(())
+}
+
+/// What `reply` and `forward` answer for `posted`, the message they made and what became of the
+/// notification they were given, with `read`, the message as every command prints it, read back
+/// once it was made; and the notes they say beside it, in order. The notification comes first,
+/// from `posted` alone: settled, the answer names it beside `record` as `settled`, so that an agent
+/// that meant to act on a notification sees whether it did; left unread, a note says why
+/// ([`unsettled_note`]); given a message's id, the answer has no `settled`. A message that could
+/// not be read back is answered by its id alone, under `record` as every made record is
+/// ([`made_json`]), and a note says why ([`unread_back_note`]).
+fn reply_answer(what: &str, posted: ops::Posted, read: Result<Value>) -> (Value, Vec<String>) {
+    let ops::Posted { message, settling } = posted;
+    let mut notes = Vec::new();
+    let settled = match settling {
+        ops::Settling::NoNotification => None,
+        ops::Settling::Settled(notification) => Some(notification),
+        ops::Settling::Unread { notification, why } => {
+            notes.push(unsettled_note(what, notification, &why));
+            None
+        }
+    };
+    let record = read.unwrap_or_else(|why| {
+        notes.push(unread_back_note(what, message, &why));
+        json!({"id": message.to_base64()})
+    });
+    let mut answer = made_json(record);
+    if let Some(notification) = settled {
+        answer["settled"] = json!(notification.to_base64());
+    }
+    (answer, notes)
 }
 
 /// What `reply` and `forward` say beside the message they made, `what` ("reply", "forward"), when
@@ -3410,6 +3452,16 @@ fn unsettled_note(what: &str, notification: EntityId, why: &anyhow::Error) -> St
     let short = short_id(&notification.to_base64());
     format!(
         "NOTE: the {what} was made, but its notification {short} could not be marked read ({why:#}); `fwd read {short}` marks it read, and running this command again would make the {what} twice"
+    )
+}
+
+/// What `reply` and `forward` say beside the id of the message they made, `message`, `what`
+/// ("reply", "forward"), when reading it back failed, for `why`: that it was made all the same, so
+/// that no one runs the command again and posts it twice, and how to read it.
+fn unread_back_note(what: &str, message: EntityId, why: &anyhow::Error) -> String {
+    let short = short_id(&message.to_base64());
+    format!(
+        "NOTE: the {what} {short} was made, but it could not be read back ({why:#}); `fwd message show {short}` shows it, and running this command again would make the {what} twice"
     )
 }
 
@@ -3540,27 +3592,38 @@ async fn scope_words(graph: &ProjectGraph, scope: EntityId) -> Result<String> {
     Ok(format!("\"{}\" ({})", scope_title(graph, Some(scope)).await?.unwrap_or_default(), short_id(&scope.to_base64())))
 }
 
-/// What `fwd ask` and `fwd forward` say on standard error once they have asked no one in
-/// particular (the message `message`), while no triage agent answers first for the scope it asks:
-/// that it waits, listed under that scope on the Questions page, until an agent serves the scope
-/// or the whole project, and reaches that agent then (docs/design/agents-and-inbox.md, rule 5),
-/// with the guidance on creating one.
-async fn say_waiting(app: &App, message: EntityId) -> Result<()> {
-    let graph = app.graph();
-    let mc = MessageContext::from_view(&message_anywhere(graph, message).await?)?;
+/// Says on standard error, once `fwd ask` or `fwd forward` has made `message`, whether it waits for
+/// a triage agent ([`waiting_notice`]). Failing to tell is said in its place and is not the
+/// command's failure: the message stands, and running the command again would make it twice.
+async fn say_waiting(app: &App, message: &MessageView) {
+    match waiting_notice(app.graph(), message).await {
+        Ok(Some(notice)) => app.note(notice),
+        Ok(None) => {}
+        Err(why) => app.note(format!(
+            "fwd: the question was asked, but whether a triage agent answers it could not be read ({why:#})"
+        )),
+    }
+}
+
+/// What `fwd ask` and `fwd forward` say once they have asked no one in particular in `message`,
+/// while no triage agent answers first for the scope it asks: that it waits, listed under that
+/// scope on the Questions page, until an agent serves the scope or the whole project, and reaches
+/// that agent then (docs/design/agents-and-inbox.md, rule 5), with the guidance on creating one.
+/// None for a message that asks someone, or whose scope a triage agent answers for.
+async fn waiting_notice(graph: &ProjectGraph, message: &MessageView) -> Result<Option<String>> {
+    let mc = MessageContext::from_view(message)?;
     if !mc.asks_project {
-        return Ok(());
+        return Ok(None);
     }
     let scope = fwd_core::routing::asked_scope(graph, &mc).await?;
-    let Some(guidance) = triage_guidance(graph, scope).await? else { return Ok(()) };
+    let Some(guidance) = triage_guidance(graph, scope).await? else { return Ok(None) };
     let whom = match scope {
         Some(scope) => format!("of the scope {}", scope_words(graph, scope).await?),
         None => "of the project".to_string(),
     };
-    app.note(format!(
+    Ok(Some(format!(
         "fwd: this question waits, asked {whom}, until an agent serves it or the whole project, and reaches that agent then. {guidance}"
-    ));
-    Ok(())
+    )))
 }
 
 /// Says on standard error, after a command of the triage agent it acts as that serves nothing, why
@@ -5448,9 +5511,10 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 }
                 None => ops::post_message(graph, app.me, &text, priority.of_message(), mc).await?,
             };
-            say_waiting(app, mid).await?;
             let m: MessageView = graph.get(mid).await?;
-            app.print_made(made_json(message_json(graph, &m).await?), to_text)
+            app.print_made(made_json(message_json(graph, &m).await?), to_text)?;
+            say_waiting(app, &m).await;
+            Ok(())
         }
         Command::Reply { id, text } => {
             let (reply_to, notification) = message_behind(app, &id, true).await?;
@@ -5492,7 +5556,6 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 mc.asks_scope = app.scope;
             }
             let posted = ops::post_settling(graph, app.me, &body, original_view.priority()?, mc, notification).await?;
-            say_waiting(app, posted.message).await?;
             print_reply(app, "forward", posted).await
         }
         Command::Cite { entity, decision, note } => {
@@ -6513,6 +6576,31 @@ mod tests {
                 "NOTE: the reply was made, but its notification {short} could not be marked read (marking the notification read: the daemon refused the write); `fwd read {short}` marks it read, and running this command again would make the reply twice"
             )
         );
+    }
+
+    /// A reply made is answered as made whatever fails after it: one whose notification stayed
+    /// unread and that could not be read back is answered by its id alone under `record`, without
+    /// `settled`, with the note on the notification first and the note on the read after it, each
+    /// saying that running the command again would make the reply twice. A forward read back is
+    /// answered as every command prints a message, with the notification it settled as `settled`.
+    #[test]
+    fn a_reply_made_is_answered_as_made_whatever_fails_after_it() {
+        let (message, notification) = (EntityId::from_bytes([3; 32]), EntityId::from_bytes([7; 32]));
+        let (short, why) = (short_id(&message.to_base64()), || anyhow!("the daemon refused the write"));
+        let unread = ops::Posted { message, settling: ops::Settling::Unread { notification, why: why() } };
+        let (answer, notes) = reply_answer("reply", unread, Err(anyhow!("the node holds no message")));
+        assert_eq!(answer, made_json(json!({"id": message.to_base64()})));
+        let read_back = format!(
+            "NOTE: the reply {short} was made, but it could not be read back (the node holds no message); `fwd message show {short}` shows it, and running this command again would make the reply twice"
+        );
+        assert_eq!(notes, vec![unsettled_note("reply", notification, &why()), read_back]);
+
+        let settled = ops::Posted { message, settling: ops::Settling::Settled(notification) };
+        let printed = json!({"id": message.to_base64(), "content": "yours, I think"});
+        let (answer, notes) = reply_answer("forward", settled, Ok(printed.clone()));
+        let mut expected = made_json(printed);
+        expected["settled"] = json!(notification.to_base64());
+        assert_eq!((answer, notes), (expected, Vec::<String>::new()));
     }
 
     /// `fwd task show --include` takes `relations` and `messages`, several with commas or the flag
