@@ -3326,9 +3326,11 @@ async fn checkout_for(app: &App, upstreams: &[String], basis: Option<&str>, agai
     Ok(best.map(|(_, root)| root))
 }
 
-/// `id` may name a message or a notification. Returns the message to act on and, when `id` was a
-/// notification, that notification, which `reply` and `forward` settle in the transaction that
-/// posts their message (`ops::post_settling`) and `message edit` leaves as it is. A notification
+/// `id` may name a message or a notification. Returns the message to act on, wherever in the node
+/// it is, and, when `id` was a notification, that notification, which `reply` and `forward` settle
+/// as they post their message (`ops::post_settling`) and `message edit` leaves as it is. A
+/// notification is its recipient's, in the recipient's project, where the command runs, and the
+/// message behind it may be another project's. A notification
 /// that names no message behind it is refused, and so is one that lists several messages and names
 /// none of them, as a step added with several threads on its lines does
 /// (`routing::Batch::message_behind`): acting on one of them through it would settle the
@@ -3337,15 +3339,11 @@ async fn checkout_for(app: &App, upstreams: &[String], basis: Option<&str>, agai
 /// recipient, is told to dismiss the notification once it has acted on them, since given a
 /// message's id it settles nothing; `message edit` settles nothing either way, and another
 /// principal's dismiss is refused, so neither is told to.
-async fn message_behind(
-    graph: &ProjectGraph,
-    id: &str,
-    caller: EntityId,
-    settles: bool,
-) -> Result<(EntityId, Option<EntityId>)> {
-    let id = ops::resolve_id(graph, id, &[Kind::Message, Kind::Notification]).await?;
-    match graph.get::<NotificationView>(id).await {
-        Ok(n) => {
+async fn message_behind(app: &App, id: &str, settles: bool) -> Result<(EntityId, Option<EntityId>)> {
+    let (graph, caller) = (app.graph(), app.me);
+    let id = app.id(id, &[Kind::Message, Kind::Notification]).await?;
+    match graph.follow::<NotificationView>(id).await? {
+        Followed::Held { found: n, .. } => {
             let originator: Value = n.originator()?.into();
             if let Some(mid) = originator["message_id"].as_str().and_then(|s| s.parse::<EntityId>().ok()) {
                 return Ok((mid, Some(id)));
@@ -3368,7 +3366,16 @@ async fn message_behind(
             }
             bail!("that notification has no message behind it")
         }
-        Err(_) => Ok((id, None)),
+        Followed::NotHeld => Ok((id, None)),
+    }
+}
+
+/// The message `id`, wherever in the node it is: a reply or a forward through a notification is
+/// made in the project of the message it answers.
+async fn message_anywhere(graph: &ProjectGraph, id: EntityId) -> Result<MessageView> {
+    match graph.follow::<MessageView>(id).await? {
+        Followed::Held { found, .. } => Ok(found),
+        Followed::NotHeld => bail!("the node holds no message {}", id.to_base64()),
     }
 }
 
@@ -3377,7 +3384,7 @@ async fn message_behind(
 /// notification sees whether it did: given a message's id, the answer has no `settled`.
 async fn print_reply(app: &App, mid: EntityId, settled: Option<EntityId>) -> Result<()> {
     let graph = app.graph();
-    let mut made = made_json(message_json(graph, &graph.get::<MessageView>(mid).await?).await?);
+    let mut made = made_json(message_json(graph, &message_anywhere(graph, mid).await?).await?);
     if let Some(n) = settled {
         made["settled"] = json!(n.to_base64());
     }
@@ -3518,7 +3525,7 @@ async fn scope_words(graph: &ProjectGraph, scope: EntityId) -> Result<String> {
 /// with the guidance on creating one.
 async fn say_waiting(app: &App, message: EntityId) -> Result<()> {
     let graph = app.graph();
-    let mc = MessageContext::from_view(&graph.get::<MessageView>(message).await?)?;
+    let mc = MessageContext::from_view(&message_anywhere(graph, message).await?)?;
     if !mc.asks_project {
         return Ok(());
     }
@@ -5417,7 +5424,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
             app.print_made(made_json(message_json(graph, &m).await?), to_text)
         }
         Command::Reply { id, text } => {
-            let (reply_to, notification) = message_behind(graph, &id, app.me, true).await?;
+            let (reply_to, notification) = message_behind(app, &id, true).await?;
             let mid = ops::post_settling(
                 graph,
                 app.me,
@@ -5430,7 +5437,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
             print_reply(app, mid, notification).await
         }
         Command::Forward { id, to, note } => {
-            let (original, notification) = message_behind(graph, &id, app.me, true).await?;
+            let (original, notification) = message_behind(app, &id, true).await?;
             // A scope has no owner to forward to (docs/DECISIONS.md, D108, "A scope has no owner:
             // scopes are not assigned to principals"); until 2026-09-29 `scope:<id>` reached it.
             if to.as_deref().is_some_and(|t| t.starts_with("scope:")) {
@@ -5439,7 +5446,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 );
             }
             let to = asked_of(app, to.as_deref()).await?;
-            let original_view: MessageView = graph.get(original).await?;
+            let original_view = message_anywhere(graph, original).await?;
             let quoted =
                 ops::text(original_view.content())?.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
             let body = format!("{note}\n\n{quoted}");
@@ -5604,7 +5611,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 print_message_moved(app, id, &moved, false).await
             }
             MessageCommand::Edit { id, text } => {
-                let (message, _) = message_behind(graph, &id, app.me, false).await?;
+                let (message, _) = message_behind(app, &id, false).await?;
                 ops::edit_message(graph, app.me, message, &text).await?;
                 show_message(app, message).await
             }

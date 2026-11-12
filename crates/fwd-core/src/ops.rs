@@ -3248,7 +3248,9 @@ impl MessageContext {
 /// sentence naming it, so a typo is caught before anyone reads it. The message is stored with
 /// every reference as `[[<full id>]]` (a file as its whole-file highlight's, with the version it
 /// names: `[[<full id>@<version>]]`), in one transaction with a `mention` relation from the
-/// message to each thing it names ([`write_mentions`]).
+/// message to each thing it names ([`write_mentions`]). A reply is a message of its thread, so it
+/// is made in the project the message it answers is in, whichever project `graph` is, by `author`,
+/// `graph`'s principal, as a reference to a principal of another project is held.
 pub async fn post_message(
     graph: &ProjectGraph,
     author: EntityId,
@@ -3257,7 +3259,7 @@ pub async fn post_message(
     mc: MessageContext,
 ) -> Result<EntityId> {
     let post = Post::prepare(graph, author, content, priority, mc).await?;
-    let trx = graph.begin();
+    let trx = post.made_in.begin();
     let id = post.write(&trx).await?;
     trx.commit().await?;
     Ok(id)
@@ -3275,6 +3277,12 @@ pub async fn post_message(
 /// the recipient's inbox. A notification addressed to another principal than `author` is refused
 /// before anything is posted, naming whose it is and the id of the message behind it, by which
 /// `author` answers the message without settling anything ([`own_notification`]; task AfhuiHYS).
+/// The notification is its recipient's, in the recipient's project, which is `graph`'s, and the
+/// message behind it may be another project's: one a message of another project caused, or one
+/// that stayed when the task it is about moved to another project. The reply is made in that
+/// message's project ([`post_message`]), and the notification is marked read in its own project,
+/// in a transaction after the reply's, so that a failure between the two leaves the reply made and
+/// the notification unread, as the next command that settles it finds it.
 pub async fn post_settling(
     graph: &ProjectGraph,
     author: EntityId,
@@ -3299,12 +3307,22 @@ pub async fn post_settling(
         }
     }
     let post = Post::prepare(graph, author, content, priority, mc).await?;
-    let trx = graph.begin();
+    let made_in = post.made_in.clone();
+    let trx = made_in.begin();
     let id = post.write(&trx).await?;
-    if let Some(view) = unread {
-        trx.edit(&view)?.status()?.set(&NotificationStatus::Read)?;
-    }
+    let elsewhere = match unread {
+        Some(view) if made_in.owns(&view) => {
+            trx.edit(&view)?.status()?.set(&NotificationStatus::Read)?;
+            None
+        }
+        unread => unread,
+    };
     trx.commit().await?;
+    if let Some(view) = elsewhere {
+        let trx = graph.begin();
+        trx.edit(&view)?.status()?.set(&NotificationStatus::Read)?;
+        trx.commit().await?;
+    }
     Ok(id)
 }
 
@@ -3314,6 +3332,9 @@ pub async fn post_settling(
 /// becomes (`add_highlight_step`), prepares it first, so that a text refused for naming nothing
 /// leaves nothing behind, and then writes it in the transaction of the rest.
 struct Post {
+    /// The graph of the project the message is made in: its thread's, for a reply, else the one
+    /// it was prepared in.
+    made_in: ProjectGraph,
     author: EntityId,
     stored: String,
     named: Vec<EntityId>,
@@ -3338,9 +3359,14 @@ impl Post {
         let stored = crate::references::rewrite(content, &found, &named);
         let named = ids_of(&named);
         let mut thread = None;
-        // A reply inherits its thread root and its subject so participants and topics are one query away.
+        let mut made_in = graph.clone();
+        // A reply inherits its thread root and its subject so participants and topics are one query
+        // away, and is made where its thread is, whichever project that is.
         if let Some(reply_to) = mc.reply_to {
-            let parent: MessageView = graph.get(reply_to).await.context("the message being replied to")?;
+            let Followed::Held { found: parent, .. } = graph.follow::<MessageView>(reply_to).await? else {
+                bail!("the message being replied to, {reply_to}, is no message the node holds");
+            };
+            made_in = graph.graph_of(&parent)?;
             thread = Some(parent.thread()?.map(EntityId::from).unwrap_or(reply_to));
             let parent_mc = MessageContext::from_view(&parent)?;
             mc.task_id = mc.task_id.or(parent_mc.task_id);
@@ -3376,7 +3402,7 @@ impl Post {
         if let Some(step) = mc.first_of_step {
             context[FIRST_OF_STEP_KEY] = json!(step.to_base64());
         }
-        Ok(Post { author, stored, named, priority, mc, thread, context })
+        Ok(Post { made_in, author, stored, named, priority, mc, thread, context })
     }
 
     /// Marks the message as the first comment of the step whose relation is `edge`
@@ -3390,7 +3416,7 @@ impl Post {
 
     /// Writes the message in `trx`, with a `mention` relation to each thing it names.
     async fn write(self, trx: &ProjectTransaction) -> Result<EntityId> {
-        let Post { author, stored, named, priority, mc, thread, context } = self;
+        let Post { made_in: _, author, stored, named, priority, mc, thread, context } = self;
         let t = now();
         let id = trx
             .create(&Message {

@@ -237,8 +237,11 @@ struct Inbox {
 }
 
 impl Inbox {
-    fn of(graph: &ProjectGraph, recipient: EntityId) -> Result<Inbox> {
+    /// Opens the query, and returns once it holds what the inbox holds already, so that what
+    /// arrives after is heard as it arrives.
+    async fn of(graph: &ProjectGraph, recipient: EntityId) -> Result<Inbox> {
         let query = graph.query::<NotificationView>(with_id("recipient = ?", recipient)?)?;
+        query.wait_initialized().await?;
         let (tx, arrived) = mpsc::unbounded_channel();
         let _guard = query.subscribe(move |changes: ChangeSet<NotificationView>| {
             for n in changes.added() {
@@ -365,8 +368,8 @@ async fn every_list_in_one_project_prints_its_own_records_a_typed_id_reaches_the
             named.map(|p| p.id()).ok_or_else(|| anyhow!("no impl-alice"))
         }
     };
-    let mut alpha_inbox = Inbox::of(&alpha.graph, alice_of(&alpha.graph).await?)?;
-    let mut beta_inbox = Inbox::of(&beta.graph, alice_of(&beta.graph).await?)?;
+    let mut alpha_inbox = Inbox::of(&alpha.graph, alice_of(&alpha.graph).await?).await?;
+    let mut beta_inbox = Inbox::of(&beta.graph, alice_of(&beta.graph).await?).await?;
     daemon.json(&daemon.alpha, &["ask", "--to", "impl-alice", "and the notifications?"])?;
     let made = daemon.made(&daemon.alpha, &["task", "create", "Cap the retry delay", "--after", &a.retry])?;
     daemon.json(&daemon.alpha, &["task", "assign", &made, "@impl-alice"])?;
@@ -607,6 +610,44 @@ async fn a_refusal_in_the_project_a_command_ran_in_names_it_and_what_it_suggests
             args.join(" ")
         );
     }
+    Ok(())
+}
+
+/// A comment of alpha's that names beta's implementer tells her in beta, where her inbox is, and
+/// her reply through that notification is a message of the comment's thread, made in alpha by her,
+/// beta's principal, with the notification marked read in beta; her forward through the next one is
+/// made in alpha too, asks beta's person, and reaches him in beta.
+#[tokio::test]
+async fn a_recipient_of_another_project_replies_and_forwards_through_her_notification() -> Result<()> {
+    let Two { daemon, a, b: _, alpha, beta } = Two::new().await?;
+    let named = |graph: ProjectGraph, name: &'static str| async move {
+        naming::principal_named(&graph, name, None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no {name}"))
+    };
+    let alice = named(beta.graph.clone(), "impl-alice").await?;
+    let daniel = named(beta.graph.clone(), "dnorman").await?;
+    let (mut hers, mut his) = (Inbox::of(&beta.graph, alice).await?, Inbox::of(&beta.graph, daniel).await?);
+    let mention = format!("@{} look at the backoff", alice.to_base64());
+
+    let comment = daemon.made(&daemon.alpha, &["comment", &a.retry, &mention])?;
+    let told = hers.told_of(&comment).await?.to_base64();
+    let (replied, _) = daemon.json_and_said(&daemon.beta, &["--as", "impl-alice", "reply", &told, "on it"])?;
+    let reply: EntityId = replied["record"]["id"].as_str().ok_or_else(|| anyhow!("{replied}"))?.parse()?;
+    assert_eq!(replied["settled"], told, "{replied}");
+    let made: MessageView = alpha.graph.get(reply).await?;
+    assert_eq!(made.reply_to()?.map(EntityId::from), Some(comment.parse()?), "a message of the comment's thread");
+    assert_eq!(EntityId::from(made.author()?), alice, "by her, beta's principal");
+    assert_eq!(beta.graph.get::<NotificationView>(told.parse()?).await?.status()?, NotificationStatus::Read);
+
+    let comment = daemon.made(&daemon.alpha, &["comment", &a.retry, &mention])?;
+    let told = hers.told_of(&comment).await?.to_base64();
+    let args = ["--as", "impl-alice", "forward", &told, "--to", "dnorman", "--note", "yours, I think"];
+    let (forwarded, _) = daemon.json_and_said(&daemon.beta, &args)?;
+    let forward = forwarded["record"]["id"].as_str().ok_or_else(|| anyhow!("{forwarded}"))?.to_string();
+    let made: MessageView = alpha.graph.get(forward.parse()?).await?;
+    assert_eq!(made.reply_to()?.map(EntityId::from), Some(comment.parse()?));
+    assert_eq!(Value::from(made.context()?)["to"], daniel.to_base64(), "it asks beta's person");
+    assert_eq!(beta.graph.get::<NotificationView>(told.parse()?).await?.status()?, NotificationStatus::Read);
+    his.told_of(&forward).await?;
     Ok(())
 }
 
@@ -877,7 +918,7 @@ async fn an_mcp_call_on_the_others_record_or_in_its_scope_runs_there_as_the_thre
     assert!(bound.starts_with("codex:") && bound.ends_with("0000000b2fb0"), "the thread's principal in beta: {bound}");
     assert_eq!(records(&alpha.graph).await?, before, "nothing of alpha's changed, and no principal was made there");
 
-    let mut inbox = Inbox::of(&beta.graph, author)?;
+    let mut inbox = Inbox::of(&beta.graph, author).await?;
     let person = ops::person_by_handle(&beta.graph, "dnorman").await?;
     let to_thread = MessageContext { to: Some(author.to_base64()), ..Default::default() };
     let asked = ops::post_message(&beta.graph, person, "is it in yet?", Priority::Now, to_thread).await?;

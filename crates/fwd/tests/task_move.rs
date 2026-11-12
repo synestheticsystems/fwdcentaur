@@ -153,8 +153,11 @@ struct Inbox {
 }
 
 impl Inbox {
-    fn of(graph: &ProjectGraph, recipient: EntityId) -> Result<Inbox> {
+    /// Opens the query, and returns once it holds what the inbox holds already, so that what
+    /// arrives after is heard as it arrives.
+    async fn of(graph: &ProjectGraph, recipient: EntityId) -> Result<Inbox> {
         let query = graph.query::<NotificationView>(with_id("recipient = ?", recipient)?)?;
+        query.wait_initialized().await?;
         let (tx, arrived) = mpsc::unbounded_channel();
         let _guard = query.subscribe(move |changes: ChangeSet<NotificationView>| {
             for n in changes.added() {
@@ -238,7 +241,7 @@ async fn the_move_tells_only_whom_its_comment_tells_and_the_next_change_is_route
     let (alpha, beta) = (daemon.client(a).await?, daemon.client(b).await?);
     let (alice, triage_alpha) = (named(&alpha.graph, "impl-alice").await?, named(&alpha.graph, "triage-alpha").await?);
     let triage_beta = named(&beta.graph, "triage-beta").await?;
-    let (mut hers, mut theirs) = (Inbox::of(&alpha.graph, alice)?, Inbox::of(&beta.graph, triage_beta)?);
+    let (mut hers, mut theirs) = (Inbox::of(&alpha.graph, alice).await?, Inbox::of(&beta.graph, triage_beta).await?);
     // Once a question asked last has reached her, everything written before it has been routed.
     let settled = daemon.made(a, &["ask", "--to", "impl-alice", "settled?"])?;
     hers.until(NotificationType::QuestionAsked, Some(&settled)).await?;
@@ -358,6 +361,44 @@ async fn the_command_runs_in_the_tasks_project_answers_per_task_and_reports_task
     );
     let alpha = daemon.client(a).await?;
     assert!(alpha.graph.get::<TaskView>(fourth.parse()?).await.is_ok(), "the refusals moved nothing");
+    Ok(())
+}
+
+/// Alpha's implementer, told in alpha of the lead's comment on the task she is assigned, keeps that
+/// notification in alpha when the task moves to beta with its comment; her reply through it is a
+/// message of the comment's thread, made in beta by her, alpha's principal, and the notification is
+/// marked read in alpha, where her inbox is.
+#[tokio::test]
+async fn a_reply_through_a_notification_kept_after_its_task_moved_is_made_where_the_task_went() -> Result<()> {
+    let daemon = Daemon::new()?;
+    let (a, b) = (&daemon.alpha, &daemon.beta);
+    daemon.json(a, &["--as", "impl-alice", "principal", "add", "impl-alice", "--role", "implementer"])?;
+    daemon.json(a, &["--as", "lead-lea", "principal", "add", "lead-lea", "--role", "lead"])?;
+    let task = daemon.made(a, &["task", "create", "Write the catalog"])?;
+    daemon.json(a, &["task", "assign", &task, "impl-alice"])?;
+    let alpha = daemon.client(a).await?;
+    let alice = named(&alpha.graph, "impl-alice").await?;
+    let mut hers = Inbox::of(&alpha.graph, alice).await?;
+    // The lead's, so that the move's own comment, the person's, is told her apart.
+    let comment = daemon.made(a, &["--as", "lead-lea", "comment", &task, "the catalog first"])?;
+    hers.until(NotificationType::TaskCommented, Some(&comment)).await?;
+    let told = held(&alpha.graph, alice)
+        .await?
+        .into_iter()
+        .find(|(_, _, about)| about.as_deref() == Some(comment.as_str()))
+        .map(|(id, ..)| id.to_base64())
+        .ok_or_else(|| anyhow!("no notification of the comment"))?;
+    daemon.json(a, &["task", "move", "--to", "beta", &task])?;
+
+    let (replied, _) = daemon.run(a, &["--as", "impl-alice", "reply", &told, "done"])?.map_err(|e| anyhow!("{e}"))?;
+    assert_eq!(replied["settled"], told, "{replied}");
+    let reply: EntityId = replied["record"]["id"].as_str().ok_or_else(|| anyhow!("{replied}"))?.parse()?;
+    let beta = daemon.client(b).await?;
+    let made: MessageView = beta.graph.get(reply).await?;
+    assert_eq!(made.reply_to()?.map(EntityId::from), Some(comment.parse()?), "a message of the comment's thread");
+    assert_eq!(EntityId::from(made.author()?), alice, "by her, alpha's principal");
+    let notification: NotificationView = alpha.graph.get(told.parse()?).await?;
+    assert_eq!(notification.status()?, NotificationStatus::Read, "marked read where her inbox is");
     Ok(())
 }
 
