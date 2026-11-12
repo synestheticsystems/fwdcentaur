@@ -173,31 +173,35 @@ pub fn front_line(principals: &[PrincipalView], scope: Option<EntityId>) -> Opti
     first(&|s: &Serving| s.project_wide).map(|agent| FrontLine { agent, scope: None })
 }
 
-/// Of `principals`, the triage agents that answer first for what concerns `scopes`: each scope's
-/// own, else the one that serves the whole project ([`front_line`]), each agent once, in the order
-/// of the scopes; for what concerns no scope, the one that serves the whole project.
-pub fn front_lines(principals: &[PrincipalView], scopes: &[EntityId]) -> Vec<FrontLine> {
-    let each: Vec<Option<EntityId>> =
-        if scopes.is_empty() { vec![None] } else { scopes.iter().copied().map(Some).collect() };
-    let mut found: Vec<FrontLine> = Vec::new();
-    for scope in each {
-        if let Some(f) = front_line(principals, scope).filter(|f| found.iter().all(|g| g.agent != f.agent)) {
-            found.push(f);
-        }
-    }
-    found
-}
-
-/// The triage agent that answers first for `scope` ([`front_line`]), read from the graph.
+/// The triage agent that answers first for `scope` ([`front_line`]), read among the principals of
+/// the project the scope is in, wherever that is: the scope a record concerns decides who triages
+/// it, a scope of another project as much as one of `graph`'s (D176), and the agent and the scope
+/// it serves are read in one project. For what concerns no scope, or a scope the node does not
+/// hold, among `graph`'s project's principals.
 pub async fn triage_for(graph: &ProjectGraph, scope: Option<EntityId>) -> Result<Option<FrontLine>> {
-    Ok(front_line(&holding(graph, AgentRole::Triage).await?, scope))
+    let Some(scope) = scope else { return Ok(front_line(&holding(graph, AgentRole::Triage).await?, None)) };
+    let (there, scope) = match graph.follow::<ScopeView>(scope).await? {
+        Followed::Held { record, found, .. } => (graph.graph_of(&found)?, record),
+        Followed::NotHeld => (graph.clone(), scope),
+    };
+    Ok(front_line(&holding(&there, AgentRole::Triage).await?, Some(scope)))
 }
 
 /// The triage agents that answer first for what concerns `scopes`, such as the scopes a task is
-/// worked in ([`front_lines`]), read from the graph: each scope's own, else the one that serves
-/// the whole project, each agent once; for no scope, the one that serves the whole project.
+/// worked in, each read in its scope's project ([`triage_for`]): each scope's own, else the one
+/// that serves that scope's project whole, each agent once, in the order of the scopes; for what
+/// concerns no scope, the one that serves `graph`'s project whole.
 pub async fn triage_for_scopes(graph: &ProjectGraph, scopes: &[EntityId]) -> Result<Vec<FrontLine>> {
-    Ok(front_lines(&holding(graph, AgentRole::Triage).await?, scopes))
+    if scopes.is_empty() {
+        return Ok(triage_for(graph, None).await?.into_iter().collect());
+    }
+    let mut found: Vec<FrontLine> = Vec::new();
+    for scope in scopes {
+        if let Some(f) = triage_for(graph, Some(*scope)).await?.filter(|f| found.iter().all(|g| g.agent != f.agent)) {
+            found.push(f);
+        }
+    }
+    Ok(found)
 }
 
 /// What `p` answers first for as a triage agent: what it serves while it holds triage and is not
@@ -4487,16 +4491,18 @@ pub fn standing(r: &RelationView) -> bool {
     matches!(r.status(), Ok(RelationStatus::Accepted | RelationStatus::Proposed))
 }
 
-/// Who made a task, a message or a decision: the one to tell when what it rests on changes.
+/// Who made a task, a message or a decision, wherever in the node it is: the one to tell when what
+/// it rests on changes, a principal of the record's own project. None for an id the node holds no
+/// such record for.
 pub async fn author_of(graph: &ProjectGraph, id: EntityId) -> Result<Option<EntityId>> {
-    if let Ok(t) = graph.get::<TaskView>(id).await {
-        return Ok(Some(t.created_by()?.into()));
+    if let Followed::Held { found, .. } = graph.follow::<TaskView>(id).await? {
+        return Ok(Some(found.created_by()?.into()));
     }
-    if let Ok(m) = graph.get::<MessageView>(id).await {
-        return Ok(Some(m.author()?.into()));
+    if let Followed::Held { found, .. } = graph.follow::<MessageView>(id).await? {
+        return Ok(Some(found.author()?.into()));
     }
-    if let Ok(d) = graph.get::<DecisionView>(id).await {
-        return Ok(Some(d.author()?.into()));
+    if let Followed::Held { found, .. } = graph.follow::<DecisionView>(id).await? {
+        return Ok(Some(found.author()?.into()));
     }
     Ok(None)
 }

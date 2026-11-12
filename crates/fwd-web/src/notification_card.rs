@@ -27,7 +27,7 @@ use crate::{fmt, modes, references, store, task_row, whose};
 use ankurah::EntityId;
 use fwd_core::model::{NotificationStatus, NotificationType, NotificationView};
 use fwd_core::ops;
-use fwd_core::reason::{self, BatchEntry, Held, MessageFacts, Named, Names, Part, RelationFacts};
+use fwd_core::reason::{self, BatchEntry, DecisionFacts, Held, MessageFacts, Named, Names, Part, RelationFacts};
 use fwd_core::routing::Batch;
 use leptos::prelude::*;
 use serde_json::Value;
@@ -164,8 +164,13 @@ impl Names for StoreNames {
     fn task_title(&self, id: EntityId) -> Option<String> {
         store::task(id).and_then(|t| t.title().ok())
     }
-    fn decision(&self, id: EntityId) -> Option<(i64, String)> {
-        store::decision(id).map(|d| (d.number().unwrap_or(0), d.title().unwrap_or_default()))
+    /// A decision of the page's project, the only project whose decisions its store holds.
+    fn decision(&self, id: EntityId) -> Option<DecisionFacts> {
+        store::decision(id).map(|d| DecisionFacts {
+            number: d.number().unwrap_or(0),
+            title: d.title().unwrap_or_default(),
+            elsewhere: None,
+        })
     }
     fn scope_name(&self, id: EntityId) -> Option<String> {
         store::scope(id).and_then(|s| s.title().ok())

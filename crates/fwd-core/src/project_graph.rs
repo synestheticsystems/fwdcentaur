@@ -21,6 +21,10 @@
 //!   project has an id that starts with it, every project's ids
 //!   ([`ProjectGraph::ids_in_every_project`]), and a command whose subject is a record of another
 //!   project runs in that project, as if it had been run there.
+//! - The routing service alone hears every project's records, through [`NodeGraph`], whose
+//!   standing queries name no project (D177), and it routes each change through the graph of the
+//!   record's own project ([`ProjectGraph::graph_of`]), so that each rule is read where its subject
+//!   is and each notification is made in its recipient's project.
 //!
 //! The Ankurah context the graph wraps never leaves this module, so an operation that left the
 //! project out of a list would not compile. A record's project is read each time and never
@@ -332,6 +336,14 @@ impl ProjectGraph {
         self.ctx.get(id).await
     }
 
+    /// The graph of the project `record` is in: this project's graph for one of its records, else
+    /// that project's. A rule about a record reached by following an id, such as who triages the
+    /// scope a task is worked in, is read among that record's project's principals, and what tells
+    /// a principal of another project is written in that project, where its inbox lists it.
+    pub fn graph_of<V: InProjectView>(&self, record: &V) -> Result<ProjectGraph, PropertyError> {
+        Ok(Self::bound(self.ctx.clone(), record.project_id()?))
+    }
+
     /// Whether `record` is one of this project's, which this graph's transactions change.
     pub fn owns<V: InProjectView>(&self, record: &V) -> bool {
         record.project_id().is_ok_and(|project| project == self.project)
@@ -489,6 +501,47 @@ impl ProjectGraph {
     /// A transaction that makes and edits the project's records alone.
     pub fn begin(&self) -> ProjectTransaction {
         ProjectTransaction { trx: self.ctx.begin(), project: self.project }
+    }
+}
+
+/// Every project's records in the daemon's node, as the one service that answers to a change in
+/// any project reads them: routing, which tells whoever a change concerns (D177). It hears every
+/// project's records through standing queries that name no project, so a record whose project
+/// changes stays in them, and it routes each change by the rules of the record's own project,
+/// through that project's graph ([`NodeGraph::graph_of`]). Nothing that lists or shows records
+/// reads through it: a list is one project's ([`ProjectGraph`]).
+#[derive(Clone)]
+pub struct NodeGraph {
+    ctx: Context,
+}
+
+impl NodeGraph {
+    /// The records of every project in the node `ctx` is a context on.
+    pub fn new(ctx: Context) -> NodeGraph {
+        NodeGraph { ctx }
+    }
+
+    /// Every record of `V`'s model in the node, of whichever project.
+    pub async fn all<V: InProjectView>(&self) -> Result<Vec<V>, RetrievalError> {
+        self.ctx.fetch(selecting(Predicate::True)).await
+    }
+
+    /// A live query on every record of `V`'s model in the node, of whichever project: a record
+    /// whose project changes is an update in it, never a record that leaves and another that
+    /// arrives.
+    pub fn query_all<V: InProjectView>(&self) -> Result<LiveQuery<V>, RetrievalError> {
+        self.ctx.query(selecting(Predicate::True))
+    }
+
+    /// The graph of the project `record` is in, by whose rules a change to it is routed.
+    pub fn graph_of<V: InProjectView>(&self, record: &V) -> Result<ProjectGraph, PropertyError> {
+        Ok(ProjectGraph::bound(self.ctx.clone(), record.project_id()?))
+    }
+
+    /// The graph of every project the node holds a record of.
+    pub async fn projects(&self) -> Result<Vec<ProjectGraph>, RetrievalError> {
+        let every: Vec<ProjectView> = self.ctx.fetch(selecting(Predicate::True)).await?;
+        Ok(every.iter().map(|p| ProjectGraph::bound(self.ctx.clone(), p.id())).collect())
     }
 }
 

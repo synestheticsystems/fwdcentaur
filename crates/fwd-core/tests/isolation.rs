@@ -2,10 +2,11 @@
 //! holding look-alike records: the same handles, titles, scope names and decision numbers. A
 //! project is a grouping and the filter of every list, not a wall (D176, D181): every list and every
 //! live query of one project holds that project's records alone, in the shapes the page, the
-//! wallboard and `fwd watch` open them, before or after it was opened, and routing in one project
-//! tells that project's principals alone; while an id someone types, an id a record holds and a
-//! record's relations reach a record of the other project, and what they give says which project it
-//! is in. One project's graph changes none of the other's records.
+//! wallboard and `fwd watch` open them, before or after it was opened, and routing tells each
+//! recipient in its own project's inbox, whom a project's own records name in that project alone;
+//! while an id someone types, an id a record holds and a record's relations reach a record of the
+//! other project, and what they give says which project it is in, as routing follows them to whom
+//! they lead. One project's graph changes none of the other's records.
 
 use ankurah::changes::ChangeSet;
 use ankurah::error::RetrievalError;
@@ -18,6 +19,7 @@ use fwd_core::model::*;
 use fwd_core::ops::{self, CreateDecision, CreateScope, CreateTask, Kind, MessageContext};
 use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, ProjectGraphError, Whose};
 use fwd_core::query::with_id;
+use fwd_core::rules::{DecisionMove, Verb};
 use fwd_core::{decision_log, naming, routing};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -463,11 +465,20 @@ async fn a_live_query_of_one_project_never_hears_of_the_others_records_before_or
     Ok(())
 }
 
+/// Routing reads each rule where its subject is and tells each recipient in its own project. What
+/// alpha's own records cause tells alpha's principals alone, through alpha's inboxes, and changes
+/// nothing of beta's. Where a record of one project holds an id of the other's (a dependency, a
+/// citation, a mention, a scope it is worked in), the change reaches across, to whom that reference
+/// leads alone: beta's implementer whom alpha's message names, beta's triage agent for a comment on
+/// alpha's task worked in beta's scope, alpha's implementer when beta finishes the task her task
+/// waits on, and alpha's person when beta repeals the decision his task cites. Every notification is in its
+/// recipient's project, so each project's list of notifications names its own principals alone.
 #[tokio::test]
-async fn routing_in_one_project_tells_its_own_principals_and_no_one_in_the_other() -> Result<()> {
+async fn routing_tells_whom_each_rule_names_each_in_its_own_project() -> Result<()> {
     let (alpha, beta) = two_projects().await?;
     let a = populate(&alpha).await?;
     let b = populate(&beta).await?;
+    let ours: BTreeSet<EntityId> = ops::principals(&alpha).await?.iter().map(View::id).collect();
     let theirs: BTreeSet<EntityId> = ops::principals(&beta).await?.iter().map(View::id).collect();
     let before = every_id(&beta).await?;
 
@@ -499,6 +510,71 @@ async fn routing_in_one_project_tells_its_own_principals_and_no_one_in_the_other
     assert!(!made.is_empty());
     assert_eq!(every_id(&beta).await?, before, "nothing of beta's was made or touched");
     assert_eq!(ops::inbox(&beta, b.alice, false).await?.len(), 1, "beta's implementer has her own question alone");
+
+    // Records that cross: alpha's task waits on beta's, which alpha's implementer holds; alpha's
+    // task, which its person made, cites beta's ruling; alpha's message names beta's implementer;
+    // and alpha's task is worked in beta's scope, which beta's agent that serves beta whole triages.
+    let waits =
+        ops::create_task(&alpha, a.daniel, CreateTask { title: "Use beta's cap".into(), ..Default::default() }).await?;
+    ops::link(&alpha, a.daniel, RelationKind::DependsOn, waits, b.cap, None, false, json!({})).await?;
+    ops::assign(&alpha, a.daniel, waits, Some(a.alice)).await?;
+    ops::cite(&alpha, a.alice, a.cap, b.decision, None).await?;
+    let worked =
+        ops::create_task(&alpha, a.daniel, CreateTask { title: "In beta's scope".into(), ..Default::default() })
+            .await?;
+    ops::link(&alpha, a.daniel, RelationKind::WorkedIn, worked, b.scope, None, false, json!({})).await?;
+    let naming = ops::post_message(
+        &alpha,
+        a.daniel,
+        &format!("[[{}]], this is yours", b.alice),
+        Priority::Next,
+        MessageContext::default(),
+    )
+    .await?;
+    let on_worked = MessageContext { task_id: Some(worked), ..Default::default() };
+    let on_scope = ops::post_message(&alpha, a.daniel, "see the scope", Priority::Next, on_worked).await?;
+    let mut crossing = Vec::new();
+    for message in [naming, on_scope] {
+        crossing.extend(routing::plan_for_message(&alpha, &alpha.get(message).await?).await?);
+    }
+    ops::transition(&beta, b.daniel, b.cap, Verb::Done, None).await?;
+    let finished: TaskView = beta.get(b.cap).await?;
+    crossing.extend(routing::plan_for_task_status(&beta, &finished, TaskStatus::Open, Some(b.daniel)).await?);
+    ops::move_decision(&beta, b.daniel, b.decision, DecisionMove::Repeal, "the transport retries now").await?;
+    let repealed: DecisionView = beta.get(b.decision).await?;
+    crossing
+        .extend(routing::plan_for_decision_status(&beta, &repealed, DecisionStatus::Accepted, Some(b.daniel)).await?);
+    let mut reached: Vec<(EntityId, NotificationType)> =
+        crossing.iter().map(|p| (p.recipient, p.notification_type)).collect();
+    reached.sort();
+    let mut expected = vec![
+        (b.alice, NotificationType::Mentioned),
+        (b.triage, NotificationType::TaskCommented),
+        (a.alice, NotificationType::TaskUnblocked),
+        (a.daniel, NotificationType::DecisionRepealed),
+    ];
+    expected.sort();
+    assert_eq!(reached, expected, "each crossing reference, and nothing else");
+    routing::apply(&beta, &crossing).await?;
+
+    // Each notification is in its recipient's project.
+    let recipients = |found: Vec<NotificationView>| -> Result<BTreeSet<EntityId>> {
+        Ok(found.iter().map(|n| n.recipient().map(EntityId::from)).collect::<Result<_, _>>()?)
+    };
+    let in_alpha = recipients(alpha.all::<NotificationView>().await?)?;
+    let in_beta = recipients(beta.all::<NotificationView>().await?)?;
+    assert!(in_alpha.is_subset(&ours) && in_beta.is_subset(&theirs), "alpha {in_alpha:?}, beta {in_beta:?}");
+    let types = |graph: &ProjectGraph, who: EntityId| {
+        let graph = graph.clone();
+        async move {
+            let held = ops::inbox(&graph, who, false).await?;
+            anyhow::Ok(held.iter().map(|n| n.notification_type()).collect::<Result<BTreeSet<_>, _>>()?)
+        }
+    };
+    assert!(types(&beta, b.alice).await?.contains(&NotificationType::Mentioned));
+    assert!(types(&beta, b.triage).await?.contains(&NotificationType::TaskCommented));
+    assert!(types(&alpha, a.alice).await?.contains(&NotificationType::TaskUnblocked));
+    assert!(types(&alpha, a.daniel).await?.contains(&NotificationType::DecisionRepealed));
     Ok(())
 }
 

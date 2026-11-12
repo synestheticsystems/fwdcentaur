@@ -1064,12 +1064,12 @@ async fn what_concerns_a_task_in_two_scopes_reaches_the_triage_agent_of_each() -
     assert_eq!(told(planned), expected);
 
     // One agent that triages two of a task's scopes answers first for both as one, told once, as
-    // the scope first among them (`ops::front_lines`): Storage's agent comes to serve Releases too.
+    // the scope first among them (`ops::triage_for_scopes`): Storage's agent comes to serve
+    // Releases too.
     let releases = ops::create_scope(&graph, daniel, named_scope("Releases")).await?;
     ops::serve(&graph, "triage-b", ops::Serves::Scope(releases)).await?;
-    let principals = ops::principals(&graph).await?;
     assert_eq!(
-        ops::front_lines(&principals, &[b, releases]),
+        ops::triage_for_scopes(&graph, &[b, releases]).await?,
         vec![ops::FrontLine { agent: of_b, scope: Some(b) }],
         "one front line for the agent of both scopes"
     );
