@@ -259,8 +259,10 @@ impl Operations {
                 None => None,
             };
         // Placed before the caller's principal is found, which is found, or made, where the call
-        // runs, as the CLI places a command (`crate::run_cli`).
-        let placed = runs_in::runs_in(&start, &command, scoped).await?;
+        // runs, as the CLI places a command (`crate::run_cli`). The call's `project` is where it
+        // starts, which every call names, as the directory is for the CLI, so a `scope` of another
+        // project places a call that acts on no one record.
+        let placed = runs_in::runs_in(&start, &command, false, scoped).await?;
         let (project, graph) = match &placed.project {
             Whose::Other(there) => self
                 .hosting

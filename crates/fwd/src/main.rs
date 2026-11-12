@@ -86,8 +86,8 @@ macro_rules! naming_in_text {
 struct Cli {
     /// The project: a name, an id, or a directory inside one of its checkouts (default: found from
     /// the current directory through its git upstream, or a `.fwd/project.toml` marker). A command
-    /// that acts on a record of another project, or that works in another project's scope, runs in
-    /// that project instead, and says so.
+    /// that acts on a record of another project runs in that project instead, and says so; so does
+    /// one that works in another project's scope, unless --project is typed on its command line.
     #[arg(long, global = true, env = "FWD_PROJECT")]
     project: Option<String>,
     /// Fail instead of starting the daemon when none is running.
@@ -114,7 +114,7 @@ struct Cli {
     act_as: Option<String>,
     /// The scope this session works in: any scope, whoever made it, by its id or its first six
     /// characters or more, of any project; a command that acts on no one record, given a scope of
-    /// another project, runs in that project. Without it, the scope the checkout is bound to (`fwd scope
+    /// another project, runs in that project, unless --project is typed on its command line. Without it, the scope the checkout is bound to (`fwd scope
     /// attach-dir`), else the one active scope naming its branch.
     #[arg(long, global = true, env = "FWD_SCOPE", allow_hyphen_values = true)]
     scope: Option<String>,
@@ -2188,6 +2188,10 @@ async fn run_cli() -> Result<()> {
     // the checkout finds: a question names the scope it asks only so (`fwd ask --scope`), and a
     // triage agent that serves scopes already takes another as it names itself only so.
     let scope_typed = matches.value_source("scope") == Some(ValueSource::CommandLine);
+    // Whether `--project` was typed on the command line, told apart from FWD_PROJECT: a scope never
+    // overrides a project the command line names, while it places a command FWD_PROJECT or the
+    // directory would otherwise place (`runs_in::runs_in`).
+    let project_typed = matches.value_source("project") == Some(ValueSource::CommandLine);
     let serving = matches!(cli.command, Command::Daemon { command: DaemonCommand::Serve { .. } });
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -2534,10 +2538,12 @@ async fn run_cli() -> Result<()> {
         report_checkout(&client, c).await;
     }
     // A command that acts on a record of another project, or that works in a scope of another
-    // project, runs in that project, as if `--project` had named it, and says so
-    // (docs/DECISIONS.md, D181): it is placed before whom it acts as is found, so that its caller
-    // is found, or made, there, and nothing is read for the caller or written where it started.
-    let placed = client.while_connected(runs_in::runs_in(&client.graph, &cli.command, cli.scope.as_deref())).await?;
+    // project and was given no `--project`, runs in that project, as if `--project` had named it,
+    // and says so (docs/DECISIONS.md, D181): it is placed before whom it acts as is found, so that
+    // its caller is found, or made, there, and nothing is read for the caller or written where it
+    // started.
+    let placing = runs_in::runs_in(&client.graph, &cli.command, project_typed, cli.scope.as_deref());
+    let placed = client.while_connected(placing).await?;
     let (resolved, client) = match &placed.project {
         Whose::Other(there) => {
             let project = NamedProject { id: there.uuid, name: there.name.clone() };

@@ -154,11 +154,18 @@ pub(crate) struct RunsIn {
 }
 
 /// Places `command`, which started in `graph`'s project, where it runs: in the project of the
-/// record it acts on ([`placed_by`]), found in whichever project it is (`ops::locate`); without
-/// one, in the project of `scope`, the scope it works in as typed (`--scope` or `FWD_SCOPE` for the
-/// CLI, `scope` for the MCP), named by its id or the start of it; otherwise in the project it
-/// started in.
-pub(crate) async fn runs_in(graph: &ProjectGraph, command: &Command, scope: Option<&str>) -> Result<RunsIn> {
+/// record it acts on ([`placed_by`]), found in whichever project it is (`ops::locate`). Without
+/// one, it runs where it started when that is the project a `--project` typed on its command line
+/// names (`project_typed`), which no scope overrides, the scope being then a reference like any
+/// other; else in the project of `scope`, the scope it works in as typed (`--scope` or `FWD_SCOPE`
+/// for the CLI, `scope` for the MCP), named by its id or the start of it; otherwise where it
+/// started, the project FWD_PROJECT or the directory names, or an MCP call's `project`.
+pub(crate) async fn runs_in(
+    graph: &ProjectGraph,
+    command: &Command,
+    project_typed: bool,
+    scope: Option<&str>,
+) -> Result<RunsIn> {
     match placed_by(command) {
         Some(PlacedBy::Record { typed, kinds }) => {
             let found = ops::locate(graph, typed, kinds).await?;
@@ -201,7 +208,7 @@ pub(crate) async fn runs_in(graph: &ProjectGraph, command: &Command, scope: Opti
             };
             Ok(RunsIn { project, because: format!("`{from} {kind} {to}`"), typed })
         }
-        None => match scope {
+        None => match scope.filter(|_| !project_typed) {
             Some(scope) => {
                 let found = ops::locate(graph, scope, SCOPE).await?;
                 Ok(RunsIn {

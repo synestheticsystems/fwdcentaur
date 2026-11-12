@@ -61,6 +61,17 @@ impl Daemon {
     /// `fwd --format <format> <args>` in `checkout`, reaching this daemon only, with none of the
     /// caller's settings that would choose another project, principal or scope.
     fn fwd(&self, checkout: &Path, format: &str, args: &[&str]) -> Result<std::process::Output> {
+        self.fwd_with(checkout, format, args, &[])
+    }
+
+    /// `fwd --format <format> <args>` as [`Daemon::fwd`] runs it, with `env` set too.
+    fn fwd_with(
+        &self,
+        checkout: &Path,
+        format: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<std::process::Output> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fwd"));
         command
             .current_dir(checkout)
@@ -80,7 +91,7 @@ impl Daemon {
         ] {
             command.env_remove(name);
         }
-        Ok(command.output()?)
+        Ok(command.envs(env.iter().copied()).output()?)
     }
 
     /// What `fwd <args>` exits with in `checkout`, as JSON: its standard output when it succeeds,
@@ -97,7 +108,12 @@ impl Daemon {
     /// The JSON `fwd <args>` prints in `checkout`, which must succeed, and what it said on standard
     /// error beside it.
     fn json_and_said(&self, checkout: &Path, args: &[&str]) -> Result<(Value, String)> {
-        let out = self.fwd(checkout, "json", args)?;
+        self.json_and_said_with(checkout, args, &[])
+    }
+
+    /// What [`Daemon::json_and_said`] gives, for `fwd <args>` run with `env` set too.
+    fn json_and_said_with(&self, checkout: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<(Value, String)> {
+        let out = self.fwd_with(checkout, "json", args, env)?;
         let said = String::from_utf8_lossy(&out.stderr).into_owned();
         if !out.status.success() {
             return Err(anyhow!("fwd {} failed: {said}", args.join(" ")));
@@ -631,6 +647,33 @@ async fn a_scope_of_the_other_project_is_followed_as_a_reference_and_runs_a_comm
 
     let (shown, said) = daemon.json_and_said(&daemon.alpha, &[&scoped[..], &["task", "show", &a.cap]].concat())?;
     assert!(!said.contains("NOTE") && shown.get("from_project").is_none(), "{said} {shown}");
+    Ok(())
+}
+
+/// A `--project` typed on the command line is never overridden by a scope: given alpha by
+/// `--project` and beta's scope by `--scope`, a command that acts on no one record runs in alpha,
+/// saying nothing, and the scope is followed as a reference, so the task it makes is alpha's and
+/// is worked in beta's scope. FWD_PROJECT, which the command line does not type, gives way to the
+/// scope as the directory does.
+#[tokio::test]
+async fn a_project_typed_on_the_command_line_is_never_overridden_by_a_scope_of_another_project() -> Result<()> {
+    let Two { daemon, a: _, b, alpha, beta } = Two::new().await?;
+    let scoped = ["--project", "alpha", "--scope", b.scope.as_str()];
+    let create = [&scoped[..], &["task", "create", "Made in alpha, worked in beta's scope"]].concat();
+    let (made, said) = daemon.json_and_said(&daemon.beta, &create)?;
+    assert!(!said.contains("NOTE") && made.get("from_project").is_none(), "{said} {made}");
+    let task: EntityId = made["record"]["id"].as_str().ok_or_else(|| anyhow!("no id in {made}"))?.parse()?;
+    assert!(alpha.graph.get::<TaskView>(task).await.is_ok(), "the task is alpha's");
+    assert_eq!(ops::worked_in(&alpha.graph, task).await?, vec![b.scope.parse()?], "worked in beta's scope");
+    let (me, _) = daemon.json_and_said(&daemon.beta, &[&scoped[..], &["whoami"]].concat())?;
+    assert_eq!((&me["project"]["name"], &me["scope"]), (&json!("alpha"), &json!(b.scope)), "{me}");
+
+    let by_env = [("FWD_PROJECT", "alpha")];
+    let (me, said) = daemon.json_and_said_with(&daemon.beta, &["--scope", b.scope.as_str(), "whoami"], &by_env)?;
+    let note = format!("NOTE: the scope `{}` is from project `beta`, so this command ran there", b.scope);
+    assert!(said.contains(&note), "{said}");
+    assert_eq!(me["project"]["name"], "beta", "FWD_PROJECT gives way to the scope: {me}");
+    assert!(beta.graph.get::<TaskView>(task).await.is_err(), "beta holds nothing of it");
     Ok(())
 }
 
