@@ -1,10 +1,12 @@
 //! The project a command runs in. A project is a grouping and the filter of every list, not a wall
-//! (docs/DECISIONS.md, D176, D181), so a command whose subject is a record of another project runs
-//! in that project, as if `--project` had named it, and says so, as the page switches to the
-//! project of a record it opens: a read prints the record, and a write is made there, by whoever
-//! the caller is there. A command whose subject is none, and that works in a scope of another
-//! project (`--scope`), runs in that scope's project, since a scope names its project. Every other
-//! id a command takes is a reference, which names a record of any project and moves nothing.
+//! (docs/DECISIONS.md, D176, D181), so a command that acts on a record of another project runs in
+//! that project, as if `--project` had named it, and says so, as the page switches to the project
+//! of a record it opens: a read prints the record, and a write is made there, by whoever the
+//! caller is there. A command that acts on no one record runs in the project `--project` names on
+//! its command line; without that, when it works in a scope of another project (`--scope`,
+//! FWD_SCOPE, the MCP's `scope`), in that scope's project, since a scope names its project; and
+//! otherwise in the project FWD_PROJECT or the directory names, or the MCP call's `project`. Every
+//! other id a command takes is a reference, which names a record of any project and moves nothing.
 //!
 //! The CLI (`run_cli`) and the MCP endpoint (`mcp`) place a command here before they find whom it
 //! acts as, so that its caller is found, or made, in the project it runs in, and nothing is read
@@ -28,8 +30,8 @@ const MESSAGE: &[Kind] = &[Kind::Message];
 const MESSAGE_OR_NOTIFICATION: &[Kind] = &[Kind::Message, Kind::Notification];
 const DISCUSSED: &[Kind] = &[Kind::Task, Kind::Anchor, Kind::Scope, Kind::Decision];
 
-/// The record a command acts on, as typed on its command line.
-enum Subject<'a> {
+/// What places a command in a project: the record it acts on, as typed on its command line.
+enum PlacedBy<'a> {
     /// A record named by an id, among the kinds it may be.
     Record { typed: &'a str, kinds: &'static [Kind] },
     /// A step of a task's checklist (`step check`, `uncheck`, `remove`), named by its number in the
@@ -41,12 +43,13 @@ enum Subject<'a> {
     Relations { from: &'a str, kind: RelationKind, to: &'a str },
 }
 
-/// The record `command` acts on, as typed on its command line; none for a command that acts on no
-/// one record: one that makes a record (`task create`), lists, or reads the caller's own inbox.
-/// `fwd link <from> <kind> <to>` acts on `from`, and `to` may be a record of another project.
-fn subject_of(command: &Command) -> Option<Subject<'_>> {
-    fn record<'a>(typed: &'a str, kinds: &'static [Kind]) -> Option<Subject<'a>> {
-        Some(Subject::Record { typed, kinds })
+/// The record `command` acts on, which places it, as typed on its command line; none for a command
+/// that acts on no one record: one that makes a record (`task create`), lists, or reads the
+/// caller's own inbox. `fwd link <from> <kind> <to>` acts on `from`, and `to` may be a record of
+/// another project.
+fn placed_by(command: &Command) -> Option<PlacedBy<'_>> {
+    fn record<'a>(typed: &'a str, kinds: &'static [Kind]) -> Option<PlacedBy<'a>> {
+        Some(PlacedBy::Record { typed, kinds })
     }
     match command {
         Command::Task { command } => match command {
@@ -73,10 +76,10 @@ fn subject_of(command: &Command) -> Option<Subject<'_>> {
             StepCommand::Add { task, .. } | StepCommand::List { task } => record(task, TASK),
             StepCommand::Check { task, step }
             | StepCommand::Uncheck { task, step }
-            | StepCommand::Remove { task, step, .. } => Some(Subject::Step { task, step }),
+            | StepCommand::Remove { task, step, .. } => Some(PlacedBy::Step { task, step }),
         },
         Command::Link { from, .. } => record(from, ops::ANY),
-        Command::Unlink { from, kind, to, .. } => Some(Subject::Relations { from, kind: *kind, to }),
+        Command::Unlink { from, kind, to, .. } => Some(PlacedBy::Relations { from, kind: *kind, to }),
         Command::Relations { id, .. } => record(id, ops::ANY),
         Command::Relation { command: RelationCommand::Approve { id } | RelationCommand::Reject { id, .. } } => {
             record(id, &[Kind::Relation])
@@ -116,7 +119,7 @@ fn subject_of(command: &Command) -> Option<Subject<'_>> {
         },
         Command::Cite { entity, .. } => record(entity, &[Kind::Task, Kind::Message, Kind::Decision]),
         Command::Read { ids } | Command::Dismiss { ids } => {
-            ids.first().map(|id| Subject::Record { typed: id, kinds: &[Kind::Notification] })
+            ids.first().map(|id| PlacedBy::Record { typed: id, kinds: &[Kind::Notification] })
         }
         _ => None,
     }
@@ -140,8 +143,8 @@ impl Typed {
 
 /// Where a command runs, as [`runs_in`] places it.
 pub(crate) struct RunsIn {
-    /// Another project, when the command's subject or the scope it works in is that project's;
-    /// otherwise the project it started in.
+    /// Another project, when the record the command acts on, or the scope it works in, is that
+    /// project's; otherwise the project it started in.
     pub(crate) project: Whose,
     /// What the command's note names as the record of that project: "`<id>`", "step `2` of
     /// `<task>`", "the scope `<id>`".
@@ -150,14 +153,14 @@ pub(crate) struct RunsIn {
     pub(crate) typed: Vec<Typed>,
 }
 
-/// Places `command`, which started in `graph`'s project, where it runs: in the project of its
-/// subject ([`subject_of`]), found in whichever project it is (`ops::locate`); without a subject,
-/// in the project of `scope`, the scope it works in as typed (`--scope` or `FWD_SCOPE` for the CLI,
-/// `scope` for the MCP), named by its id or the start of it; otherwise in the project it started
-/// in.
+/// Places `command`, which started in `graph`'s project, where it runs: in the project of the
+/// record it acts on ([`placed_by`]), found in whichever project it is (`ops::locate`); without
+/// one, in the project of `scope`, the scope it works in as typed (`--scope` or `FWD_SCOPE` for the
+/// CLI, `scope` for the MCP), named by its id or the start of it; otherwise in the project it
+/// started in.
 pub(crate) async fn runs_in(graph: &ProjectGraph, command: &Command, scope: Option<&str>) -> Result<RunsIn> {
-    match subject_of(command) {
-        Some(Subject::Record { typed, kinds }) => {
+    match placed_by(command) {
+        Some(PlacedBy::Record { typed, kinds }) => {
             let found = ops::locate(graph, typed, kinds).await?;
             Ok(RunsIn {
                 project: found.project,
@@ -165,7 +168,7 @@ pub(crate) async fn runs_in(graph: &ProjectGraph, command: &Command, scope: Opti
                 typed: vec![Typed::of(typed, kinds, found.id)],
             })
         }
-        Some(Subject::Step { task, step }) => {
+        Some(PlacedBy::Step { task, step }) => {
             let found = ops::locate(graph, task, TASK).await?;
             let (_, edge) = step_named(graph, found.id, step).await?;
             Ok(RunsIn {
@@ -174,7 +177,7 @@ pub(crate) async fn runs_in(graph: &ProjectGraph, command: &Command, scope: Opti
                 typed: vec![Typed::of(task, TASK, found.id)],
             })
         }
-        Some(Subject::Relations { from, kind, to }) => {
+        Some(PlacedBy::Relations { from, kind, to }) => {
             let (start, end) = (ops::locate(graph, from, ops::ANY).await?, ops::locate(graph, to, ops::ANY).await?);
             let typed = vec![Typed::of(from, ops::ANY, start.id), Typed::of(to, ops::ANY, end.id)];
             let mut projects: Vec<Whose> = Vec::new();

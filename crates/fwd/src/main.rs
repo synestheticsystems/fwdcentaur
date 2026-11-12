@@ -86,8 +86,8 @@ macro_rules! naming_in_text {
 struct Cli {
     /// The project: a name, an id, or a directory inside one of its checkouts (default: found from
     /// the current directory through its git upstream, or a `.fwd/project.toml` marker). A command
-    /// whose subject is a record of another project, or that works in another project's scope,
-    /// runs in that project instead, and says so.
+    /// that acts on a record of another project, or that works in another project's scope, runs in
+    /// that project instead, and says so.
     #[arg(long, global = true, env = "FWD_PROJECT")]
     project: Option<String>,
     /// Fail instead of starting the daemon when none is running.
@@ -113,8 +113,8 @@ struct Cli {
     #[arg(long = "as", global = true, env = "FWD_AS", allow_hyphen_values = true)]
     act_as: Option<String>,
     /// The scope this session works in: any scope, whoever made it, by its id or its first six
-    /// characters or more, of any project; a command with no subject given a scope of another
-    /// project runs in that project. Without it, the scope the checkout is bound to (`fwd scope
+    /// characters or more, of any project; a command that acts on no one record, given a scope of
+    /// another project, runs in that project. Without it, the scope the checkout is bound to (`fwd scope
     /// attach-dir`), else the one active scope naming its branch.
     #[arg(long, global = true, env = "FWD_SCOPE", allow_hyphen_values = true)]
     scope: Option<String>,
@@ -1553,10 +1553,10 @@ struct App {
     /// ([`App::needed_scope`]).
     several: Option<(Option<String>, Vec<EntityId>)>,
     format: Format,
-    /// The name of the project the command moved to because its subject, or the scope it works
-    /// in, is a record of that project (docs/DECISIONS.md, D181; [`App::moved_to`]), which its
-    /// answer names; none for a command that runs in the project it started in.
-    subject_project: Option<String>,
+    /// The name of the project the command was placed in because the record it acts on, or the
+    /// scope it works in, is a record of that project (docs/DECISIONS.md, D181; [`App::place_in`]),
+    /// which its answer names; none for a command that runs in the project it started in.
+    placed_in: Option<String>,
     /// The ids typed on the command that placing it resolved before it ran ([`runs_in::runs_in`]),
     /// which [`App::id`] gives without reading every project's ids again.
     typed: Vec<runs_in::Typed>,
@@ -1564,12 +1564,12 @@ struct App {
 
 impl App {
     /// Records that the command runs in `project` rather than the one it started in, as if it had
-    /// been run there, because `because` (its subject, as [`runs_in::RunsIn`] names it) is a
-    /// record of that project, and says so beside its answer; a JSON answer names the project as
-    /// `from_project` ([`App::print`]).
-    fn moved_to(&mut self, because: &str, project: &str) {
+    /// been run there, because `because` (the record it acts on, as [`runs_in::RunsIn`] names it)
+    /// is a record of that project, and says so beside its answer; a JSON answer names the project
+    /// as `from_project` ([`App::print`]).
+    fn place_in(&mut self, because: &str, project: &str) {
         self.note(format!("NOTE: {because} is from project `{project}`, so this command ran there"));
-        self.subject_project = Some(project.to_string());
+        self.placed_in = Some(project.to_string());
     }
 
     /// Anchors are made from files, so this needs a checkout of one of the project's repositories:
@@ -1669,11 +1669,12 @@ impl App {
         }
     }
 
-    /// Prints `value`, the command's answer: as JSON, an object names the project the command
-    /// moved to as `from_project` when its subject is another project's record ([`App::moved_to`]).
+    /// Prints `value`, the command's answer: as JSON, an object names the project the command was
+    /// placed in as `from_project` when the record it acts on is another project's
+    /// ([`App::place_in`]).
     fn print(&self, mut value: Value) -> Result<()> {
         if let (Some(project), Some(answer), false) =
-            (&self.subject_project, value.as_object_mut(), self.format == Format::Text)
+            (&self.placed_in, value.as_object_mut(), self.format == Format::Text)
         {
             answer.insert("from_project".into(), json!(project));
         }
@@ -2532,7 +2533,7 @@ async fn run_cli() -> Result<()> {
     if let Some(c) = &resolved.checkout {
         report_checkout(&client, c).await;
     }
-    // A command whose subject is a record of another project, or that works in a scope of another
+    // A command that acts on a record of another project, or that works in a scope of another
     // project, runs in that project, as if `--project` had named it, and says so
     // (docs/DECISIONS.md, D181): it is placed before whom it acts as is found, so that its caller
     // is found, or made, there, and nothing is read for the caller or written where it started.
@@ -2548,7 +2549,7 @@ async fn run_cli() -> Result<()> {
     let calling = Calling { subject, typed_as, thread_hook, scope_typed };
     let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
     if let Whose::Other(there) = &placed.project {
-        app.moved_to(&placed.because, &there.name);
+        app.place_in(&placed.because, &there.name);
     }
     // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
     // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
@@ -2744,7 +2745,7 @@ async fn connect(
         scope_typed,
         several,
         format,
-        subject_project: None,
+        placed_in: None,
         typed,
     })
 }

@@ -281,8 +281,8 @@ fn prints_its_own(wanted: &str, command: &[&str], printed: &str) {
     );
 }
 
-/// Fails unless `fwd <args>`, run in alpha, ran in beta, the project of its subject: it said so on
-/// standard error, and its JSON names beta as `from_project`. Returns the JSON.
+/// Fails unless `fwd <args>`, run in alpha, ran in beta, the project of the record it acts on: it
+/// said so on standard error, and its JSON names beta as `from_project`. Returns the JSON.
 fn ran_in_beta(daemon: &Daemon, args: &[&str]) -> Result<Value> {
     let (printed, said) = daemon.json_and_said(&daemon.alpha, args)?;
     assert!(said.contains("is from project `beta`, so this command ran there"), "fwd {}: {said}", args.join(" "));
@@ -607,13 +607,12 @@ async fn a_step_another_project_made_is_checked_from_either_project_where_its_re
 }
 
 /// A scope of beta's, named in alpha by its id or the start of it, is a scope like any other: a
-/// ruling of alpha's is attached to it, the command running in alpha, whose ruling is its subject;
-/// given as the scope a command with no subject works in, it runs that command in beta, saying so,
-/// where the task it makes is beta's; and a command whose subject is alpha's runs in alpha
-/// whatever scope it works in.
+/// ruling of alpha's is attached to it, the command running in alpha, whose ruling it acts on;
+/// given as the scope a command that acts on no one record works in, it runs that command in beta,
+/// saying so, where the task it makes is beta's; and a command that acts on a record of alpha's
+/// runs in alpha whatever scope it works in.
 #[tokio::test]
-async fn a_scope_of_the_other_project_is_followed_as_a_reference_and_runs_a_command_with_no_subject_there() -> Result<()>
-{
+async fn a_scope_of_the_other_project_is_followed_as_a_reference_and_runs_a_command_on_no_record_there() -> Result<()> {
     let Two { daemon, a, b, alpha, beta } = Two::new().await?;
     let (attached, said) = daemon.json_and_said(&daemon.alpha, &["decision", "attach", "D1", &b.scope[..8]])?;
     assert!(!said.contains("NOTE"), "{said}");
@@ -786,13 +785,14 @@ async fn the_mcp_read_tools_in_one_project_give_its_own_records_and_reach_the_ot
     Ok(())
 }
 
-/// A call through the MCP endpoint, started in alpha, whose subject is beta's runs in beta as the
-/// thread's principal there, made there by the call: a comment on beta's task, named by the start
-/// of its id, is written in beta by that principal, and alpha holds nothing more, no principal for
-/// the thread among it; a reply given the whole id of the notification of a question beta asks
-/// that principal settles it there. A call with no subject given beta's scope runs in beta.
+/// A call through the MCP endpoint, started in alpha, that acts on a record of beta's runs in beta
+/// as the thread's principal there, made there by the call: a comment on beta's task, named by the
+/// start of its id, is written in beta by that principal, and alpha holds nothing more, no
+/// principal for the thread among it; a reply given the whole id of the notification of a question
+/// beta asks that principal settles it there. A call that acts on no one record, given beta's
+/// scope, runs in beta.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_mcp_call_whose_subject_or_scope_is_the_others_runs_there_as_the_threads_principal_there() -> Result<()> {
+async fn an_mcp_call_on_the_others_record_or_in_its_scope_runs_there_as_the_threads_principal_there() -> Result<()> {
     // The daemon is bound, not dropped: its scratch folder stops it when it goes.
     let Two { daemon: _daemon, a: _, b, alpha, beta } = Two::new().await?;
     let before = records(&alpha.graph).await?;

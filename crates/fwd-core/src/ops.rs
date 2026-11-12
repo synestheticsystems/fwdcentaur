@@ -4777,7 +4777,7 @@ pub async fn resolve_id(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result
 }
 
 /// An id someone typed, resolved ([`locate`]): the record it names, and the project that record
-/// is in, where a command whose subject it is runs.
+/// is in, where a command that acts on it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Located {
     pub id: EntityId,

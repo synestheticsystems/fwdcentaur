@@ -13,13 +13,14 @@
 //!   are read by that record's id ([`ProjectGraph::relations_from`], `relations_to`, `relation`),
 //!   whichever project made them, so a relation made in another project shows on the record it
 //!   points at, and a command that changes a relation runs in the project that made it, as any
-//!   command whose subject is a record of another project does. An id a record holds (a relation's end, a message's author, a task's assignee or scope, a cited
-//!   decision) is followed wherever its record is ([`ProjectGraph::follow`]), and the record comes
-//!   with its project, which a reader names beside it.
+//!   command that acts on a record of another project does. An id a record holds (a relation's
+//!   end, a message's author, a task's assignee or scope, a cited decision) is followed wherever
+//!   its record is ([`ProjectGraph::follow`]), and the record comes with its project, which a
+//!   reader names beside it.
 //! - An id someone types names a record of any project (D181): the resolver reads the former ids
 //!   that start with it ([`ProjectGraph::former_ids_starting`]) and, when no record of the
 //!   project has an id that starts with it, every project's ids
-//!   ([`ProjectGraph::ids_in_every_project`]), and a command whose subject is a record of another
+//!   ([`ProjectGraph::ids_in_every_project`]), and a command that acts on a record of another
 //!   project runs in that project, as if it had been run there.
 //! - The routing service alone hears every project's records, through [`NodeGraph`], whose
 //!   standing queries name no project (D177), and it routes each change through the graph of the
@@ -105,7 +106,7 @@ pub enum ProjectGraphError {
     /// A record of another project, such as a relation another project made that points at one of
     /// this project's records, was to be changed in this project's graph, which changes only its
     /// own project's records, so that what a command writes is attributed to its caller in the
-    /// project it runs in: a command whose subject is the record runs in the record's project.
+    /// project it runs in: a command that acts on the record runs in the record's project.
     #[error(
         "{} is a record of another project ({}), which only a command run in that project changes",
         .record.to_base64(),
@@ -297,8 +298,8 @@ impl ProjectGraph {
     }
 
     /// The project's record `id`, read as `V`. A record of another project is not found here, as
-    /// an id that names nothing is not: a command whose subject is a record of another project
-    /// runs in that project's graph, and an id a record holds is followed
+    /// an id that names nothing is not: a command that acts on a record of another project runs in
+    /// that project's graph, and an id a record holds is followed
     /// ([`ProjectGraph::follow`]).
     pub async fn get<V: InProjectView>(&self, id: EntityId) -> Result<V, RetrievalError> {
         let view: V = self.ctx.get(id).await?;

@@ -222,8 +222,8 @@ impl Operations {
 
     /// Runs the CLI command `spec` stands for, for `caller`, as the CLI runs it after connecting
     /// (`crate::run_cli`): the command parsed by the CLI's parser, run in the project the call's
-    /// `project` names, or in the project of the command's subject, or without one of the call's
-    /// `scope`, when that is a record of another, as the CLI places it (`crate::runs_in`,
+    /// `project` names, or in the project of the record the command acts on, or without one of the
+    /// call's `scope`, when that is a record of another, as the CLI places it (`crate::runs_in`,
     /// docs/DECISIONS.md, D181); the principal the caller acts as there found (and made when the
     /// command needs one), the CLI's refusals, the command, and its bookkeeping; its answer
     /// captured.
@@ -326,11 +326,11 @@ impl Operations {
             scope_typed: scope.is_some(),
             several: None,
             format: Format::Json,
-            subject_project: None,
+            placed_in: None,
             typed: placed.typed,
         };
         if let Whose::Other(there) = &placed.project {
-            app.moved_to(&placed.because, &there.name);
+            app.place_in(&placed.because, &there.name);
         }
         crate::refuse_by_identity(&app, &command, writes).await?;
         let stamped = crate::run_as_caller(&app, command, joining, stamping).await;
