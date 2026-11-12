@@ -41,7 +41,7 @@ use axum::{routing::get, routing::post, Json, Router};
 use fwd_core::daemon::{try_lock, write_port_file, Bind, CheckoutRecord, DaemonConfig, HostedProject, PortFile};
 use fwd_core::daemon_socket;
 use fwd_core::project::{self, Index, NamedProject, Paths};
-use fwd_core::project_graph::ProjectGraph;
+use fwd_core::project_graph::{NodeGraph, ProjectGraph};
 use include_dir::{include_dir, Dir};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -205,18 +205,21 @@ impl Slot {
 /// Upgrades a request to the daemon's Ankurah WebSocket.
 type Socket = Box<dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
 
-/// The daemon's one durable node, over the store that holds every project's records, and the
-/// socket every project's clients join it through.
+/// The daemon's one durable node, over the store that holds every project's records, the socket
+/// every project's clients join it through, and the one routing service, which tells whoever a
+/// change in any project concerns (docs/DECISIONS.md, D177).
 struct DaemonNode {
     /// A context on the node, from which each hosted project's graph is made.
     ctx: NodeContext,
     socket: Socket,
+    _routing: services::Routing,
     _node: Node<SqliteStorageEngine, PermissiveAgent>,
 }
 
 impl DaemonNode {
     /// Opens the node over `store` (made on first use), with its Ankurah system (created on first
-    /// use), and readies the socket clients join it through. Runs under the lifetime lock.
+    /// use), starts the routing service over every project's records in it, and readies the
+    /// socket clients join it through. Runs under the lifetime lock.
     async fn open(store: SqliteStorageEngine) -> Result<DaemonNode> {
         let node = Node::new_durable(Arc::new(store), PermissiveAgent::new());
         node.system.wait_loaded().await?;
@@ -226,24 +229,24 @@ impl DaemonNode {
         }
         node.system.wait_system_ready().await.map_err(|e| anyhow!("the Ankurah system did not become ready: {e}"))?;
         let ctx = node.context_async(DEFAULT_CONTEXT).await?;
+        let routing = services::start(NodeGraph::new(ctx.clone())).await.context("starting the routing service")?;
         let upgrade = WebsocketServer::new(node.clone()).route_handler();
         let socket: Socket = Box::new(move |req| {
             let upgrade = upgrade.clone();
             Box::pin(async move { upgrade.call(req, ()).await })
         });
-        Ok(DaemonNode { ctx, socket, _node: node })
+        Ok(DaemonNode { ctx, socket, _routing: routing, _node: node })
     }
 }
 
-/// One project the daemon hosts: its graph over the daemon's node, with the routing service over
-/// it, and the checkouts of it seen on this machine.
+/// One project the daemon hosts: its graph over the daemon's node, and the checkouts of it seen
+/// on this machine.
 struct Hosted {
     project: NamedProject,
     registry: Mutex<Registry>,
     registry_path: PathBuf,
     /// The project's graph, which the MCP endpoint runs its calls through.
     graph: ProjectGraph,
-    _routing: services::Routing,
 }
 
 /// Why the daemon does not host a project whose records are still in a store of the project's
@@ -559,18 +562,18 @@ fn open_projects(projects: &BTreeMap<Uuid, Slot>) -> usize {
 }
 
 /// Hosts one project over the daemon's node: its record found, or made on first use, its graph,
-/// the routing service over that graph, and its checkout registry. A project whose records are
-/// still in a store of its own is refused ([`Unmoved`]).
+/// and its checkout registry. The node's one routing service routes its records from the moment
+/// the record exists. A project whose records are still in a store of its own is refused
+/// ([`Unmoved`]).
 async fn host_project(paths: &Paths, node: &DaemonNode, project: &NamedProject) -> Result<Hosted> {
     if let Some(store) = paths.unmoved_store(project) {
         return Err(Unmoved { name: project.name.clone(), store }.into());
     }
     std::fs::create_dir_all(paths.storage_dir(project))?;
     let graph = ProjectGraph::ensure(node.ctx.clone(), project.id, &project.name).await?;
-    let routing = services::start(graph.clone()).await.context("starting the routing service")?;
     let registry_path = paths.checkouts_path(project);
     let registry = Registry { checkouts: load_registry(&registry_path)?, expanded: HashMap::new() };
-    Ok(Hosted { project: project.clone(), registry: Mutex::new(registry), registry_path, graph, _routing: routing })
+    Ok(Hosted { project: project.clone(), registry: Mutex::new(registry), registry_path, graph })
 }
 
 fn not_found() -> Response {
