@@ -228,7 +228,7 @@ pub async fn why_closed(graph: &ProjectGraph, d: &DecisionView) -> Result<Option
     let note =
         status.and_then(|s| ops::closing_note(s, &comments)).map(str::to_string).or(d.closed_reason().ok().flatten());
     Ok(match note {
-        Some(note) => Some(ops::render_references(graph, &note).await),
+        Some(note) => Some(ops::render_references(graph, &note).await?),
         None => None,
     })
 }

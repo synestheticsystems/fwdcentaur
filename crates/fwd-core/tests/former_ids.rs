@@ -125,8 +125,8 @@ async fn a_text_names_a_record_by_a_former_id_whether_written_before_the_renumbe
     trx.commit().await?;
     let text = ops::text(graph.get::<MessageView>(old).await?.content())?;
     assert_eq!(text, before, "the words stay as they were written");
-    assert_eq!(ops::render_references(&graph, &text).await, "as [Retry on disconnect] says");
-    let references = ops::references_json(&graph, &text).await;
+    assert_eq!(ops::render_references(&graph, &text).await?, "as [Retry on disconnect] says");
+    let references = ops::references_json(&graph, &text).await?;
     assert_eq!(
         references,
         vec![serde_json::json!({

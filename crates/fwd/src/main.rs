@@ -3569,7 +3569,7 @@ async fn asked_of(app: &App, to: Option<&str>) -> Result<Option<String>> {
 /// thing it names inline: id, kind and name), so a reader need not look them up.
 async fn message_json(graph: &ProjectGraph, m: &MessageView) -> Result<Value> {
     let mut v = ops::json_of_message(m)?;
-    v["references"] = Value::Array(ops::references_json(graph, v["content"].as_str().unwrap_or("")).await);
+    v["references"] = Value::Array(ops::references_json(graph, v["content"].as_str().unwrap_or("")).await?);
     Ok(v)
 }
 
@@ -3650,7 +3650,7 @@ async fn with_authors(graph: &ProjectGraph, messages: Vec<Value>) -> Result<Vec<
             m["author_handle"] = json!(cache[&author]);
         }
         if m.get("references").is_none() {
-            m["references"] = Value::Array(ops::references_json(graph, m["content"].as_str().unwrap_or("")).await);
+            m["references"] = Value::Array(ops::references_json(graph, m["content"].as_str().unwrap_or("")).await?);
         }
         out.push(m);
     }
@@ -3934,7 +3934,7 @@ async fn relations_named(graph: &ProjectGraph, mut relations: Vec<RelationView>,
     let mut named = Vec::with_capacity(relations.len());
     for r in &relations {
         let mut v = ops::json_of_relation(r)?;
-        v["other"] = ops::reference_json(graph, if out { r.to_id()? } else { r.from_id()? }).await;
+        v["other"] = ops::reference_json(graph, if out { r.to_id()? } else { r.from_id()? }).await?;
         named.push(v);
     }
     Ok(named)
@@ -3980,7 +3980,7 @@ async fn steps_json(graph: &ProjectGraph, task: EntityId) -> Result<Vec<Value>> 
 async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Result<Value> {
     let step: EntityId = edge.from_id()?;
     let checked = edge.status()? == RelationStatus::Resolved;
-    let what = ops::reference_json(graph, step).await;
+    let what = ops::reference_json(graph, step).await?;
     let checked_by = edge.closed_by()?.map(EntityId::from).filter(|_| checked);
     let mut v = json!({
         "n": n,
@@ -4630,14 +4630,14 @@ async fn listed_json(graph: &ProjectGraph, batch: &fwd_core::routing::Batch) -> 
                     texts.push(message_json(graph, m).await?);
                 }
                 let texts = with_authors(graph, texts).await?;
-                out.push(json!({"step": ops::reference_json(graph, step).await, "comments": texts}));
+                out.push(json!({"step": ops::reference_json(graph, step).await?, "comments": texts}));
             }
             BatchEntry::Comment { message, on } => {
                 let Some(m) = said.get(&message) else { continue };
                 let comment = with_authors(graph, vec![message_json(graph, m).await?]).await?;
                 let mut listed = json!({"comment": comment.into_iter().next()});
                 if let Some(highlight) = on {
-                    listed["on"] = ops::reference_json(graph, highlight).await;
+                    listed["on"] = ops::reference_json(graph, highlight).await?;
                 }
                 out.push(listed);
             }
@@ -5282,7 +5282,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                                 }
                                 v
                             }
-                            Followed::NotHeld => ops::reference_json(graph, task).await,
+                            Followed::NotHeld => ops::reference_json(graph, task).await?,
                         });
                     }
                     out
@@ -5766,7 +5766,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     (false, true) => Some(r.from_id()?),
                 };
                 if let Some(other) = other {
-                    e["other"] = ops::reference_json(graph, other).await;
+                    e["other"] = ops::reference_json(graph, other).await?;
                 }
                 edges.push(e);
             }

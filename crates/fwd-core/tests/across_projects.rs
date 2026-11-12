@@ -180,13 +180,13 @@ async fn a_relation_made_in_the_other_project_shows_on_this_projects_task_and_on
 
     let into_ours = ops::relations_to(&t.alpha, ours, None).await?;
     assert_eq!(into_ours.iter().map(ankurah::View::id).collect::<Vec<_>>(), vec![relation]);
-    let other = ops::reference_json(&t.alpha, theirs).await;
+    let other = ops::reference_json(&t.alpha, theirs).await?;
     assert_eq!(
         (other["name"].as_str(), other["project"].as_str()),
         (Some("Retry on disconnect in beta"), Some("beta"))
     );
-    assert_eq!(ops::describe(&t.beta, ours).await.map(|(_, name)| name), Some("Cap the retry delay in alpha".into()));
-    let gone = ops::reference_json(&t.alpha, EntityId::random()).await;
+    assert_eq!(ops::describe(&t.beta, ours).await?.map(|(_, name)| name), Some("Cap the retry delay in alpha".into()));
+    let gone = ops::reference_json(&t.alpha, EntityId::random()).await?;
     assert_eq!((gone["kind"].as_str(), gone["followed"].as_bool()), (Some("unknown"), Some(false)));
 
     let refused =
@@ -217,6 +217,6 @@ async fn a_decision_cites_and_is_made_in_the_context_of_another_projects_records
     let far = ops::create_decision(&t.beta, t.their_daniel, their_ruling).await?;
     let ours = task(&t.alpha, t.daniel, "Cap the retry delay").await?;
     ops::cite(&t.alpha, t.daniel, ours, far, None).await?;
-    assert_eq!(ops::describe(&t.alpha, far).await.map(|(_, name)| name), Some("D1 (Theirs) in beta".into()));
+    assert_eq!(ops::describe(&t.alpha, far).await?.map(|(_, name)| name), Some("D1 (Theirs) in beta".into()));
     Ok(())
 }

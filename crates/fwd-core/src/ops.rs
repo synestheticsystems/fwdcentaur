@@ -1463,7 +1463,7 @@ async fn check_ends(graph: &ProjectGraph, kind: RelationKind, from: EntityId, to
     if joins(kind).iter().all(|j| j.from == End::Anything && j.to == End::Anything) {
         return Ok(());
     }
-    match ends_refused(kind, (from, end_kind(graph, from).await), (to, end_kind(graph, to).await)) {
+    match ends_refused(kind, (from, end_kind(graph, from).await?), (to, end_kind(graph, to).await?)) {
         Some(sentence) => bail!("refused: {sentence}"),
         None => Ok(()),
     }
@@ -1472,12 +1472,12 @@ async fn check_ends(graph: &ProjectGraph, kind: RelationKind, from: EntityId, to
 /// What `id` names wherever in the node it is, as a relation's end, a notification included: a
 /// relation's end may be a record of any project (docs/DECISIONS.md, D176). None when the node
 /// holds nothing by that id.
-async fn end_kind(graph: &ProjectGraph, id: EntityId) -> Option<Kind> {
-    match kind_of(graph, id).await {
+async fn end_kind(graph: &ProjectGraph, id: EntityId) -> Result<Option<Kind>> {
+    Ok(match kind_of(graph, id).await? {
         Some(kind) => Some(kind),
-        None => matches!(graph.follow::<NotificationView>(id).await, Ok(Followed::Held { .. }))
+        None => matches!(graph.follow::<NotificationView>(id).await?, Followed::Held { .. })
             .then_some(Kind::Notification),
-    }
+    })
 }
 
 /// Creates a relation after the pre-checks: its ends must be of kinds its kind joins ([`joins`]),
@@ -1880,7 +1880,7 @@ pub async fn remove_step(
     let step = r.from_id()?;
     let (messages, relations, retired) = if retire {
         if graph.get::<CodeAnchorView>(step).await.is_err() {
-            let what = match describe(graph, step).await {
+            let what = match describe(graph, step).await? {
                 Some((kind, name)) => format!("a {} ({name})", kind.name()),
                 None => "not a highlight".to_string(),
             };
@@ -2076,7 +2076,7 @@ pub async fn create_task(graph: &ProjectGraph, by: EntityId, spec: CreateTask) -
     // written.
     let probe = EntityId::random();
     for (kind, to) in &rels {
-        if let Some(sentence) = ends_refused(*kind, (probe, Some(Kind::Task)), (*to, end_kind(graph, *to).await)) {
+        if let Some(sentence) = ends_refused(*kind, (probe, Some(Kind::Task)), (*to, end_kind(graph, *to).await?)) {
             bail!("refused: {sentence}");
         }
     }
@@ -3675,7 +3675,7 @@ async fn resolve_reference(graph: &ProjectGraph, written: &crate::references::Wr
         Written::Handle(handle) => match naming::by_name(&principals(graph).await?, handle, None).as_slice() {
             [one] => Ok(one.id()),
             [] => match handle.parse::<EntityId>() {
-                Ok(id) if kind_of(graph, id).await.is_some() => Ok(id),
+                Ok(id) if kind_of(graph, id).await?.is_some() => Ok(id),
                 _ => match resolve_id(graph, handle, MENTIONABLE).await {
                     Ok(id) => Ok(id),
                     Err(_) => bail!("no one has the handle `{handle}`, and no id starts with it"),
@@ -3685,7 +3685,7 @@ async fn resolve_reference(graph: &ProjectGraph, written: &crate::references::Wr
         },
         Written::Bracketed(inner) if inner.is_empty() => bail!("the brackets are empty"),
         Written::Bracketed(inner) => match inner.parse::<EntityId>() {
-            Ok(id) => match current_record(graph, id).await {
+            Ok(id) => match current_record(graph, id).await? {
                 Some((record, _)) => Ok(record),
                 None => bail!("nothing the node holds has that id"),
             },
@@ -3700,22 +3700,22 @@ pub const MENTIONABLE: &[Kind] =
 
 /// Which of the [`MENTIONABLE`] kinds the record `id` is, wherever in the node it is: an id names
 /// a record of any project (docs/DECISIONS.md, D176, D181). None when the node holds no record by
-/// that id.
-pub async fn kind_of(graph: &ProjectGraph, id: EntityId) -> Option<Kind> {
-    match reference(graph, id).await {
-        Ok(Reference::Followed { record, kind, .. }) if record == id => Some(kind),
-        _ => None,
-    }
+/// that id, or holds it by an id it had before it was renumbered rather than as its id.
+pub async fn kind_of(graph: &ProjectGraph, id: EntityId) -> Result<Option<Kind>> {
+    Ok(match reference(graph, id).await? {
+        Reference::Followed { record, kind, .. } if record == id => Some(kind),
+        Reference::Followed { .. } | Reference::NotFollowed => None,
+    })
 }
 
 /// The record `id` names wherever in the node it is, with its kind: the record itself, or, for an
 /// id it had before it was renumbered, which a text written before then stores (`former_ids`), the
 /// record it is now. None when `id` names nothing the node holds.
-pub async fn current_record(graph: &ProjectGraph, id: EntityId) -> Option<(EntityId, Kind)> {
-    match reference(graph, id).await {
-        Ok(Reference::Followed { record, kind, .. }) => Some((record, kind)),
-        _ => None,
-    }
+pub async fn current_record(graph: &ProjectGraph, id: EntityId) -> Result<Option<(EntityId, Kind)>> {
+    Ok(match reference(graph, id).await? {
+        Reference::Followed { record, kind, .. } => Some((record, kind)),
+        Reference::NotFollowed => None,
+    })
 }
 
 /// What something is and a name to show for it, as a reference or a step reads: a person as
@@ -3724,11 +3724,11 @@ pub async fn current_record(graph: &ProjectGraph, id: EntityId) -> Option<(Entit
 /// record of another project with that project's name after it ([`in_project`]), since a title, a
 /// handle or a decision's number names something else there. An id the record had before it was
 /// renumbered names the record as its id does. None when `id` names nothing the node holds.
-pub async fn describe(graph: &ProjectGraph, id: EntityId) -> Option<(Kind, String)> {
-    match reference(graph, id).await {
-        Ok(Reference::Followed { kind, name, project, .. }) => Some((kind, in_project(name, &project))),
-        _ => None,
-    }
+pub async fn describe(graph: &ProjectGraph, id: EntityId) -> Result<Option<(Kind, String)>> {
+    Ok(match reference(graph, id).await? {
+        Reference::Followed { kind, name, project, .. } => Some((kind, in_project(name, &project))),
+        Reference::NotFollowed => None,
+    })
 }
 
 /// A record's kind and the name [`describe`] gives it, from what was read of it.
@@ -3772,28 +3772,28 @@ pub async fn reference(graph: &ProjectGraph, id: EntityId) -> Result<Reference> 
 /// The references of a stored message text, in order, as the JSON of a message lists them: each
 /// thing's id, kind and name ([`reference_json`]), and for a file mention the version it names
 /// ([`named_json`]).
-pub async fn references_json(graph: &ProjectGraph, content: &str) -> Vec<Value> {
+pub async fn references_json(graph: &ProjectGraph, content: &str) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     for (_, named) in crate::references::stored_named(content) {
-        out.push(named_json(graph, &named).await);
+        out.push(named_json(graph, &named).await?);
     }
-    out
+    Ok(out)
 }
 
 /// What [`describe`] says of the thing a reference names, and of a file mention the file at the
 /// version it names (`docs/cli.md e13b8e2`, `anchor_name::AnchorName::file_at`), since the
 /// whole-file highlight it names serves every version that holds the same bytes.
-pub async fn describe_named(graph: &ProjectGraph, named: &Named) -> Option<(Kind, String)> {
-    let (kind, name) = describe(graph, named.id).await?;
+pub async fn describe_named(graph: &ProjectGraph, named: &Named) -> Result<Option<(Kind, String)>> {
+    let Some((kind, name)) = describe(graph, named.id).await? else { return Ok(None) };
     match &named.version {
         Some(version) if kind == Kind::Anchor => {
-            let Ok(Followed::Held { project, found, .. }) = graph.follow::<CodeAnchorView>(named.id).await else {
-                return None;
+            let Followed::Held { project, found, .. } = graph.follow::<CodeAnchorView>(named.id).await? else {
+                return Ok(None);
             };
-            let at = crate::anchor_name::AnchorName::file_at(&found.path().ok()?, version).text();
-            Some((kind, in_project(at, &project)))
+            let at = crate::anchor_name::AnchorName::file_at(&found.path()?, version).text();
+            Ok(Some((kind, in_project(at, &project))))
         }
-        _ => Some((kind, name)),
+        _ => Ok(Some((kind, name))),
     }
 }
 
@@ -3802,9 +3802,9 @@ pub async fn describe_named(graph: &ProjectGraph, named: &Named) -> Option<(Kind
 /// names as the text stores it (`version`: `worktree`, `index` or a commit's id). A text written
 /// before its records were renumbered names a former id, which `former_id` gives beside the id of
 /// the record it names now.
-pub async fn named_json(graph: &ProjectGraph, named: &Named) -> Value {
-    let mut v = reference_json(graph, named.id).await;
-    if let Some((_, name)) = describe_named(graph, named).await {
+pub async fn named_json(graph: &ProjectGraph, named: &Named) -> Result<Value> {
+    let mut v = reference_json(graph, named.id).await?;
+    if let Some((_, name)) = describe_named(graph, named).await? {
         v["name"] = json!(name);
     }
     if v["id"] != json!(named.id.to_base64()) {
@@ -3813,40 +3813,43 @@ pub async fn named_json(graph: &ProjectGraph, named: &Named) -> Value {
     if let Some(version) = &named.version {
         v["version"] = json!(version.as_str());
     }
-    v
+    Ok(v)
 }
 
 /// One thing named for a reader who holds only its id, as a message's references, a relation's
 /// other end and a batch's steps list it, wherever in the node it is: its id (now, where `id` was
 /// one it had before it was renumbered), kind and name ([`describe`]), and `project`, the name of
 /// its project when that is another. Something the node does not hold has kind `unknown`, a name
-/// saying it cannot be followed here ([`not_followed`]), and `followed` false.
-pub async fn reference_json(graph: &ProjectGraph, id: EntityId) -> Value {
-    match reference(graph, id).await {
-        Ok(Reference::Followed { record, kind, name, project }) => {
+/// saying it cannot be followed here ([`not_followed`]), and `followed` false; a read that fails
+/// is the error it is, never a record that cannot be followed.
+pub async fn reference_json(graph: &ProjectGraph, id: EntityId) -> Result<Value> {
+    Ok(match reference(graph, id).await? {
+        Reference::Followed { record, kind, name, project } => {
             let mut v = json!({"id": record.to_base64(), "kind": kind.name(), "name": in_project(name, &project)});
             if let Whose::Other(p) = project {
                 v["project"] = json!(p.name);
             }
             v
         }
-        _ => json!({"id": id.to_base64(), "kind": "unknown", "name": not_followed(&id.to_base64()), "followed": false}),
-    }
+        Reference::NotFollowed => {
+            json!({"id": id.to_base64(), "kind": "unknown", "name": not_followed(&id.to_base64()), "followed": false})
+        }
+    })
 }
 
 /// A stored message text for reading in a terminal: a person as `@handle`, anything else as its
 /// name in brackets, a file mention with the version it names (`references.rs`,
 /// [`describe_named`]).
-pub async fn render_references(graph: &ProjectGraph, content: &str) -> String {
+pub async fn render_references(graph: &ProjectGraph, content: &str) -> Result<String> {
     let mut names = Vec::new();
     for (_, named) in crate::references::stored_named(content) {
-        if let Some((kind, name)) = describe_named(graph, &named).await {
+        if let Some((kind, name)) = describe_named(graph, &named).await? {
             names.push((named, if kind == Kind::Principal { name } else { format!("[{name}]") }));
         }
     }
-    crate::references::render_named(content, |named| {
+    Ok(crate::references::render_named(content, |named| {
         names.iter().find(|(n, _)| n == named).map(|(_, name)| name.clone())
-    })
+    }))
 }
 
 /// Resolves `message`, with `by` and the time as who resolved it and when. The first message of the
@@ -5218,7 +5221,7 @@ pub async fn add_highlight_step(
             // step is of a task; a new highlight is a step of nothing yet, and closes no cycle. The
             // highlight, its step and its comment are one transaction, as a new highlight and its
             // message are in `post_on_highlight`, which says why.
-            let task_kind = kind_of(graph, task).await;
+            let task_kind = kind_of(graph, task).await?;
             let position = next_position(graph, task).await?;
             let trx = graph.begin();
             let highlight = trx.create(&*anchor).await?.id();

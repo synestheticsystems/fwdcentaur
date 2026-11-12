@@ -249,10 +249,10 @@ async fn a_typed_id_a_held_id_and_a_records_relations_reach_the_other_project_an
 
     // An id a record holds is followed into beta, which every reader names beside the record.
     for id in [b.daniel, b.retry, b.question, b.decision, b.scope, b.anchor] {
-        assert!(ops::kind_of(&alpha, id).await.is_some(), "{id}");
-        let (_, name) = ops::describe(&alpha, id).await.expect("described");
+        assert!(ops::kind_of(&alpha, id).await?.is_some(), "{id}");
+        let (_, name) = ops::describe(&alpha, id).await?.expect("described");
         assert!(name.ends_with(" in beta"), "{name}");
-        assert_eq!(ops::reference_json(&alpha, id).await["project"], "beta");
+        assert_eq!(ops::reference_json(&alpha, id).await?["project"], "beta");
     }
     assert!(matches!(alpha.follow::<TaskView>(b.retry).await?, Followed::Held { project: Whose::Other(_), .. }));
     // Named in a text: alpha's message names beta's task, and a handle both projects have names

@@ -1481,7 +1481,7 @@ async fn a_whole_file_steps_first_comment_reaches_the_tasks_creator_and_assignee
     let retry = anchor(&graph, c.implementer, repo, "src/retry.rs", None).await?;
     let on = |anchor: EntityId| MessageContext { anchor_id: Some(anchor), ..Default::default() };
     // Named as a step and in an inbox's list by its path alone, since it names no line.
-    assert_eq!(ops::describe(&graph, net).await, Some((ops::Kind::Anchor, "src/net.rs".to_string())));
+    assert_eq!(ops::describe(&graph, net).await?, Some((ops::Kind::Anchor, "src/net.rs".to_string())));
 
     // The step first, then its first comment: the review's creator and assignee hear of it.
     ops::add_step(&graph, c.implementer, review, net).await?;
@@ -1547,11 +1547,11 @@ async fn an_inline_reference_is_stored_as_an_id_and_shadowed_by_a_mention() -> R
     );
     // Rendered back for a terminal, and listed for JSON.
     assert_eq!(
-        ops::render_references(&graph, &stored).await,
+        ops::render_references(&graph, &stored).await?,
         "see [Retry on disconnect] under [D1 (Retries back off exponentially)], @impl-alice; not `@nobody` in code"
     );
     let listed: Vec<(String, String)> = ops::references_json(&graph, &stored)
-        .await
+        .await?
         .iter()
         .map(|r| (r["kind"].as_str().unwrap().to_string(), r["name"].as_str().unwrap().to_string()))
         .collect();

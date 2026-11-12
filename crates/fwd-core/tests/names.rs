@@ -335,7 +335,7 @@ async fn an_agent_renames_itself_and_keeps_its_id_and_everything_that_refers_to_
     let unread: Vec<EntityId> = ops::inbox(&graph, one, true).await?.iter().map(|n| n.id()).collect();
     assert_eq!(unread, vec![waiting], "its inbox is its own still");
     let content = graph.get::<MessageView>(mention).await?.content()?;
-    assert_eq!(ops::render_references(&graph, &content).await, "over to @implementer-replication");
+    assert_eq!(ops::render_references(&graph, &content).await?, "over to @implementer-replication");
     let principals = ops::principals(&graph).await?;
     assert!(!naming::shows_scopes(&principals, "implementer-replication"), "a picker shows it bare");
     assert_eq!(ops::rename_principal(&graph, one, "implementer-replication").await?, one, "its own name again");
