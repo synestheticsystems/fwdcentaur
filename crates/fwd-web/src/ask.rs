@@ -13,7 +13,7 @@
 
 use crate::mentions::{MentionList, Mentions};
 use crate::scope_filter::ScopeChoice;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{fmt, keys, store};
 use ankurah::EntityId;
 use fwd_core::model::Priority;
@@ -85,7 +85,7 @@ pub fn AskBox(me: EntityId, scope: Memo<Option<ScopeChoice>>) -> impl IntoView {
         let priority = priority.get_untracked();
         text.set(String::new());
         spawn_local(async move {
-            match ops::post_message(&ctx(), me, question.trim(), priority, mc).await {
+            match ops::post_message(&graph(), me, question.trim(), priority, mc).await {
                 Ok(_) => {
                     session::wrote(me);
                     error.set(None);

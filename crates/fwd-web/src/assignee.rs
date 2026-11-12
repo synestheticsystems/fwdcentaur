@@ -18,7 +18,7 @@
 //! so is that a write which leaves the assignee as it is draws nothing again ([`drawn`]).
 
 use crate::referents::{Mode, Models};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::Model;
 use crate::{fmt, keys, labels, modes, store};
 use ankurah::EntityId;
@@ -173,7 +173,7 @@ pub fn TaskAssignee(task: EntityId) -> impl IntoView {
     let assign = Callback::new(move |chosen: Option<EntityId>| {
         let Some(me) = session::me() else { return };
         spawn_local(async move {
-            match ops::assign(&ctx(), me, task, chosen).await {
+            match ops::assign(&graph(), me, task, chosen).await {
                 Ok(()) => {
                     session::wrote(me);
                     error.try_set(None)

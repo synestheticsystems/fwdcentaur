@@ -11,7 +11,7 @@ use common::Scratch;
 use fwd_core::daemon::{self, Autostart};
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateTask};
-use fwd_core::project::{self, Paths, Project};
+use fwd_core::project::{self, NamedProject, Paths};
 use serde_json::Value;
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ use std::time::Duration;
 
 /// A data folder in the test's scratch folder, which stops its daemon before the folder goes, with
 /// the projects named, each with a folder of its own to be its checkout.
-fn setup(root: &Scratch, data: &str, names: &[&str]) -> Result<(Paths, Vec<Project>)> {
+fn setup(root: &Scratch, data: &str, names: &[&str]) -> Result<(Paths, Vec<NamedProject>)> {
     let paths = root.paths(&format!("{data}-run"), data);
     let mut projects = Vec::new();
     for name in names {
@@ -65,14 +65,14 @@ fn refused(output: &Output) -> String {
 }
 
 async fn titles(client: &daemon::Client) -> Result<Vec<String>> {
-    let tasks = client.ctx.fetch::<TaskView>("created > 0").await?;
+    let tasks = client.graph.all::<TaskView>().await?;
     let mut titles = tasks.iter().map(|task| task.title()).collect::<Result<Vec<_>, _>>()?;
     titles.sort();
     Ok(titles)
 }
 
 async fn create(client: &daemon::Client, me: ankurah::EntityId, title: &str) -> Result<()> {
-    ops::create_task(&client.ctx, me, CreateTask { title: title.into(), ..Default::default() }).await?;
+    ops::create_task(&client.graph, me, CreateTask { title: title.into(), ..Default::default() }).await?;
     Ok(())
 }
 
@@ -82,9 +82,9 @@ async fn a_backup_taken_while_the_daemon_writes_restores_every_project_as_it_was
     let (paths, projects) = setup(&root, "data", &["widgets", "gadgets"])?;
     let (widgets, gadgets) = (&projects[0], &projects[1]);
     let writer = daemon::ensure_daemon(&paths, widgets, spawn()).await?;
-    let me = ops::ensure_principal(&writer.ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let me = ops::ensure_principal(&writer.graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     let other = daemon::ensure_daemon(&paths, gadgets, spawn()).await?;
-    let you = ops::ensure_principal(&other.ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let you = ops::ensure_principal(&other.graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     for n in 0..3 {
         create(&other, you, &format!("gadget {n}")).await?;
     }
@@ -123,7 +123,7 @@ async fn a_backup_taken_while_the_daemon_writes_restores_every_project_as_it_was
         taken["projects"].as_array().expect("projects").iter().filter_map(|p| p["name"].as_str()).collect();
     assert_eq!(names, ["widgets", "gadgets"]);
     let databases = taken["files"].as_array().expect("files").iter().filter(|f| f["database"] == true).count();
-    assert_eq!(databases, 2, "each project's database is copied through SQLite: {taken}");
+    assert_eq!(databases, 1, "the store, which holds every project's records, is copied through SQLite: {taken}");
     drop(writer);
     drop(other);
 
@@ -195,7 +195,7 @@ async fn a_restore_is_refused_into_a_folder_that_is_not_empty_and_into_the_data_
     let root = Scratch::new()?;
     let (paths, projects) = setup(&root, "data", &["widgets"])?;
     let client = daemon::ensure_daemon(&paths, &projects[0], spawn()).await?;
-    let me = ops::ensure_principal(&client.ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let me = ops::ensure_principal(&client.graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     create(&client, me, "stays").await?;
     let taken = printed(&fwd(&paths, &["admin", "backup"]).output()?)?;
     let backup = taken["backup"].as_str().expect("the backup's folder").to_string();

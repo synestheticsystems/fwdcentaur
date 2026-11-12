@@ -1,7 +1,8 @@
-//! fwd-core: the Ankurah models and rules shared by the daemon (hosting a project's durable
-//! node), the CLI (an ephemeral node) and the web UI (an ephemeral node in the browser).
-//! Everything with semantics lives here so clients, the daemon and tests run one implementation.
-//! See docs/design/data-model.md.
+//! fwd-core: the Ankurah models and rules shared by the daemon (hosting the durable node that
+//! holds every project), the CLI (an ephemeral node) and the web UI (an ephemeral node in the
+//! browser). Everything with semantics lives here so clients, the daemon and tests run one
+//! implementation, and all of it reads and writes one project at a time, through
+//! [`project_graph::ProjectGraph`]. See docs/design/data-model.md.
 //!
 //! Features: `native` (default) adds the daemon client, the project directories and git-driven
 //! anchoring; `wasm` compiles the rest for the browser (crates/fwd-web); `uniffi` gives the models
@@ -18,9 +19,11 @@ pub mod backup;
 mod calendar;
 #[cfg(feature = "native")]
 pub mod daemon;
+pub mod daemon_socket;
 pub mod decision_log;
 pub mod dormancy;
 pub mod file_mention;
+pub mod former_ids;
 pub mod guidance;
 pub mod labels;
 pub mod model;
@@ -30,6 +33,7 @@ pub mod ops;
 pub mod position;
 #[cfg(feature = "native")]
 pub mod project;
+pub mod project_graph;
 pub mod query;
 pub mod reason;
 pub mod references;

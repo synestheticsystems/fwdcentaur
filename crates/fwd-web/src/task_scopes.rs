@@ -21,10 +21,11 @@
 
 use crate::referents::{Mode, Models};
 use crate::scope_filter::ordered_scopes;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::Model;
 use crate::{empty, fmt, keys, labels, modes, store};
 use ankurah::EntityId;
+use fwd_core::former_ids::FormerIds;
 use fwd_core::ops;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -81,12 +82,20 @@ fn offered(all: &[(EntityId, String)], has: &[EntityId]) -> Vec<(EntityId, Strin
 }
 
 /// The scope a name typed in the box names, by the rule the command line reads a scope's name by
-/// (`fwd_core::ops::scope_by_name`: its title whatever its case, its whole id or the start of it):
+/// (`fwd_core::ops::scope_by_name`: its title whatever its case, its whole id or the start of it,
+/// a former id among them):
 /// among the scopes the box offers first ([`left`]), so that a name the task's own scope shares
 /// with one it is not in names the other, then among `all` the project's scopes, whose refusal it
 /// gives when neither reading names one.
-fn scope_named(name: &str, offered: &[(EntityId, String)], all: &[(EntityId, String)]) -> Result<EntityId, String> {
-    ops::scope_by_name(name, offered).or_else(|_| ops::scope_by_name(name, all)).map_err(|e| e.to_string())
+fn scope_named(
+    name: &str,
+    offered: &[(EntityId, String)],
+    all: &[(EntityId, String)],
+    former: &FormerIds,
+) -> Result<EntityId, String> {
+    ops::scope_by_name(name, offered, former)
+        .or_else(|_| ops::scope_by_name(name, all, former))
+        .map_err(|e| e.to_string())
 }
 
 /// The scope the text in the box adds when Enter is pressed or the box is left: the one whose
@@ -224,7 +233,7 @@ pub fn TaskScopes(task: EntityId) -> impl IntoView {
     let change = move |add: Vec<EntityId>, take_off: Vec<EntityId>| {
         let Some(me) = session::me() else { return };
         spawn_local(async move {
-            match ops::change_scopes(&ctx(), me, task, &add, &take_off).await {
+            match ops::change_scopes(&graph(), me, task, &add, &take_off).await {
                 Ok(()) => {
                     session::wrote(me);
                     error.try_set(None)
@@ -240,7 +249,8 @@ pub fn TaskScopes(task: EntityId) -> impl IntoView {
     let take = Callback::new(move |()| {
         let all = ordered_scopes();
         let not_in = left(&all, &scopes.get_untracked());
-        let named = |name: &str| scope_named(name, &not_in, &all);
+        let former = store::former_ids();
+        let named = |name: &str| scope_named(name, &not_in, &all, &former);
         match scope_to_add(&typed.get_untracked(), &offers.get_untracked(), named) {
             Ok(None) => close.run(()),
             Ok(Some(scope)) => {
@@ -308,7 +318,7 @@ mod tests {
     /// The rule a name typed in the box follows for a task worked in `has`, as the page holds these
     /// scopes ([`scope_named`]).
     fn named(has: Vec<EntityId>) -> impl Fn(&str) -> Result<EntityId, String> {
-        move |name: &str| scope_named(name, &left(&all(), &has), &all())
+        move |name: &str| scope_named(name, &left(&all(), &has), &all(), &FormerIds::default())
     }
 
     #[test]

@@ -37,7 +37,7 @@
 //! badge counts the rows the page shows.
 
 use crate::cards::id_at;
-use crate::session::ctx;
+use crate::session::graph;
 use crate::store;
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::EntityId;
@@ -855,7 +855,7 @@ pub fn answered_by(
 /// as answered.
 pub fn answers(reader: EntityId) -> (Memo<HashSet<EntityId>>, RwSignal<bool>) {
     let answered = RwSignal::new(false);
-    let query = with_id("author = ?", reader).ok().and_then(|selection| ctx().query::<MessageView>(selection).ok());
+    let query = with_id("author = ?", reader).ok().and_then(|selection| graph().query::<MessageView>(selection).ok());
     if let Some(query) = query.clone() {
         spawn_local(async move {
             if let Err(e) = query.wait_durable_answered().await {

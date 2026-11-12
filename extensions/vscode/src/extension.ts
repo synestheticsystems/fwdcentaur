@@ -602,7 +602,12 @@ const JOIN_TIMEOUT_MS = 8000;
 const FIRST_RETRY_MS = 1000;
 const LONGEST_RETRY_MS = 30_000;
 
-/** The project's socket on the daemon; Ankurah's WebSocket client appends `/ws`. */
+/**
+ * The project's socket on the daemons that kept a store per project; Ankurah's WebSocket client
+ * appends `/ws`. A daemon that keeps every project in one store refuses it, since the host's node
+ * (crates/fwd-host) reads with no project, until that crate reads through a project's graph and
+ * joins at the one store's path (docs/design/vscode-extension.md).
+ */
 function socketOf(daemon: Daemon): string {
   return `ws://127.0.0.1:${daemon.port}/p/${daemon.project}`;
 }

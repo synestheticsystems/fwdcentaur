@@ -14,7 +14,8 @@
 //! [`wrote`], which the rule reads back as the principal's `last_active`.
 
 use crate::model::*;
-use ankurah::{Context, EntityId};
+use crate::project_graph::ProjectGraph;
+use ankurah::EntityId;
 use anyhow::Result;
 
 /// How long an agent goes without writing before it shows as dormant: twelve hours (D123).
@@ -39,10 +40,10 @@ fn quiet(kind: Option<PrincipalKind>, active: bool, last_active: Option<i64>, no
 /// that mark notifications read or dismissed: the CLI after every command that writes work into the
 /// project or changes a principal (not after marking notifications, nor after `fwd admin migrate`),
 /// and the page and the extension after each of their other writes.
-pub async fn wrote(ctx: &Context, principal: EntityId) -> Result<()> {
-    let p: PrincipalView = ctx.get(principal).await?;
-    let trx = ctx.begin();
-    p.edit(&trx)?.last_active()?.set(&Some(crate::now_ms()))?;
+pub async fn wrote(graph: &ProjectGraph, principal: EntityId) -> Result<()> {
+    let p: PrincipalView = graph.get(principal).await?;
+    let trx = graph.begin();
+    trx.edit(&p)?.last_active()?.set(&Some(crate::now_ms()))?;
     trx.commit().await?;
     Ok(())
 }

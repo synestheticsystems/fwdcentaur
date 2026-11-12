@@ -21,7 +21,7 @@
 use crate::empty::{Empty, Nothing};
 use crate::fmt::CopyId;
 use crate::route::{self, Route, ScopePanel};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{fmt, keys, lozenges, panel, store};
 use ankurah::EntityId;
 use fwd_core::model::{ScopeStatus, ScopeView};
@@ -222,7 +222,7 @@ fn ScopeForm(scope: Option<EntityId>, draft: Draft) -> impl IntoView {
                     if edit.is_empty() {
                         Ok(None)
                     } else {
-                        let edited = ops::edit_scope(&ctx(), id, edit).await;
+                        let edited = ops::edit_scope(&graph(), id, edit).await;
                         if let (Ok(()), Some(me)) = (&edited, maker) {
                             session::wrote(me);
                         }
@@ -230,7 +230,7 @@ fn ScopeForm(scope: Option<EntityId>, draft: Draft) -> impl IntoView {
                     }
                 }
                 (None, Some(maker)) => {
-                    let made = ops::create_scope(&ctx(), maker, create(&shown)).await;
+                    let made = ops::create_scope(&graph(), maker, create(&shown)).await;
                     if made.is_ok() {
                         session::wrote(maker);
                     }

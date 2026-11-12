@@ -43,7 +43,7 @@ Commit `.fwd/project.toml` if a fresh clone on another machine should find the p
 
 **Another clone, a worktree, another repository.** A second clone or a worktree of the same repository needs nothing: every command there finds the project through the upstream, whatever the branch, and `fwd init` there only reports `"created": false` and writes the marker. A different repository joins with `fwd init --project widgets` (the project's name or id), and `fwd project list` shows each project with the upstreams it claims. `fwd init --new` makes a separate project even when the upstream already belongs to one; from then on, a checkout of that repository without a marker has to name its project with `--project`. A repository without an `origin` remote gets a project that only its own marker names, and none of its lines can be commented on, so add the remote first.
 
-One daemon per OS user hosts every project on the machine, each in its own database; a project created while the daemon runs opens without a restart.
+One daemon per OS user hosts every project on the machine, all of them in one store, where each record names its project and nothing of one project shows in another; a project created while the daemon runs opens without a restart.
 
 ## Who is acting
 
@@ -302,7 +302,7 @@ fwd admin backup                                         # into ~/Library/Applic
 fwd admin backup --to ~/Dropbox/fwd-backups --keep 30    # any folder, a synced one included
 ```
 
-Each backup is a folder named for when it was taken (`2026-09-28T130000-0700`) holding every project's databases, copied through SQLite so each holds what was committed at one moment, `projects.toml`, `identity.toml`, `daemon.toml`, each project's `checkouts.json`, and `backup.json`, which lists every file with its size and SHA-256. Every database copied must pass SQLite's integrity check, or the backup is not kept. The command prints where it wrote and each project with its files; then it removes the oldest backups of this data directory taken on this machine beyond `--keep`, and nothing else in the folder, so several machines can back up into one synced folder.
+Each backup is a folder named for when it was taken (`2026-09-28T130000-0700`) holding the store with every project's records and each project's anchors' cache, copied through SQLite so each holds what was committed at one moment, `projects.toml`, `identity.toml`, `daemon.toml`, each project's `checkouts.json`, and `backup.json`, which lists every file with its size and SHA-256. Every database copied must pass SQLite's integrity check, or the backup is not kept. The command prints where it wrote and each project with its files; then it removes the oldest backups of this data directory taken on this machine beyond `--keep`, and nothing else in the folder, so several machines can back up into one synced folder.
 
 To take one every day at 13:00, add this line with `crontab -e`. It names `fwd` by where `cargo install` puts it, since cron's `PATH` leaves that folder out:
 
@@ -336,7 +336,7 @@ fwd daemon stop                    # stops that daemon, not yours
 | What | Where |
 |---|---|
 | Data directory | `~/Library/Application Support/fwd/` on macOS; `$XDG_DATA_HOME/fwd/`, usually `~/.local/share/fwd/`, on Linux. `FWD_DATA_DIR` overrides it. |
-| In it | `projects.toml` (the index: each project and the upstreams it claims), `identity.toml` (your handle), `daemon.toml` (loopback or LAN, and the last port), `daemon.log`, and per project `projects/<project id>/project.sqlite` (the graph) with `checkouts.json` (the clones and worktrees the daemon has seen; `fwd checkouts` lists them). |
+| In it | `projects.toml` (the index: each project and the upstreams it claims), `identity.toml` (your handle), `daemon.toml` (loopback or LAN, and the last port), `daemon.log`, `store.sqlite` (every project's graph), and per project `projects/<project id>/` with `checkouts.json` (the clones and worktrees the daemon has seen; `fwd checkouts` lists them) and `anchors.sqlite` (the anchors' cache). |
 | Backups | Beside the data directory and named after it: `~/Library/Application Support/fwd-backups/` on macOS, one dated folder per `fwd admin backup` ("Backups", above). `--to` names another. |
 | Runtime directory | `$TMPDIR/fwd-<uid>/` (`/tmp/fwd-<uid>/` when `TMPDIR` is unset). `FWD_RUNTIME_DIR` overrides it. It holds `daemon.ws` (the running daemon's port, pid, instance, start time and bind) and the lock files. |
 | The repository | `.fwd/project.toml`, the marker naming the project. |

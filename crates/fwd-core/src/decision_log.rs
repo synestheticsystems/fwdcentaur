@@ -12,8 +12,9 @@
 use crate::calendar::{local_offset_ms, parse_day, DAY_MS};
 use crate::model::*;
 use crate::ops;
+use crate::project_graph::ProjectGraph;
 use crate::rules::DecisionMove;
-use ankurah::{Context, EntityId};
+use ankurah::EntityId;
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -213,11 +214,11 @@ fn entry(e: &Entry) -> String {
 /// before its moves wrote comments, its `closed_reason`, each reference by name as `--format text`
 /// prints a message (`ops::render_references`: a person as `@handle`, anything else as its name in
 /// brackets). None for a decision still open.
-pub async fn why_closed(ctx: &Context, d: &DecisionView) -> Result<Option<String>> {
+pub async fn why_closed(graph: &ProjectGraph, d: &DecisionView) -> Result<Option<String>> {
     let status = d.status().ok();
     // An open decision has no comment of a closing move to look for.
     let comments = match status.and_then(DecisionMove::closing) {
-        Some(_) => ops::messages_about(ctx, "decision", d.id())
+        Some(_) => ops::messages_about(graph, "decision", d.id())
             .await?
             .iter()
             .filter_map(|m| ops::DecisionComment::of(m).ok())
@@ -227,16 +228,16 @@ pub async fn why_closed(ctx: &Context, d: &DecisionView) -> Result<Option<String
     let note =
         status.and_then(|s| ops::closing_note(s, &comments)).map(str::to_string).or(d.closed_reason().ok().flatten());
     Ok(match note {
-        Some(note) => Some(ops::render_references(ctx, &note).await),
+        Some(note) => Some(ops::render_references(graph, &note).await),
         None => None,
     })
 }
 
 /// Every decision of the project as the log shows it.
-pub async fn entries(ctx: &Context) -> Result<Vec<Entry>> {
-    let decisions = ops::decisions(ctx).await?;
+pub async fn entries(graph: &ProjectGraph) -> Result<Vec<Entry>> {
+    let decisions = ops::decisions(graph).await?;
     let number: HashMap<EntityId, i64> = decisions.iter().filter_map(|d| Some((d.id(), d.number().ok()?))).collect();
-    let principals: Vec<PrincipalView> = ctx.fetch("kind = 'human' OR kind = 'agent'").await?;
+    let principals: Vec<PrincipalView> = graph.all().await?;
     let handle = |id: EntityId| {
         principals
             .iter()
@@ -244,7 +245,7 @@ pub async fn entries(ctx: &Context) -> Result<Vec<Entry>> {
             .and_then(|p| p.handle().ok())
             .unwrap_or_else(|| id.to_base64()[..8].to_string())
     };
-    let scopes: Vec<ScopeView> = ctx.fetch("created > 0").await?;
+    let scopes: Vec<ScopeView> = graph.all().await?;
     let scope_name = |id: EntityId| ScopeName {
         id,
         name: scopes
@@ -254,8 +255,8 @@ pub async fn entries(ctx: &Context) -> Result<Vec<Entry>> {
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| id.to_base64()[..8].to_string()),
     };
-    let cites: Vec<RelationView> = ctx.fetch("kind = 'cites'").await?;
-    let supersedes: Vec<RelationView> = ctx.fetch("kind = 'supersedes'").await?;
+    let cites: Vec<RelationView> = graph.fetch("kind = 'cites'").await?;
+    let supersedes: Vec<RelationView> = graph.fetch("kind = 'supersedes'").await?;
     let standing = |rels: &[RelationView]| -> Vec<(EntityId, EntityId)> {
         rels.iter().filter(|r| ops::standing(r)).filter_map(|r| Some((r.from_id().ok()?, r.to_id().ok()?))).collect()
     };
@@ -265,9 +266,9 @@ pub async fn entries(ctx: &Context) -> Result<Vec<Entry>> {
         let id = d.id();
         let mut decided_in = Vec::new();
         for (_, to) in cites.iter().filter(|(from, to)| *from == id && !number.contains_key(to)) {
-            if let Ok(t) = ctx.get::<TaskView>(*to).await {
+            if let Ok(t) = graph.get::<TaskView>(*to).await {
                 decided_in.push(format!("task “{}”", t.title().unwrap_or_default()));
-            } else if let Ok(m) = ctx.get::<MessageView>(*to).await {
+            } else if let Ok(m) = graph.get::<MessageView>(*to).await {
                 let content = ops::text(m.content()).unwrap_or_default();
                 let words: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
                 let short: String = words.chars().take(80).collect();
@@ -283,7 +284,7 @@ pub async fn entries(ctx: &Context) -> Result<Vec<Entry>> {
             ns.sort();
             ns
         };
-        let closing_note = why_closed(ctx, d).await?;
+        let closing_note = why_closed(graph, d).await?;
         out.push(Entry {
             number: d.number().unwrap_or(0),
             title: d.title().unwrap_or_default(),

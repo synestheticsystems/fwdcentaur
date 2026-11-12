@@ -23,7 +23,7 @@ async fn a_comment_reaches_the_implementer_and_the_triage_agent() -> Result<()> 
     let spawn = Autostart::Spawn { daemon_bin: PathBuf::from(env!("CARGO_BIN_EXE_fwd")) };
 
     let daniel_client = daemon::ensure_daemon(&paths, &ws, spawn.clone()).await?;
-    let ctx = &daniel_client.ctx;
+    let ctx = &daniel_client.graph;
     let daniel = ops::ensure_principal(ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     let alice =
         ops::ensure_principal(ctx, "impl-alice", "Alice", PrincipalKind::Agent, Some(AgentRole::Implementer)).await?;
@@ -55,7 +55,7 @@ async fn a_comment_reaches_the_implementer_and_the_triage_agent() -> Result<()> 
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let inbox = loop {
-        let inbox = ops::inbox(&alice_client.ctx, alice, true).await?;
+        let inbox = ops::inbox(&alice_client.graph, alice, true).await?;
         if inbox.iter().any(|n| n.notification_type().ok() == Some(NotificationType::TaskCommented)) {
             break inbox;
         }

@@ -39,7 +39,7 @@ use anyhow::{anyhow, Result};
 use fwd_core::daemon::{self, Autostart, Client};
 use fwd_core::model::NotificationView;
 use fwd_core::ops;
-use fwd_core::project::{Paths, Project};
+use fwd_core::project::{NamedProject, Paths};
 use fwd_core::query::with_id;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -89,7 +89,7 @@ async fn stream(app: App, who: EntityId, timeout: Option<Duration>, count: Optio
     // subscribed before the snapshot is taken, so a notification that arrives between the two is
     // printed by one or the other.
     for n in unread(&first, who).await? {
-        let (nj, _) = notification_with_message(&first.client.ctx, &n, reader).await?;
+        let (nj, _) = notification_with_message(&first.client.graph, &n, reader).await?;
         emit(json!({"event": "snapshot", "notification": nj}))?;
         printed.insert(n.id());
     }
@@ -163,7 +163,7 @@ impl Session {
     /// not only the local store's (empty on a new node), so that what the caller's snapshot does
     /// not hold arrives through the subscription.
     async fn open(client: Client, who: EntityId, tx: mpsc::UnboundedSender<NotificationView>) -> Result<Session> {
-        let query = client.ctx.query::<NotificationView>(with_id("recipient = ? AND status = 'unread'", who)?)?;
+        let query = client.graph.query::<NotificationView>(with_id("recipient = ? AND status = 'unread'", who)?)?;
         tokio::time::timeout(ANSWER_TIMEOUT, query.wait_durable_answered()).await.map_err(|_| {
             anyhow!("the daemon did not answer the watch's query within {}s", ANSWER_TIMEOUT.as_secs())
         })??;
@@ -193,7 +193,7 @@ impl Session {
 /// The watch between its snapshot and its end.
 struct Watch {
     paths: Paths,
-    project: Project,
+    project: NamedProject,
     who: EntityId,
     /// The principal the watch acts as ([`stream`]).
     reader: Option<EntityId>,
@@ -332,7 +332,7 @@ fn end(event: Value, code: i32) -> ! {
 /// is ready fails the attempt ([`daemon::Lost`]), and the watch tries again after its backoff.
 async fn reopen(
     paths: &Paths,
-    project: &Project,
+    project: &NamedProject,
     who: EntityId,
     tx: mpsc::UnboundedSender<NotificationView>,
 ) -> Result<(Session, Vec<NotificationView>)> {
@@ -344,13 +344,13 @@ async fn reopen(
 
 /// The principal's unread notifications, as the daemon has them.
 async fn unread(session: &Session, who: EntityId) -> Result<Vec<NotificationView>> {
-    tokio::time::timeout(ANSWER_TIMEOUT, ops::inbox(&session.client.ctx, who, true))
+    tokio::time::timeout(ANSWER_TIMEOUT, ops::inbox(&session.client.graph, who, true))
         .await
         .map_err(|_| anyhow!("the daemon did not list the unread notifications within {}s", ANSWER_TIMEOUT.as_secs()))?
 }
 
 async fn print_notification(session: &Session, n: &NotificationView, reader: Option<EntityId>) -> Result<()> {
-    let (nj, message) = notification_with_message(&session.client.ctx, n, reader).await?;
+    let (nj, message) = notification_with_message(&session.client.graph, n, reader).await?;
     let mut event = json!({"event": "notification", "notification": nj});
     if let Some(message) = message {
         event["message"] = message;

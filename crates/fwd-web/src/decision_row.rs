@@ -13,7 +13,7 @@ use crate::fmt::CopyId;
 use crate::lozenges::{self, Target};
 use crate::referents::{Child, Listing, Mode, Models};
 use crate::route::{self, Route};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::{self, Actions, Editor, Link, Model, Query, RowAt, Sending, ThreadState};
 use crate::{empty, fmt, keys, modes, references, store};
 use ankurah::EntityId;
@@ -219,9 +219,9 @@ pub fn DecisionRow(state: ThreadState, at: RowAt) -> impl IntoView {
         let new = successor.get_untracked();
         spawn_local(async move {
             let done = match (mv, new) {
-                (DecisionMove::Supersede, Some(new)) => ops::supersede_decision(&ctx(), me, id, new, &why).await,
+                (DecisionMove::Supersede, Some(new)) => ops::supersede_decision(&graph(), me, id, new, &why).await,
                 (DecisionMove::Supersede, None) => Err(anyhow::anyhow!("choose the ruling that replaces it")),
-                _ => ops::move_decision(&ctx(), me, id, mv, &why).await.map(|_| ()),
+                _ => ops::move_decision(&graph(), me, id, mv, &why).await.map(|_| ()),
             };
             match done {
                 Ok(()) => {
@@ -352,7 +352,7 @@ const COMMENT: Editor = Editor { placeholder: "comment on this decision", send: 
 fn send_comment(me: EntityId, decision: EntityId, text: String) -> Sending {
     Box::pin(async move {
         let mc = MessageContext { decision_id: Some(decision), ..Default::default() };
-        ops::post_message(&ctx(), me, &text, Priority::Next, mc).await.map_err(|e| e.to_string())
+        ops::post_message(&graph(), me, &text, Priority::Next, mc).await.map_err(|e| e.to_string())
     })
 }
 

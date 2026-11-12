@@ -37,7 +37,7 @@
 
 use crate::lozenges::{self, Target};
 use crate::referents::Mode;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{anchor_row, keys, modes, store};
 use ankurah::EntityId;
 use fwd_core::model::{MessageStatus, RelationKind, RelationStatus, RelationView};
@@ -294,7 +294,7 @@ pub fn Steps(task: EntityId) -> impl IntoView {
     let press = move |edge: EntityId, was_checked: bool| {
         let Some(me) = session::me() else { return };
         spawn_local(async move {
-            match ops::check_step(&ctx(), me, edge, !was_checked).await {
+            match ops::check_step(&graph(), me, edge, !was_checked).await {
                 Ok(_) => {
                     session::wrote(me);
                     error.try_set(None)
@@ -349,7 +349,7 @@ pub fn Steps(task: EntityId) -> impl IntoView {
         let at = all.iter().position(|s| s.edge == edge);
         let next = at.and_then(|i| all.get(i + 1).or(i.checked_sub(1).and_then(|j| all.get(j)))).map(|s| s.edge);
         spawn_local(async move {
-            match ops::remove_step(&ctx(), me, task, edge, &why, retiring).await {
+            match ops::remove_step(&graph(), me, task, edge, &why, retiring).await {
                 Ok(_) => {
                     session::wrote(me);
                     open_removal(None);

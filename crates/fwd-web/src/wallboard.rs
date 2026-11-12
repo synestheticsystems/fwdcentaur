@@ -46,7 +46,7 @@ impl Dependencies {
         self.queries.retain(|id, _| wanted.contains(id));
         for id in wanted {
             self.queries.entry(id).or_insert_with(|| {
-                session::ctx()
+                session::graph()
                     .query::<TaskView>(format!("id = '{}'", id.to_base64()).as_str())
                     .map_err(|error| tracing::warn!("Prerequisite query refused: {error}"))
                     .ok()
@@ -191,7 +191,9 @@ pub fn Wallboard() -> impl IntoView {
         mark_boot("node");
         started.set(true);
         let predicate = settings.selection.predicate();
-        if let Err(why) = session::wallboard_context().await.and_then(|_| store::open_with(&predicate, &READS)) {
+        if let Err(why) =
+            session::wallboard_graph().await.and_then(|_| store::open_with(store::Tasks::Selected(predicate), &READS))
+        {
             error.set(Some(why));
             return;
         }

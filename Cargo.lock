@@ -1175,6 +1175,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "toml 0.8.23",
  "tower",
@@ -1231,6 +1232,24 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "fwd-store-merge"
+version = "0.0.1"
+dependencies = [
+ "ankurah",
+ "ankurah-storage-sqlite",
+ "anyhow",
+ "bincode",
+ "clap",
+ "fwd-core",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

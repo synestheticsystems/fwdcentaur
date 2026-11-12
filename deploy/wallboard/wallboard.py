@@ -16,6 +16,11 @@ from urllib.parse import urlsplit
 import uuid
 from settings import validate_settings
 
+# The project's socket on the daemon, as crates/fwd-core/src/daemon_socket.rs names it for the
+# daemon and the page, with the `/ws` Ankurah's connector appends. A daemon that keeps every
+# project in one store refuses the path the daemons before it used, `/p/<project>/ws`.
+SOCKET_PATH = "/p/{project}/one-store/ws"
+
 
 def given(value, name, where=""):
     """The field `name` of `value`, or a refusal naming it: the launcher has no default for it."""
@@ -84,7 +89,7 @@ def configuration(settings, dist):
                     "terminal": True,
                 },
                 {
-                    "match": [{"host": [local_host], "method": ["GET"], "path": [f"/p/{project}/ws"],
+                    "match": [{"host": [local_host], "method": ["GET"], "path": [SOCKET_PATH.format(project=project)],
                                "header": {"Origin": [browser_origin], "Upgrade": ["websocket"]}}],
                     "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": upstream}],
                                 "headers": {"request": {"set": {"Host": [authority], "Origin": [daemon_origin]}}}}],

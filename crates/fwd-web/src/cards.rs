@@ -11,7 +11,7 @@
 //! again, or any other key, stops the reading.
 
 use crate::accordion::Section;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::store::{self, Arrivals};
 use crate::thread::{Hooks, ThreadState};
 use crate::waiting::Sorted;
@@ -471,18 +471,18 @@ async fn write(
     missing: &[EntityId],
     status: NotificationStatus,
 ) -> anyhow::Result<()> {
-    let ctx = ctx();
+    let graph = graph();
     for id in missing {
-        held.push(ctx.get(*id).await?);
+        held.push(graph.get(*id).await?);
     }
-    ops::set_status_of(&ctx, &held, status).await
+    ops::set_status_of(&graph, &held, status).await
 }
 
 /// How many of the notifications `ids`, in `whose`'s inbox, the daemon holds short of `status`
 /// ([`short_of`]), asked once; none when it cannot be asked.
 async fn unmarked(whose: EntityId, ids: &[EntityId], status: NotificationStatus) -> Option<usize> {
     let selection = with_id(short_of(status), whose).ok()?;
-    let short: Vec<NotificationView> = ctx().fetch(selection).await.ok()?;
+    let short: Vec<NotificationView> = graph().fetch(selection).await.ok()?;
     Some(short.iter().filter(|n| ids.contains(&n.id())).count())
 }
 

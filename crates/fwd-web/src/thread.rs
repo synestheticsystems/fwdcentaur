@@ -27,7 +27,7 @@ use crate::mentions::{MentionList, Mentions};
 use crate::navigation::{self, Head, Mounted, PendingFocus, Press, RowFacts, Step, Stop};
 use crate::query_cache::{Hold, QueryCache, QueryLayer};
 use crate::referents::{self, Appearance, Appearances, Child, Level, Listing, Models, Row, Rules, State};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{anchor_row, decision_row, fmt, keys, lozenges, message_row, modes, person, scope_row, task_row};
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::{EntityId, LiveQuery};
@@ -188,7 +188,7 @@ pub fn OpenQueries() -> impl IntoView {
 pub fn messages_where(predicate: &'static str, id: EntityId) -> Query {
     let opened = with_id(predicate, id)
         .map_err(|e| e.to_string())
-        .and_then(|selection| ctx().query::<MessageView>(selection).map_err(|e| e.to_string()));
+        .and_then(|selection| graph().query::<MessageView>(selection).map_err(|e| e.to_string()));
     match opened {
         Ok(query) => Query::Live(Live::new(query)),
         Err(e) => Query::Refused(format!("the thread's query was refused: {e}")),

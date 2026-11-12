@@ -77,7 +77,7 @@ The texts the CLI writes for a person name CLI commands, such as a notification'
 
 ## Extension points
 
-- `mcp::Hosting`: what the endpoint needs of the daemon (data folder, port, hosted projects, and a context on each one's node). The daemon implements it on its state. A hosted server would implement its own.
+- `mcp::Hosting`: what the endpoint needs of the daemon (data folder, port, hosted projects, and each open project's graph, which binds every read and write to that project). The daemon implements it on its state. A hosted server would implement its own.
 - `mcp::Caller`: the attested caller. `Caller::from_codex_meta` makes one at the local transport, and a hosted transport would make one from its authenticated session.
 - `mcp::Seen`: called after every call that acted as a principal, with the project, the principal and the caller. This is where daemon-owned inbox registration and wake delivery go, which another task builds; the daemon passes `mcp::NoWake` for now.
 

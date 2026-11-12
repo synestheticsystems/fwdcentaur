@@ -1,7 +1,7 @@
 //! The page's standing live queries and the pure lookups over them.
 //!
-//! One query per collection for the whole page (a project holds dozens to hundreds of tasks,
-//! not millions), opened once after boot. Every read below is tracked by the reactive_graph
+//! One query per collection of the project's graph for the whole page (a project holds dozens to
+//! hundreds of tasks, not millions), opened once after boot. Every read below is tracked by the reactive_graph
 //! bridge, which turns it into a Leptos dependency, so any closure in a `view!` that calls these
 //! re-renders when the daemon sends a change. A whole collection (`tasks()`) is copied whole, and
 //! its reader runs again at any change to any member. One entity looked up by its id (`task(id)`),
@@ -15,6 +15,7 @@ use ankurah::changes::{ChangeSet, ItemChange};
 use ankurah::signals::{Get as AnkurahGet, Subscribe, SubscriptionGuard};
 use ankurah::{EntityId, LiveQuery, View};
 use fwd_core::dormancy;
+use fwd_core::former_ids::FormerIds;
 use fwd_core::model::*;
 use fwd_core::naming::{self, Named, Work};
 use fwd_core::rules::{self, Readiness, TaskSnapshot};
@@ -25,7 +26,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use wasm_bindgen_futures::spawn_local;
 
 use crate::clock;
-use crate::session::ctx;
+use crate::session::graph;
+use std::fmt;
 
 struct Store {
     tasks: LiveQuery<TaskView>,
@@ -37,6 +39,7 @@ struct Store {
     messages: Option<LiveQuery<MessageView>>,
     anchors: Option<LiveQuery<CodeAnchorView>>,
     decisions: Option<LiveQuery<DecisionView>>,
+    former_ids: Option<LiveQuery<FormerIdView>>,
     /// Whether the daemon has answered every standing query above (`standing_loaded`).
     answered: ArcRwSignal<bool>,
     /// The readers of each entity looked up by its id in the queries above.
@@ -52,20 +55,40 @@ struct Store {
 /// What the store was opened with: what the task query selects and the collections opened beside
 /// it. The collections are a set, so that a later open naming them in another order is admitted.
 struct OpenedWith {
-    task_predicate: String,
+    tasks: Tasks,
     reads: BTreeSet<Collection>,
 }
 
+/// The tasks of the project the store's task query holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Tasks {
+    /// Every task, as the app reads them.
+    Every,
+    /// The tasks a predicate selects, as the wallboard reads them.
+    #[cfg(feature = "wallboard")]
+    Selected(String),
+}
+
+impl fmt::Display for Tasks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Tasks::Every => f.write_str("every task"),
+            #[cfg(feature = "wallboard")]
+            Tasks::Selected(predicate) => write!(f, "`{predicate}`"),
+        }
+    }
+}
+
 impl OpenedWith {
-    fn new(task_predicate: &str, reads: &[Collection]) -> Self {
-        OpenedWith { task_predicate: task_predicate.to_owned(), reads: reads.iter().copied().collect() }
+    fn new(tasks: Tasks, reads: &[Collection]) -> Self {
+        OpenedWith { tasks, reads: reads.iter().copied().collect() }
     }
 
-    /// A later open asking for `asked`: another predicate or other collections are refused, since the
+    /// A later open asking for `asked`: other tasks or other collections are refused, since the
     /// store cannot give them without opening again, and are never ignored.
     fn admit(&self, asked: &OpenedWith) -> Result<(), String> {
-        if self.task_predicate != asked.task_predicate {
-            Err(format!("the task query already selects `{}`, not `{}`", self.task_predicate, asked.task_predicate))
+        if self.tasks != asked.tasks {
+            Err(format!("the task query already selects {}, not {}", self.tasks, asked.tasks))
         } else if self.reads != asked.reads {
             Err(format!("the store already reads {:?}, not {:?}", self.reads, asked.reads))
         } else {
@@ -84,51 +107,67 @@ pub enum Collection {
     Messages,
     Anchors,
     Decisions,
+    /// The ids the project's records had before they were renumbered, which a route, a typed name
+    /// and a text written before then may name (`fwd_core::former_ids`).
+    FormerIds,
 }
 
 impl Collection {
     /// Every collection: the app's pages read them all between them.
-    pub const ALL: [Collection; 5] =
-        [Collection::Scopes, Collection::Principals, Collection::Messages, Collection::Anchors, Collection::Decisions];
+    pub const ALL: [Collection; 6] = [
+        Collection::Scopes,
+        Collection::Principals,
+        Collection::Messages,
+        Collection::Anchors,
+        Collection::Decisions,
+        Collection::FormerIds,
+    ];
 }
 
 static STORE: OnceLock<SendWrapper<Store>> = OnceLock::new();
 
 /// Opens the app's standing queries: every task, and every collection.
 pub fn open() -> Result<(), String> {
-    open_with("created > 0", &Collection::ALL)
+    open_with(Tasks::Every, &Collection::ALL)
 }
 
-/// Opens the standing queries: the tasks `task_predicate` selects, their relations, and the
-/// collections `reads` names, in any order. The store lives as long as the page, so its first open
-/// binds both: another predicate or other collections are refused, never ignored ([`OpenedWith`]).
-pub fn open_with(task_predicate: &str, reads: &[Collection]) -> Result<(), String> {
-    let asked = OpenedWith::new(task_predicate, reads);
+/// Opens the standing queries on the project's graph: the tasks `tasks` names, their relations,
+/// and the collections `reads` names, in any order. The store lives as long as the page, so its
+/// first open binds both: other tasks or other collections are refused, never ignored
+/// ([`OpenedWith`]).
+pub fn open_with(tasks: Tasks, reads: &[Collection]) -> Result<(), String> {
+    let asked = OpenedWith::new(tasks, reads);
     if let Some(store) = STORE.get() {
         return store.opened_with.admit(&asked);
     }
-    let ctx = ctx();
+    let graph = graph();
     let refused =
         |what: &'static str| move |e: ankurah::error::RetrievalError| format!("the {what} query was refused: {e}");
     // The query of each collection `reads` names, and none for the others.
     let named = |collection| asked.reads.contains(&collection);
-    // `created > 0` rather than `>= 0`: a live query on `>= 0` never fires (Ankurah 0.9.3).
-    let tasks = ctx.query::<TaskView>(task_predicate).map_err(refused("tasks"))?;
-    let relations = ctx.query::<RelationView>("created > 0").map_err(refused("relations"))?;
-    let scopes = named(Collection::Scopes)
-        .then(|| ctx.query::<ScopeView>("created > 0").map_err(refused("scopes")))
-        .transpose()?;
+    let tasks = match &asked.tasks {
+        Tasks::Every => graph.query_all::<TaskView>(),
+        #[cfg(feature = "wallboard")]
+        Tasks::Selected(predicate) => graph.query::<TaskView>(predicate.as_str()),
+    }
+    .map_err(refused("tasks"))?;
+    let relations = graph.query_all::<RelationView>().map_err(refused("relations"))?;
+    let scopes =
+        named(Collection::Scopes).then(|| graph.query_all::<ScopeView>().map_err(refused("scopes"))).transpose()?;
     let principals = named(Collection::Principals)
-        .then(|| ctx.query::<PrincipalView>("kind = 'human' OR kind = 'agent'").map_err(refused("principals")))
+        .then(|| graph.query_all::<PrincipalView>().map_err(refused("principals")))
         .transpose()?;
     let messages = named(Collection::Messages)
-        .then(|| ctx.query::<MessageView>("created > 0").map_err(refused("messages")))
+        .then(|| graph.query_all::<MessageView>().map_err(refused("messages")))
         .transpose()?;
     let anchors = named(Collection::Anchors)
-        .then(|| ctx.query::<CodeAnchorView>("created > 0").map_err(refused("anchors")))
+        .then(|| graph.query_all::<CodeAnchorView>().map_err(refused("anchors")))
         .transpose()?;
     let decisions = named(Collection::Decisions)
-        .then(|| ctx.query::<DecisionView>("created > 0").map_err(refused("decisions")))
+        .then(|| graph.query_all::<DecisionView>().map_err(refused("decisions")))
+        .transpose()?;
+    let former_ids = named(Collection::FormerIds)
+        .then(|| graph.query_all::<FormerIdView>().map_err(refused("former ids")))
         .transpose()?;
     // Watched from before any of them answers, so that every arrival is heard.
     let (arrivals, ends) = (Arrivals::default(), Ends::default());
@@ -146,6 +185,7 @@ pub fn open_with(task_predicate: &str, reads: &[Collection]) -> Result<(), Strin
         messages,
         anchors,
         decisions,
+        former_ids,
         answered: ArcRwSignal::new(false),
         arrivals,
         ends,
@@ -189,6 +229,18 @@ pub fn decisions() -> Vec<DecisionView> {
     found
 }
 
+/// The project's former ids, each with the record it names now, copied whole: read inside a
+/// closure, which then runs again when one arrives.
+pub fn former_ids() -> FormerIds {
+    FormerIds::from_views(&opened(&store().former_ids, Collection::FormerIds).get())
+}
+
+/// The record `id` names now: the one it was renumbered to when it is a former id, and itself
+/// otherwise.
+pub fn current(id: EntityId) -> EntityId {
+    former_ids().named(&id.to_base64()).unwrap_or(id)
+}
+
 /// Whether the daemon has answered every standing query, so that an empty result means none
 /// rather than not yet, and a choice made once from them, such as the card the Inbox or the
 /// Questions page selects first or the scope the Graph and Decisions pages open on, is made from
@@ -228,6 +280,9 @@ async fn record_the_daemons_answer() {
     }
     if let Some(decisions) = &store.decisions {
         answers.push(("decisions", decisions.wait_durable_answered().await));
+    }
+    if let Some(former_ids) = &store.former_ids {
+        answers.push(("former ids", former_ids.wait_durable_answered().await));
     }
     for (what, answer) in answers {
         if let Err(e) = answer {
@@ -425,7 +480,7 @@ pub fn relations_of(id: EntityId) -> Vec<RelationView> {
 /// (docs/design/agents-and-inbox.md, "A principal's name").
 pub fn principal_named(name: &str) -> Result<Option<PrincipalView>, String> {
     let principals = principals();
-    match naming::resolve(&principals, name, None) {
+    match naming::resolve(&principals, name, None, &former_ids()) {
         Named::One(p) => Ok(Some(p.clone())),
         Named::NoOne => Ok(None),
         Named::Shared(several) => {
@@ -732,27 +787,34 @@ mod tests {
     #[test]
     fn a_later_open_naming_the_same_collections_in_another_order_is_admitted() {
         use Collection::{Messages, Principals, Scopes};
-        let opened = OpenedWith::new("created > 0", &[Scopes, Principals, Messages]);
-        assert_eq!(opened.admit(&OpenedWith::new("created > 0", &[Messages, Scopes, Principals])), Ok(()));
-        assert_eq!(opened.admit(&OpenedWith::new("created > 0", &[Scopes, Principals, Messages])), Ok(()));
+        let opened = OpenedWith::new(Tasks::Every, &[Scopes, Principals, Messages]);
+        assert_eq!(opened.admit(&OpenedWith::new(Tasks::Every, &[Messages, Scopes, Principals])), Ok(()));
+        assert_eq!(opened.admit(&OpenedWith::new(Tasks::Every, &[Scopes, Principals, Messages])), Ok(()));
     }
 
     #[test]
-    fn a_later_open_naming_other_collections_or_another_predicate_is_refused() {
+    fn a_later_open_naming_other_collections_is_refused() {
         use Collection::{Anchors, Messages, Principals, Scopes};
-        let opened = OpenedWith::new("created > 0", &[Scopes, Principals, Messages]);
+        let opened = OpenedWith::new(Tasks::Every, &[Scopes, Principals, Messages]);
         assert_eq!(
-            opened.admit(&OpenedWith::new("created > 0", &[Principals, Scopes])),
+            opened.admit(&OpenedWith::new(Tasks::Every, &[Principals, Scopes])),
             Err("the store already reads {Scopes, Principals, Messages}, not {Scopes, Principals}".to_owned()),
             "one fewer"
         );
         assert!(
-            opened.admit(&OpenedWith::new("created > 0", &[Messages, Anchors, Scopes, Principals])).is_err(),
+            opened.admit(&OpenedWith::new(Tasks::Every, &[Messages, Anchors, Scopes, Principals])).is_err(),
             "one more"
         );
-        assert!(
-            opened.admit(&OpenedWith::new("status = 'open'", &[Scopes, Principals, Messages])).is_err(),
-            "another predicate"
+    }
+
+    #[cfg(feature = "wallboard")]
+    #[test]
+    fn a_later_open_selecting_other_tasks_is_refused() {
+        use Collection::{Messages, Principals, Scopes};
+        let opened = OpenedWith::new(Tasks::Every, &[Scopes, Principals, Messages]);
+        assert_eq!(
+            opened.admit(&OpenedWith::new(Tasks::Selected("status = 'open'".into()), &[Scopes, Principals, Messages])),
+            Err("the task query already selects every task, not `status = 'open'`".to_owned()),
         );
     }
 
