@@ -1,4 +1,11 @@
-//! The page's standing live queries and the pure lookups over them.
+//! The page's standing live queries and the lookups over them.
+//!
+//! A lookup is made inside a reactive closure (a memo, an effect, a closure a `view!` draws): it
+//! makes that closure a reader of what it reads, and a lookup of a record the standing queries do
+//! not hold names the record's id for the closure, which changes what a live read asks the daemon
+//! for, and gives it back when the closure runs again or leaves the page (`followed.rs`). Made
+//! where no reactive owner is, as in an event handler, a lookup names nothing, so a record of
+//! another project that no closure names is not found there.
 //!
 //! One query per collection of the project's graph for the whole page (a project holds dozens to
 //! hundreds of tasks, not millions), opened once after boot. Every read below is tracked by the reactive_graph
@@ -13,10 +20,11 @@
 //!
 //! The standing queries hold the project's records, which every list shows. A lookup by id answers
 //! for a record of another project too, which the page names and does not list (the far end of a
-//! relation, a message's author there, a dependency there), from the live reads `followed.rs`
-//! keeps; the record's project says whose it is ([`whose`]), and the page names a record of another
-//! project with its project's name ([`named`]). The relations at a record ([`relations_of`]) are
-//! those its project made and those another project made that touch it.
+//! relation, a message's author there, a dependency there, a relation a notification is about),
+//! from the live reads `followed.rs` keeps; the record's project says whose it is ([`whose`]), and
+//! the page names a record of another project with its project's name ([`named`]). The relations at
+//! a record ([`relations_of`]) are those its project made and those another project made that
+//! touch it, each kept while either read holds it ([`Ends`]).
 
 use ankurah::changes::{ChangeSet, ItemChange};
 use ankurah::signals::{Get as AnkurahGet, Subscribe, SubscriptionGuard};
@@ -30,7 +38,7 @@ use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, ProjectReco
 use fwd_core::rules::{self, Readiness, TaskSnapshot};
 use leptos::prelude::{untrack, ArcRwSignal, ArcTrigger, Get, Notify, Set, Track};
 use send_wrapper::SendWrapper;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use wasm_bindgen_futures::spawn_local;
 
@@ -57,7 +65,9 @@ struct Store {
     /// The record of the project the page shows, which every record of its lists names.
     here: EntityId,
     tasks: Records<TaskView>,
-    relations: LiveQuery<RelationView>,
+    /// The project's relations, and those the page names by their ids wherever they were made (a
+    /// notification's relation).
+    relations: Records<RelationView>,
     /// The relations other projects made from or to the records whose relations a reader reads.
     relations_elsewhere: Following<RelationView>,
     /// Every project of the node, by whose names the page names a record of another project.
@@ -191,7 +201,7 @@ pub fn open_with(tasks: Tasks, reads: &[Collection]) -> Result<(), String> {
         },
     )
     .map_err(refused("tasks"))?;
-    let relations = graph.query_all::<RelationView>().map_err(refused("relations"))?;
+    let relations = records(&graph, graph.query_all::<RelationView>()).map_err(refused("relations"))?;
     let relations_elsewhere = graph
         .relations_made_elsewhere_live(&BTreeSet::new())
         .map(Following::new)
@@ -218,14 +228,14 @@ pub fn open_with(tasks: Tasks, reads: &[Collection]) -> Result<(), String> {
     // Watched from before any of them answers, so that every arrival is heard.
     let (arrivals, ends) = (Arrivals::default(), Ends::default());
     let mut watching = vec![
-        arrivals.watch(&relations),
-        ends.watch(&relations),
+        ends.watch(&relations.listed, RelationRead::Project),
         arrivals.watch(relations_elsewhere.live().live()),
-        ends.watch(relations_elsewhere.live().live()),
+        ends.watch(relations_elsewhere.live().live(), RelationRead::MadeElsewhere),
         arrivals.watch(&projects),
     ];
     for records in [
         Some(arrivals.watch_records(&tasks)),
+        Some(arrivals.watch_records(&relations)),
         scopes.as_ref().map(|r| arrivals.watch_records(r)),
         principals.as_ref().map(|r| arrivals.watch_records(r)),
         messages.as_ref().map(|r| arrivals.watch_records(r)),
@@ -275,6 +285,9 @@ fn opened<T>(query: &Option<T>, collection: Collection) -> &T {
 fn task_records(store: &Store) -> &Records<TaskView> {
     &store.tasks
 }
+fn relation_records(store: &Store) -> &Records<RelationView> {
+    &store.relations
+}
 fn scope_records(store: &Store) -> &Records<ScopeView> {
     opened(&store.scopes, Collection::Scopes)
 }
@@ -295,7 +308,7 @@ pub fn tasks() -> Vec<TaskView> {
     store().tasks.listed.get()
 }
 pub fn relations() -> Vec<RelationView> {
-    store().relations.get()
+    store().relations.listed.get()
 }
 pub fn scopes() -> Vec<ScopeView> {
     scope_records(store()).listed.get()
@@ -348,7 +361,7 @@ async fn record_the_daemons_answer() {
     let store = store();
     let mut answers = vec![
         ("tasks", store.tasks.listed.wait_durable_answered().await),
-        ("relations", store.relations.wait_durable_answered().await),
+        ("relations", store.relations.listed.wait_durable_answered().await),
         ("projects", store.projects.wait_durable_answered().await),
     ];
     if let Some(scopes) = &store.scopes {
@@ -468,18 +481,33 @@ impl Arrivals {
     }
 }
 
-/// The ids of the relations at each entity, from or to it, in the order the relations query holds
-/// them (by id), kept from the query's change sets, with the readers of each entity's.
+/// One of the two reads of relations [`Ends`] keeps the ends of: the project's own, and the read of
+/// those other projects made that touch the records whose relations a reader reads. A relation whose
+/// project changes, as one from a task that moves does, leaves one and arrives in the other, and the
+/// two say so in either order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RelationRead {
+    Project,
+    MadeElsewhere,
+}
+
+/// The ids of the relations at each entity, from or to it, in the order the relations queries hold
+/// them (by id), kept from the queries' change sets, with the readers of each entity's. Each
+/// relation is kept with the reads that hold it, and stays at its ends while either does, so that
+/// one read's departure never takes away what the other holds.
 #[derive(Clone, Default)]
 struct Ends {
-    by_entity: Arc<Mutex<HashMap<EntityId, Vec<EntityId>>>>,
+    by_entity: Arc<Mutex<HashMap<EntityId, RelationsAt>>>,
     readers: Arrivals,
 }
 
+/// The relations at one entity, by id, each with the reads that hold it.
+type RelationsAt = BTreeMap<EntityId, BTreeSet<RelationRead>>;
+
 impl Ends {
-    /// Keeps the ends of what `relations` gains and loses, for as long as the guard is kept. A
-    /// relation's ends never change once it is written.
-    fn watch(&self, relations: &LiveQuery<RelationView>) -> SubscriptionGuard {
+    /// Keeps the ends of what `relations`, the read `read`, gains and loses, for as long as the
+    /// guard is kept. A relation's ends never change once it is written.
+    fn watch(&self, relations: &LiveQuery<RelationView>, read: RelationRead) -> SubscriptionGuard {
         let ends = self.clone();
         relations.subscribe(move |changes: ChangeSet<RelationView>| {
             for change in &changes.changes {
@@ -488,37 +516,35 @@ impl Ends {
                 let r = change.entity();
                 // Untracked: this runs inside whatever the change interrupted.
                 let Some((from, to)) = untrack(|| Some((r.from_id().ok()?, r.to_id().ok()?))) else { continue };
-                ends.place(from, r.id(), arrived);
+                ends.place(from, r.id(), read, arrived);
                 if to != from {
-                    ends.place(to, r.id(), arrived);
+                    ends.place(to, r.id(), read, arrived);
                 }
             }
         })
     }
 
-    /// Adds the relation to the entity's when it `arrived`, else takes it away, dropping an entity
-    /// left with none, and runs the entity's readers again when that changed anything.
-    fn place(&self, entity: EntityId, relation: EntityId, arrived: bool) {
+    /// Records that `read` holds the relation at the entity when it `arrived`, else that it no
+    /// longer does, dropping a relation no read holds and an entity left with none, and runs the
+    /// entity's readers again when the relations at it changed.
+    fn place(&self, entity: EntityId, relation: EntityId, read: RelationRead, arrived: bool) {
         let changed = {
             let mut by_entity = lock(&self.by_entity);
+            let at = by_entity.entry(entity).or_default();
+            let held = at.contains_key(&relation);
             if arrived {
-                let at = by_entity.entry(entity).or_default();
-                match at.binary_search(&relation) {
-                    Ok(_) => false,
-                    Err(i) => {
-                        at.insert(i, relation);
-                        true
-                    }
+                at.entry(relation).or_default().insert(read);
+            } else if let Some(reads) = at.get_mut(&relation) {
+                reads.remove(&read);
+                if reads.is_empty() {
+                    at.remove(&relation);
                 }
-            } else {
-                let Some(at) = by_entity.get_mut(&entity) else { return };
-                let Ok(i) = at.binary_search(&relation) else { return };
-                at.remove(i);
-                if at.is_empty() {
-                    by_entity.remove(&entity);
-                }
-                true
             }
+            let changed = held != at.contains_key(&relation);
+            if at.is_empty() {
+                by_entity.remove(&entity);
+            }
+            changed
         };
         if changed {
             self.readers.fire(entity);
@@ -529,7 +555,7 @@ impl Ends {
     /// them arrives or leaves.
     fn of(&self, id: EntityId) -> Vec<EntityId> {
         self.readers.track(id);
-        lock(&self.by_entity).get(&id).cloned().unwrap_or_default()
+        lock(&self.by_entity).get(&id).map(|at| at.keys().copied().collect()).unwrap_or_default()
     }
 }
 
@@ -651,11 +677,12 @@ pub fn kind_of(id: EntityId) -> Option<Model> {
     here.or_else(|| kinds.into_iter().find(|model| held(*model, id)))
 }
 
-/// The relation `id`, made in the project or, touching a record whose relations a reader reads, in
-/// another.
+/// The relation `id`, whichever project made it: the project's, or one the page names wherever it
+/// was made, as a notification about a relation of another project names it, which the reader
+/// asking names as a lookup of a record of any kind does ([`look_up`]); meanwhile, one another
+/// project made that touches a record whose relations a reader reads ([`relations_of`]).
 pub fn relation(id: EntityId) -> Option<RelationView> {
-    let store = store();
-    member(&store.relations, id).or_else(|| member(store.relations_elsewhere.live().live(), id))
+    look_up(relation_records, id).or_else(|| member(store().relations_elsewhere.live().live(), id))
 }
 
 /// The task `id` as the page follows it, as the command line follows a dependency
@@ -778,7 +805,7 @@ fn held_relations(id: EntityId) -> Vec<RelationView> {
     let elsewhere = store.relations_elsewhere.live().live();
     untrack(|| {
         ids.into_iter()
-            .filter_map(|r| store.relations.resultset().by_id(&r).or_else(|| elsewhere.resultset().by_id(&r)))
+            .filter_map(|r| store.relations.listed.resultset().by_id(&r).or_else(|| elsewhere.resultset().by_id(&r)))
             .collect()
     })
 }
@@ -1238,6 +1265,7 @@ mod tests {
 
     #[test]
     fn the_relations_at_an_entity_follow_their_arrivals_in_the_querys_order() {
+        use RelationRead::Project;
         let ends = Ends::default();
         let (task, other) = (id(1), id(9));
         let (at_task, runs) = reader({
@@ -1245,25 +1273,59 @@ mod tests {
             move || ends.of(task)
         });
         assert_eq!(at_task.get(), Vec::<EntityId>::new());
-        ends.place(task, id(4), true);
-        ends.place(task, id(2), true);
-        ends.place(task, id(2), true);
+        ends.place(task, id(4), Project, true);
+        ends.place(task, id(2), Project, true);
+        ends.place(task, id(2), Project, true);
         assert_eq!(at_task.get(), vec![id(2), id(4)], "by id, as the query holds them, each once");
         let before = runs.load(Ordering::SeqCst);
-        ends.place(other, id(3), true);
-        ends.place(task, id(5), false);
+        ends.place(other, id(3), Project, true);
+        ends.place(task, id(5), Project, false);
         at_task.get();
         assert_eq!(runs.load(Ordering::SeqCst), before, "another entity's relation, or one it never had, runs nothing");
-        ends.place(task, id(4), false);
+        ends.place(task, id(4), Project, false);
         assert_eq!(at_task.get(), vec![id(2)]);
         assert_eq!(ends.of(other), vec![id(3)]);
         // An entity left with no relation leaves no entry, and taking away one it never had makes
         // none.
-        ends.place(task, id(2), false);
+        ends.place(task, id(2), Project, false);
         assert_eq!(at_task.get(), Vec::<EntityId>::new());
-        ends.place(id(7), id(8), false);
+        ends.place(id(7), id(8), Project, false);
         let held: Vec<EntityId> = lock(&ends.by_entity).keys().copied().collect();
         assert_eq!(held, vec![other]);
+    }
+
+    /// A relation whose project changes leaves the project's read and arrives in the read of those
+    /// made elsewhere, or the other way round, and the two say so in either order: it stays at its
+    /// ends throughout. One that both reads hold stays while either does, and goes with the last.
+    #[test]
+    fn a_relation_stays_at_its_ends_while_either_read_holds_it_whichever_says_so_first() {
+        use RelationRead::{MadeElsewhere, Project};
+        let ends = Ends::default();
+        let (task, r) = (id(1), id(4));
+        let (at_task, runs) = reader({
+            let ends = ends.clone();
+            move || ends.of(task)
+        });
+        ends.place(task, r, Project, true);
+        assert_eq!(at_task.get(), vec![r]);
+        // It arrives in the other read before it leaves the project's.
+        ends.place(task, r, MadeElsewhere, true);
+        ends.place(task, r, Project, false);
+        assert_eq!(at_task.get(), vec![r], "arrival, then departure");
+        let before = runs.load(Ordering::SeqCst);
+        at_task.get();
+        assert_eq!(runs.load(Ordering::SeqCst), before, "nothing at the task changed, so its reader did not run again");
+        // It leaves the other read before it arrives back in the project's.
+        ends.place(task, r, MadeElsewhere, false);
+        ends.place(task, r, Project, true);
+        assert_eq!(at_task.get(), vec![r], "departure, then arrival");
+        // Held by both, it stays while either does.
+        ends.place(task, r, MadeElsewhere, true);
+        ends.place(task, r, Project, false);
+        assert_eq!(at_task.get(), vec![r], "dropped by one of the two that held it");
+        ends.place(task, r, MadeElsewhere, false);
+        assert_eq!(at_task.get(), Vec::<EntityId>::new(), "dropped by both");
+        assert!(lock(&ends.by_entity).is_empty(), "an entity left with no relation leaves no entry");
     }
 
     #[test]
