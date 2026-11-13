@@ -41,7 +41,7 @@ export class WallboardRuntime {
     this.root = host.closest('.wallboard') || host.parentElement;
     this.theme = mountTheme(this.root, settings, { now: this.now });
     this.waveElement = document.createElement('div'); this.waveElement.className = 'wallboard-wave'; this.waveElement.setAttribute('aria-hidden', 'true');
-    this.banner = document.createElement('div'); this.banner.className = 'wallboard-replay'; this.banner.setAttribute('role', 'status');
+    this.banner = document.createElement('div'); this.banner.className = 'wallboard-status'; this.banner.setAttribute('role', 'status');
     this.empty = document.createElement('p'); this.empty.className = 'wallboard-wait';
     this.root.prepend(this.waveElement); this.root.append(this.banner); host.append(this.empty);
     this.nodes = new Map(); this.edges = new Map(); this.effects = new Map(); this.departures = new Map();
@@ -134,7 +134,7 @@ export class WallboardRuntime {
       });
       this.banner.replaceChildren(this.statusFields[0], ' ', this.statusFields[1], ' ', this.statusFields[2]);
     }
-    this.banner.hidden = false; this.banner.className = 'wallboard-replay ' + mode;
+    this.banner.hidden = false; this.banner.className = 'wallboard-status ' + mode;
     for (const [i, value] of [tag, when, detail].entries()) {
       if (this.statusFields[i].textContent !== value) this.statusFields[i].textContent = value;
     }

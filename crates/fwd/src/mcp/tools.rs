@@ -48,6 +48,7 @@ pub const OFFERED: &[&str] = &[
     "task hold",
     "task release",
     "task explain",
+    "task move",
     "step add",
     "step list",
     "step check",

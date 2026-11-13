@@ -8,7 +8,7 @@
 use crate::cards::Notifications;
 use crate::route::{self, Route};
 use crate::scope_filter::{self, HeaderScope, ScopeChoice};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{anchors, decisions, graph, inbox, lozenges, questions, scopes, tasks};
 use crate::{clock, fmt, speech, store, waiting};
 use ankurah::signals::Get as AnkurahGet;
@@ -40,6 +40,21 @@ pub fn App() -> impl IntoView {
     // The scope the Questions, Tasks, Decisions and Graph pages list by, one choice for the four,
     // which each of their routes carries: none until the page has picked the one it opens on.
     let scope = scope_filter::follow(route.clone());
+    // A route naming an id a record had before it was renumbered, from a bookmark or a note, is
+    // put in place of by the route naming the record now, once the daemon has answered the
+    // standing queries that say which ids are former ones.
+    Effect::new({
+        let route = route.clone();
+        move |_| {
+            let here = route.get();
+            if store::standing_loaded() {
+                let now = untrack(|| here.with_ids(store::current));
+                if now != here {
+                    route::replace(now);
+                }
+            }
+        }
+    });
     // Whether the Tasks page's panel holds the form for a new task.
     let new_task = Memo::new({
         let route = route.clone();
@@ -202,7 +217,7 @@ fn WaitingBadge() -> impl IntoView {
 fn WaitingFor(me: EntityId) -> impl IntoView {
     let query = with_id(&waiting::requests_selection(), me)
         .ok()
-        .and_then(|selection| ctx().query::<NotificationView>(selection).ok());
+        .and_then(|selection| graph().query::<NotificationView>(selection).ok());
     let notifications = query.map_or_else(Notifications::none, Notifications::of);
     let (answered, answers_loaded) = waiting::answers(me);
     let waiting = Memo::new(move |_| {
@@ -223,7 +238,7 @@ fn WaitingFor(me: EntityId) -> impl IntoView {
 #[component]
 pub fn BootError(reason: String) -> impl IntoView {
     let current = session::project().id;
-    let others: Vec<session::Project> = if session::locked() {
+    let others: Vec<session::HostedProject> = if session::locked() {
         Vec::new()
     } else {
         session::projects().into_iter().filter(|p| p.error.is_none() && p.id != current).collect()
@@ -249,7 +264,7 @@ pub fn BootError(reason: String) -> impl IntoView {
 }
 
 /// Which project the page shows, among every project the daemon hosts. Choosing another reloads
-/// the page on that project's node. The selector is always there (Daniel, 2026-09-26: "I want a
+/// the page on that project's graph. The selector is always there (Daniel, 2026-09-26: "I want a
 /// project selector in the web UI"), even with one project; only a page pinned to one project
 /// (the VS Code webview, `?lock=1`) shows the name alone. The daemon's list is read again when
 /// the selector takes the focus or is opened, and every 30 seconds while the page is in view, so

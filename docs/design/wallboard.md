@@ -19,7 +19,8 @@ how to build, configure, connect and run it, and what to do when something is wr
   its own. `crates/fwd-web` built with its `wallboard` feature, from `crates/fwd-web/wallboard.html`,
   mounts the wallboard in place of the app. It starts one node for the page's whole life on the
   project its configuration names (`session.rs`, `wallboard_node`), whose connector retries while no
-  daemon answers, and waits for it to join with no deadline (`wallboard_context`). It asks for no
+  daemon answers, waits for it to join with no deadline, and opens that project's graph, which every
+  query of the wallboard goes through (`wallboard_graph`). It asks for no
   `/health`, lists no projects, acts as no principal and never reloads for a new daemon build.
 - **The launcher**, `deploy/wallboard/wallboard.py`, beside the display, turns one configuration file,
   `wallboard.json`, into a Caddy configuration and replaces itself with Caddy. Caddy serves the page
@@ -28,7 +29,7 @@ how to build, configure, connect and run it, and what to do when something is wr
   Origin to the daemon's own (`daemon.md`, the Host and Origin checks). Everything else answers 404.
   The page reaches the daemon only through it, on loopback, directly or through an SSH tunnel.
 - **Rust** draws: `wallboard.rs` fetches the configuration and mounts the display, and works out each
-  card's availability from the prerequisites it watches; its child `wallboard/settings.rs` holds the
+  card's availability from its prerequisites, which the store follows wherever they are; its child `wallboard/settings.rs` holds the
   typed settings; the renderer, `graph/wallboard_render.rs`, and the packing,
   `layout/wallboard_layout.rs`, are child modules of `graph.rs` and `layout.rs`, so that they draw
   with the Graph page's own code. The renderer gives the runtime each frame as SVG markup, with the
@@ -57,12 +58,17 @@ how to build, configure, connect and run it, and what to do when something is wr
   build. Its tests check that they hold every manifest and the lockfile Cargo reads for the build,
   as `cargo metadata` names them, that a dependency feature `fwd-core` inherits from the root
   manifest changes the hash, and that editing a check or the launcher does not. The build runs
-  locked, so it reads the lockfile it hashed as it was hashed. It never builds or replaces the
-  daemon or the page the daemon embeds, and it builds in a target directory of its own,
-  `crates/fwd-web/target/wallboard`: trunk copies every module it finds in its target directory into
-  the page it builds, so a shared one would carry the wallboard's modules into the daemon's page,
-  and the build empties wasm-bindgen's output there first, which keeps the modules of earlier
-  builds. The bundle says what it contains in `dist/NOTICE.txt` (`scripts/wallboard_notices.py`):
+  locked, so it reads the lockfile it hashed as it was hashed. It writes `wallboard-build.mjs`
+  before trunk runs and `build-info.json` last, once the page is built and in `dist/`, and refuses
+  to write it for a `dist/` that carries no copy of the module or a copy other than the one this
+  build wrote; it removes the old `build-info.json` before it replaces `dist/`. So a build that
+  fails leaves the bundle it found or a `dist/` with no `build-info.json`, never a page under
+  another build's identity. It never builds or replaces the daemon or the page the daemon embeds,
+  and it builds in a target directory of its own, `crates/fwd-web/target/wallboard`: trunk copies
+  every module it finds in its target directory into the page it builds, so a shared one would carry
+  the wallboard's modules into the daemon's page, and the build empties wasm-bindgen's output there
+  first, which keeps the modules of earlier builds. The bundle says what it contains in
+  `dist/NOTICE.txt` (`scripts/wallboard_notices.py`):
   fwd's copyright and license and where its source is, then SunCalc and every crate compiled into
   its WebAssembly, with the license texts each ships. A crate whose package ships none is taken
   under Apache-2.0 when its license offers that; otherwise the notice carries its MIT text, kept in
@@ -155,10 +161,13 @@ capitals can, never shows outside it.
 
 A card faded to half its opacity is blocked by an unfinished accepted prerequisite or held, and says
 which, Blocked or On hold, with its status and priority unchanged. A cancelled or rejected
-prerequisite reads Check dependency, and one that cannot be read Dependency unknown. Availability
-comes from exact-ID queries of the prerequisites of the cards shown, which close when no card needs
-them, so the only finished tasks the display loads are those prerequisites; a proposed dependency
-blocks nothing.
+prerequisite reads Check dependency, as does one the node does not hold, and one the daemon has not
+answered for yet Dependency unknown. A prerequisite of another project counts as finished once it is
+done there and blocks until then, as the command line judges it. Availability comes from the store's
+lookups of the prerequisites of the cards shown (`store::dependencies`), which read a task outside
+the selection, or of another project, by its id for as long as a card names it (`followed.rs`), so
+the only finished tasks the display loads are those prerequisites; a proposed dependency blocks
+nothing.
 
 Beside its tasks the display reads the project's relations, scopes, principals and messages whole,
 for its arrows, scope chips, assignees and counts, and caches them for the page's life. It opens no

@@ -102,12 +102,37 @@ pub enum NotReadyReason {
     /// An accepted `depends_on` target that is `Cancelled` or `Rejected`; the triage agent must
     /// retract the relation or cancel the dependent.
     DependencyClosed(EntityId, TaskStatus),
+    /// An accepted `depends_on` target that is a task of another project and not `Done`: the
+    /// task, and that project's name, which a reader shows beside it.
+    BlockedByTaskIn { task: EntityId, project: String },
+    /// An accepted `depends_on` target that is a task of another project and `Cancelled` or
+    /// `Rejected`, as [`NotReadyReason::DependencyClosed`]: the task, that project's name, and its
+    /// status.
+    DependencyClosedIn { task: EntityId, project: String, status: TaskStatus },
+    /// An accepted `depends_on` target the node holds no task for, so it cannot be followed here:
+    /// nothing says it is done, so it blocks.
+    DependencyNotHeld(EntityId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnknownReason {
     /// An accepted `depends_on` target that could not be loaded or is not authorized.
     DependencyUnavailable(EntityId),
+}
+
+/// One accepted `depends_on` target of a task, as readiness weighs it. A dependency is followed
+/// wherever in the node it leads (docs/DECISIONS.md, D176): a task of another project gates
+/// readiness as one of the dependent's own does, and a reason that names it names its project
+/// too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dependency {
+    /// A task of the dependent's own project, and its status: none when it could not be read, as
+    /// by a reader that holds only some of the project's tasks.
+    Here(EntityId, Option<TaskStatus>),
+    /// A task of another project: the task, that project's name, and the task's status.
+    Elsewhere { task: EntityId, project: String, status: TaskStatus },
+    /// A target the node holds no task for: the reference cannot be followed here.
+    NotHeld(EntityId),
 }
 
 /// Three-valued, following Manifold: the CLI never reports "no blockers" for an incomplete
@@ -133,12 +158,11 @@ pub fn not_yet_due(status: TaskStatus, not_before: Option<i64>, now: i64) -> boo
     matches!(status, TaskStatus::Proposed | TaskStatus::Open) && not_before.is_some_and(|date| now < date)
 }
 
-/// `deps` holds one entry per accepted `depends_on` edge leaving the task: the target id and its
-/// status, or `None` when the target is unavailable. `now` is the present, in milliseconds since
-/// the epoch, which the task's not-before date is judged against. Known failures win over unknowns
-/// (Manifold's `all`: unsatisfied if any child is unsatisfied, satisfied if all are, otherwise
-/// unknown).
-pub fn readiness(task: &TaskSnapshot, deps: &[(EntityId, Option<TaskStatus>)], now: i64) -> Readiness {
+/// `deps` holds one entry per accepted `depends_on` edge leaving the task ([`Dependency`]). `now` is
+/// the present, in milliseconds since the epoch, which the task's not-before date is judged
+/// against. Known failures win over unknowns (Manifold's `all`: unsatisfied if any child is
+/// unsatisfied, satisfied if all are, otherwise unknown).
+pub fn readiness(task: &TaskSnapshot, deps: &[Dependency], now: i64) -> Readiness {
     let mut not_ready = Vec::new();
     let mut unknown = Vec::new();
     if task.status != TaskStatus::Open {
@@ -150,14 +174,27 @@ pub fn readiness(task: &TaskSnapshot, deps: &[(EntityId, Option<TaskStatus>)], n
     if let Some(date) = task.not_before.filter(|_| not_yet_due(task.status, task.not_before, now)) {
         not_ready.push(NotReadyReason::NotYetDue(date));
     }
-    for (target, status) in deps {
-        match status {
-            Some(TaskStatus::Done) => {}
-            Some(closed @ (TaskStatus::Cancelled | TaskStatus::Rejected)) => {
-                not_ready.push(NotReadyReason::DependencyClosed(*target, *closed))
+    for dep in deps {
+        match dep {
+            Dependency::Here(_, Some(TaskStatus::Done)) | Dependency::Elsewhere { status: TaskStatus::Done, .. } => {}
+            Dependency::Here(task, Some(closed @ (TaskStatus::Cancelled | TaskStatus::Rejected))) => {
+                not_ready.push(NotReadyReason::DependencyClosed(*task, *closed))
             }
-            Some(_) => not_ready.push(NotReadyReason::BlockedBy(*target)),
-            None => unknown.push(UnknownReason::DependencyUnavailable(*target)),
+            Dependency::Here(task, Some(_)) => not_ready.push(NotReadyReason::BlockedBy(*task)),
+            Dependency::Here(task, None) => unknown.push(UnknownReason::DependencyUnavailable(*task)),
+            Dependency::Elsewhere {
+                task,
+                project,
+                status: closed @ (TaskStatus::Cancelled | TaskStatus::Rejected),
+            } => not_ready.push(NotReadyReason::DependencyClosedIn {
+                task: *task,
+                project: project.clone(),
+                status: *closed,
+            }),
+            Dependency::Elsewhere { task, project, .. } => {
+                not_ready.push(NotReadyReason::BlockedByTaskIn { task: *task, project: project.clone() })
+            }
+            Dependency::NotHeld(task) => not_ready.push(NotReadyReason::DependencyNotHeld(*task)),
         }
     }
     if !not_ready.is_empty() {
@@ -876,7 +913,7 @@ mod tests {
     fn ready_when_open_unheld_and_all_dependencies_done() {
         let t = open(id());
         assert_eq!(readiness(&t, &[], NOW), Readiness::Ready);
-        assert_eq!(readiness(&t, &[(id(), Some(TaskStatus::Done))], NOW), Readiness::Ready);
+        assert_eq!(readiness(&t, &[Dependency::Here(id(), Some(TaskStatus::Done))], NOW), Readiness::Ready);
     }
 
     #[test]
@@ -927,7 +964,7 @@ mod tests {
             hold: Some("waiting on design".into()),
             not_before: Some(DATE),
         };
-        let r = readiness(&t, &[(dep, Some(TaskStatus::InProgress))], NOW);
+        let r = readiness(&t, &[Dependency::Here(dep, Some(TaskStatus::InProgress))], NOW);
         assert_eq!(
             r,
             Readiness::NotReady(vec![
@@ -942,7 +979,7 @@ mod tests {
     #[test]
     fn closed_dependency_is_a_distinct_reason() {
         let dep = id();
-        let r = readiness(&open(id()), &[(dep, Some(TaskStatus::Cancelled))], NOW);
+        let r = readiness(&open(id()), &[Dependency::Here(dep, Some(TaskStatus::Cancelled))], NOW);
         assert_eq!(r, Readiness::NotReady(vec![NotReadyReason::DependencyClosed(dep, TaskStatus::Cancelled)]));
     }
 
@@ -950,13 +987,51 @@ mod tests {
     fn incomplete_domain_is_unknown_never_ready() {
         let dep = id();
         assert_eq!(
-            readiness(&open(id()), &[(dep, None)], NOW),
+            readiness(&open(id()), &[Dependency::Here(dep, None)], NOW),
             Readiness::Unknown(vec![UnknownReason::DependencyUnavailable(dep)])
         );
         // A known blocker wins over an unknown one.
         let blocker = id();
-        let r = readiness(&open(id()), &[(dep, None), (blocker, Some(TaskStatus::Open))], NOW);
+        let r = readiness(
+            &open(id()),
+            &[Dependency::Here(dep, None), Dependency::Here(blocker, Some(TaskStatus::Open))],
+            NOW,
+        );
         assert_eq!(r, Readiness::NotReady(vec![NotReadyReason::BlockedBy(blocker)]));
+    }
+
+    #[test]
+    fn a_task_of_another_project_gates_readiness_as_one_of_its_own_and_is_named_with_its_project() {
+        let dep = id();
+        let elsewhere = |status| Dependency::Elsewhere { task: dep, project: "beta".into(), status };
+        assert_eq!(readiness(&open(id()), &[elsewhere(TaskStatus::Done)], NOW), Readiness::Ready);
+        assert_eq!(
+            readiness(&open(id()), &[elsewhere(TaskStatus::InProgress)], NOW),
+            Readiness::NotReady(vec![NotReadyReason::BlockedByTaskIn { task: dep, project: "beta".into() }])
+        );
+        assert_eq!(
+            readiness(&open(id()), &[elsewhere(TaskStatus::Rejected)], NOW),
+            Readiness::NotReady(vec![NotReadyReason::DependencyClosedIn {
+                task: dep,
+                project: "beta".into(),
+                status: TaskStatus::Rejected
+            }])
+        );
+    }
+
+    #[test]
+    fn a_dependency_the_node_does_not_hold_blocks_saying_it_cannot_be_followed() {
+        let dep = id();
+        assert_eq!(
+            readiness(&open(id()), &[Dependency::NotHeld(dep)], NOW),
+            Readiness::NotReady(vec![NotReadyReason::DependencyNotHeld(dep)])
+        );
+        let unread = id();
+        assert_eq!(
+            readiness(&open(id()), &[Dependency::Here(unread, None), Dependency::NotHeld(dep)], NOW),
+            Readiness::NotReady(vec![NotReadyReason::DependencyNotHeld(dep)]),
+            "it blocks, which wins over a dependency that could not be read"
+        );
     }
 
     #[test]
@@ -1581,14 +1656,14 @@ mod tests {
                 "the pre-check must keep the graph acyclic"
             );
             for t in &tasks {
-                let deps: Vec<(EntityId, Option<TaskStatus>)> = edges
+                let deps: Vec<Dependency> = edges
                     .iter()
                     .filter(|e| e.counts(RelationKind::DependsOn) && e.from == *t)
-                    .map(|e| (e.to, Some(status_of[&e.to])))
+                    .map(|e| Dependency::Here(e.to, Some(status_of[&e.to])))
                     .collect();
                 let snapshot = TaskSnapshot { id: *t, status: status_of[t], hold: None, not_before: None };
                 let r = readiness(&snapshot, &deps, NOW);
-                let all_done = deps.iter().all(|(_, s)| *s == Some(TaskStatus::Done));
+                let all_done = deps.iter().all(|d| matches!(d, Dependency::Here(_, Some(TaskStatus::Done))));
                 assert_eq!(
                     r.is_ready(),
                     status_of[t] == TaskStatus::Open && all_done,

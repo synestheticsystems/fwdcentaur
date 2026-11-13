@@ -9,7 +9,7 @@
 //! a label is. What the page offers, and in what order, is worked out as data first and tested
 //! natively.
 
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::{fmt, keys, store};
 use ankurah::EntityId;
 use fwd_core::labels::{self as rule, CONVENTIONAL};
@@ -160,7 +160,7 @@ pub fn TaskLabels(task: EntityId) -> impl IntoView {
         let me = session::me();
         spawn_local(async move {
             for label in wanted {
-                if let Err(e) = ops::label_task(&ctx(), task, &label).await {
+                if let Err(e) = ops::label_task(&graph(), task, &label).await {
                     error.try_set(Some(e.to_string()));
                     return;
                 }
@@ -172,7 +172,7 @@ pub fn TaskLabels(task: EntityId) -> impl IntoView {
     let take_off = move |label: String| {
         let me = session::me();
         spawn_local(async move {
-            match ops::unlabel_task(&ctx(), task, &label).await {
+            match ops::unlabel_task(&graph(), task, &label).await {
                 Ok(()) => {
                     me.into_iter().for_each(session::wrote);
                     error.try_set(None)

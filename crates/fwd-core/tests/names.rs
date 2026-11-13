@@ -4,29 +4,34 @@
 //! is in, never guessing (docs/design/agents-and-inbox.md, "A principal's name"; docs/DECISIONS.md,
 //! D107 and D110).
 
-use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::former_ids::FormerIds;
 use fwd_core::model::*;
 use fwd_core::naming::{self, Named, Refused};
 use fwd_core::ops::{self, CreateScope, CreateTask, MessageContext};
+use fwd_core::project_graph::ProjectGraph;
 use fwd_core::routing;
 use std::sync::Arc;
 
-async fn context() -> Result<Context> {
+/// The graph of a project alone in a store in memory.
+async fn project() -> Result<ProjectGraph> {
     let storage = SqliteStorageEngine::open_in_memory().await?;
     let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
     node.system.create().await?;
-    Ok(node.context_async(DEFAULT_CONTEXT).await?)
+    let ctx = node.context_async(DEFAULT_CONTEXT).await?;
+    Ok(ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "test").await?)
 }
 
 /// A principal named `handle` made beside any other of that name, as two clients naming themselves
 /// at once can leave, or a person's `fwd init` after an agent took the person's name: nothing
 /// forbids a second principal a name, and `fwd principal add` names the one it finds.
-async fn made(ctx: &Context, handle: &str, kind: PrincipalKind, role: Option<AgentRole>) -> Result<EntityId> {
-    let trx = ctx.begin();
+async fn made(graph: &ProjectGraph, handle: &str, kind: PrincipalKind, role: Option<AgentRole>) -> Result<EntityId> {
+    let trx = graph.begin();
     let id = trx
         .create(&Principal {
+            project: graph.project(),
             kind,
             handle: handle.into(),
             display_name: handle.into(),
@@ -63,29 +68,29 @@ fn two(a: (EntityId, &str), b: (EntityId, &str)) -> String {
     format!("{}: {}; {}: {}", short(first.0), first.1, short(second.0), second.1)
 }
 
-async fn named(ctx: &Context, name: &str) -> Result<Option<EntityId>> {
-    Ok(naming::principal_named(ctx, name, None).await?.map(|p| p.id()))
+async fn named(graph: &ProjectGraph, name: &str) -> Result<Option<EntityId>> {
+    Ok(naming::principal_named(graph, name, None).await?.map(|p| p.id()))
 }
 
 #[tokio::test]
 async fn a_name_one_principal_has_names_it_as_its_id_does() -> Result<()> {
-    let ctx = context().await?;
-    let daniel = ops::ensure_principal(&ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
-    let alice = ops::add_principal(&ctx, "impl-alice", Some(AgentRole::Implementer), None, None, None, None).await?;
-    assert_eq!(named(&ctx, "impl-alice").await?, Some(alice));
-    assert_eq!(named(&ctx, "@impl-alice").await?, Some(alice), "the at-sign is optional");
-    assert_eq!(named(&ctx, " impl-alice ").await?, Some(alice), "and so are the spaces around it");
-    assert_eq!(named(&ctx, &alice.to_base64()).await?, Some(alice), "its whole id names it");
-    assert_eq!(named(&ctx, &short(alice)).await?, Some(alice), "and so do its first eight characters");
-    assert_eq!(named(&ctx, "Impl-Alice").await?, None, "a name is matched as it is written");
+    let graph = project().await?;
+    let daniel = ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let alice = ops::add_principal(&graph, "impl-alice", Some(AgentRole::Implementer), None, None, None, None).await?;
+    assert_eq!(named(&graph, "impl-alice").await?, Some(alice));
+    assert_eq!(named(&graph, "@impl-alice").await?, Some(alice), "the at-sign is optional");
+    assert_eq!(named(&graph, " impl-alice ").await?, Some(alice), "and so are the spaces around it");
+    assert_eq!(named(&graph, &alice.to_base64()).await?, Some(alice), "its whole id names it");
+    assert_eq!(named(&graph, &short(alice)).await?, Some(alice), "and so do its first eight characters");
+    assert_eq!(named(&graph, "Impl-Alice").await?, None, "a name is matched as it is written");
     // Every command that takes a name reads it so: the principal commands take the id as well.
-    assert_eq!(ops::set_role(&ctx, &short(alice), AgentRole::Reviewer, None).await?, alice);
+    assert_eq!(ops::set_role(&graph, &short(alice), AgentRole::Reviewer, None).await?, alice);
     assert_eq!(
-        ops::add_principal(&ctx, &alice.to_base64(), Some(AgentRole::Implementer), None, None, Some(alice), None)
+        ops::add_principal(&graph, &alice.to_base64(), Some(AgentRole::Implementer), None, None, Some(alice), None)
             .await?,
         alice
     );
-    let principals = ops::principals(&ctx).await?;
+    let principals = ops::principals(&graph).await?;
     assert!(!naming::shows_scopes(&principals, "impl-alice"), "a name no other principal has shows bare in a picker");
 
     // The name is impl-alice's alone: whoever else adds it, a person or an agent naming itself
@@ -96,34 +101,35 @@ async fn a_name_one_principal_has_names_it_as_its_id_does() -> Result<()> {
         short(alice)
     );
     for acting in [Some(daniel), None] {
-        let added = ops::add_principal(&ctx, "@impl-alice", Some(AgentRole::Reviewer), None, None, acting, None).await;
+        let added =
+            ops::add_principal(&graph, "@impl-alice", Some(AgentRole::Reviewer), None, None, acting, None).await;
         assert_eq!(added.unwrap_err().to_string(), taken, "acting as {acting:?}");
     }
-    let added = ops::add_principal(&ctx, &short(alice), None, None, None, Some(daniel), None).await;
+    let added = ops::add_principal(&graph, &short(alice), None, None, None, Some(daniel), None).await;
     assert_eq!(added.unwrap_err().to_string(), taken, "named by its id, it is still hers");
-    assert_eq!(naming::by_name(&ops::principals(&ctx).await?, "impl-alice", None).len(), 1, "no second");
-    assert_eq!(ops::role_of(&ctx.get::<PrincipalView>(alice).await?), Some(AgentRole::Implementer), "nor a new role");
+    assert_eq!(naming::by_name(&ops::principals(&graph).await?, "impl-alice", None).len(), 1, "no second");
+    assert_eq!(ops::role_of(&graph.get::<PrincipalView>(alice).await?), Some(AgentRole::Implementer), "nor a new role");
     Ok(())
 }
 
 #[tokio::test]
 async fn a_name_no_principal_has_names_no_one_and_each_command_says_how_one_is_made() -> Result<()> {
-    let ctx = context().await?;
-    ops::ensure_principal(&ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
-    assert_eq!(named(&ctx, "nobody").await?, None);
-    assert_eq!(named(&ctx, "abc").await?, None, "too short to start an id");
-    let principals = ops::principals(&ctx).await?;
-    assert!(matches!(naming::resolve(&principals, "nobody", None), Named::NoOne));
+    let graph = project().await?;
+    ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    assert_eq!(named(&graph, "nobody").await?, None);
+    assert_eq!(named(&graph, "abc").await?, None, "too short to start an id");
+    let principals = ops::principals(&graph).await?;
+    assert!(matches!(naming::resolve(&principals, "nobody", None, &FormerIds::default()), Named::NoOne));
     assert_eq!(
-        ops::set_role(&ctx, "nobody", AgentRole::Implementer, None).await.unwrap_err().to_string(),
+        ops::set_role(&graph, "nobody", AgentRole::Implementer, None).await.unwrap_err().to_string(),
         "no principal of this project is named `nobody`: an agent names itself and selects its role at once, `fwd principal add nobody --role implementer`"
     );
     assert_eq!(
-        ops::retire_principal(&ctx, "nobody").await.unwrap_err().to_string(),
+        ops::retire_principal(&graph, "nobody").await.unwrap_err().to_string(),
         "no one in this project has the handle `@nobody`"
     );
     assert_eq!(
-        ops::person_by_handle(&ctx, "nobody").await.unwrap_err().to_string(),
+        ops::person_by_handle(&graph, "nobody").await.unwrap_err().to_string(),
         "no one in this project has the handle `@nobody`"
     );
     Ok(())
@@ -131,22 +137,22 @@ async fn a_name_no_principal_has_names_no_one_and_each_command_says_how_one_is_m
 
 #[tokio::test]
 async fn a_name_two_principals_share_is_refused_listing_each_by_id_role_and_the_scopes_of_its_work() -> Result<()> {
-    let ctx = context().await?;
-    let daniel = ops::ensure_principal(&ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
-    let one = ops::add_principal(&ctx, "implementer", Some(AgentRole::Implementer), None, None, None, None).await?;
-    let other = made(&ctx, "implementer", PrincipalKind::Agent, Some(AgentRole::Reviewer)).await?;
+    let graph = project().await?;
+    let daniel = ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let one = ops::add_principal(&graph, "implementer", Some(AgentRole::Implementer), None, None, None, None).await?;
+    let other = made(&graph, "implementer", PrincipalKind::Agent, Some(AgentRole::Reviewer)).await?;
 
     // Each one's scopes come from its work: `one` made Replication and works a task there; `other`
     // made Anchoring and comments on it.
     let replication =
-        ops::create_scope(&ctx, one, CreateScope { title: "Replication".into(), ..Default::default() }).await?;
+        ops::create_scope(&graph, one, CreateScope { title: "Replication".into(), ..Default::default() }).await?;
     let anchoring =
-        ops::create_scope(&ctx, other, CreateScope { title: "Anchoring".into(), ..Default::default() }).await?;
-    let task = ops::create_task(&ctx, daniel, CreateTask { title: "Replicate".into(), ..Default::default() }).await?;
-    ops::claim(&ctx, one, task, replication).await?;
+        ops::create_scope(&graph, other, CreateScope { title: "Anchoring".into(), ..Default::default() }).await?;
+    let task = ops::create_task(&graph, daniel, CreateTask { title: "Replicate".into(), ..Default::default() }).await?;
+    ops::claim(&graph, one, task, replication).await?;
     let on_scope = MessageContext { scope_id: Some(anchoring), ..Default::default() };
-    ops::post_message(&ctx, other, "the anchors drift", Priority::Later, on_scope).await?;
-    let loaded = naming::Loaded::of(&ctx, &[one, other]).await?;
+    ops::post_message(&graph, other, "the anchors drift", Priority::Later, on_scope).await?;
+    let loaded = naming::Loaded::of(&graph, &[one, other]).await?;
     assert_eq!(naming::scopes_of(one, &loaded.work()), vec![replication]);
     assert_eq!(naming::scopes_of(other, &loaded.work()), vec![anchoring]);
     assert_eq!(naming::scopes_of(daniel, &loaded.work()), vec![replication], "the task he made is worked there");
@@ -155,39 +161,42 @@ async fn a_name_two_principals_share_is_refused_listing_each_by_id_role_and_the_
         "2 principals of this project are named `implementer` ({}); give one's id, or its first eight characters, in place of the name",
         two((one, "implementer, in Replication"), (other, "reviewer, in Anchoring"))
     );
-    assert_eq!(refused(naming::principal_named(&ctx, "@implementer", None).await), expected);
-    let principals = ops::principals(&ctx).await?;
-    assert!(matches!(naming::resolve(&principals, "implementer", None), Named::Shared(ref s) if s.len() == 2));
+    assert_eq!(refused(naming::principal_named(&graph, "@implementer", None).await), expected);
+    let principals = ops::principals(&graph).await?;
+    assert!(
+        matches!(naming::resolve(&principals, "implementer", None, &FormerIds::default()), Named::Shared(ref s) if s.len() == 2)
+    );
     assert!(naming::shows_scopes(&principals, "implementer"), "a picker shows the scopes beside a repeated name");
     assert!(!naming::shows_scopes(&principals, "dnorman"));
 
     // The id names one of them, whole or by its first eight characters, wherever a name is taken.
-    assert_eq!(named(&ctx, &other.to_base64()).await?, Some(other));
-    assert_eq!(named(&ctx, &short(one)).await?, Some(one));
+    assert_eq!(named(&graph, &other.to_base64()).await?, Some(other));
+    assert_eq!(named(&graph, &short(one)).await?, Some(one));
     // Every command refuses the name, and `principal add` makes no third principal of it.
     for refusal in [
-        ops::set_role(&ctx, "implementer", AgentRole::Implementer, None).await.unwrap_err(),
-        ops::retire_principal(&ctx, "implementer").await.unwrap_err(),
-        ops::add_principal(&ctx, "implementer", Some(AgentRole::Implementer), None, None, None, None)
+        ops::set_role(&graph, "implementer", AgentRole::Implementer, None).await.unwrap_err(),
+        ops::retire_principal(&graph, "implementer").await.unwrap_err(),
+        ops::add_principal(&graph, "implementer", Some(AgentRole::Implementer), None, None, None, None)
             .await
             .unwrap_err(),
     ] {
         assert_eq!(refusal.to_string(), expected);
     }
-    assert_eq!(naming::by_name(&ops::principals(&ctx).await?, "implementer", None).len(), 2);
+    assert_eq!(naming::by_name(&ops::principals(&graph).await?, "implementer", None).len(), 2);
 
     // A mention by the shared name refuses the post, listing them; the id's start names one.
-    let posted = ops::post_message(&ctx, daniel, "ping @implementer", Priority::Later, MessageContext::default()).await;
+    let posted =
+        ops::post_message(&graph, daniel, "ping @implementer", Priority::Later, MessageContext::default()).await;
     assert_eq!(posted.unwrap_err().to_string(), format!("refused: {expected}"));
     let written = format!("ping @{}", short(other));
-    let m = ops::post_message(&ctx, daniel, &written, Priority::Later, MessageContext::default()).await?;
-    let message: MessageView = ctx.get(m).await?;
+    let m = ops::post_message(&graph, daniel, &written, Priority::Later, MessageContext::default()).await?;
+    let message: MessageView = graph.get(m).await?;
     assert_eq!(message.content()?, format!("ping [[{}]]", other.to_base64()), "stored by id");
 
     // A question whose `to` holds the shared handle, as an older build wrote one, asks neither.
     let to_handle = MessageContext { to: Some("implementer".into()), ..Default::default() };
-    let asked = ops::post_message(&ctx, daniel, "which of you?", Priority::Later, to_handle).await?;
-    let plan = routing::plan_for_message(&ctx, &ctx.get::<MessageView>(asked).await?).await?;
+    let asked = ops::post_message(&graph, daniel, "which of you?", Priority::Later, to_handle).await?;
+    let plan = routing::plan_for_message(&graph, &graph.get::<MessageView>(asked).await?).await?;
     assert!(
         plan.iter().all(|p| p.notification_type != NotificationType::QuestionAsked),
         "a handle two principals share addresses neither: {:?}",
@@ -214,30 +223,30 @@ async fn a_name_two_principals_share_is_refused_listing_each_by_id_role_and_the_
 
 #[tokio::test]
 async fn a_retired_principal_is_named_still_and_counts_among_those_sharing_its_name() -> Result<()> {
-    let ctx = context().await?;
-    ops::ensure_principal(&ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
-    let old = ops::add_principal(&ctx, "builder", Some(AgentRole::Implementer), None, None, None, None).await?;
-    ops::retire_principal(&ctx, "builder").await?;
-    assert_eq!(named(&ctx, "builder").await?, Some(old), "retired, it is still named");
+    let graph = project().await?;
+    ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let old = ops::add_principal(&graph, "builder", Some(AgentRole::Implementer), None, None, None, None).await?;
+    ops::retire_principal(&graph, "builder").await?;
+    assert_eq!(named(&graph, "builder").await?, Some(old), "retired, it is still named");
     // Its name stays its own: another caller cannot bring it back, nor take the name.
-    let taken = ops::add_principal(&ctx, "builder", Some(AgentRole::Implementer), None, None, None, None).await;
+    let taken = ops::add_principal(&graph, "builder", Some(AgentRole::Implementer), None, None, None, None).await;
     let taken = taken.unwrap_err().to_string();
     let whose = format!("the name `builder` is taken: {} (implementer, retired, in no scope) has it", short(old));
     assert!(taken.starts_with(&whose), "{taken}");
     assert_eq!(
-        ops::add_principal(&ctx, "builder", None, None, None, Some(old), None).await?,
+        ops::add_principal(&graph, "builder", None, None, None, Some(old), None).await?,
         old,
         "principal add, acting as it, brings it back"
     );
-    ops::retire_principal(&ctx, "builder").await?;
+    ops::retire_principal(&graph, "builder").await?;
 
-    let new = made(&ctx, "builder", PrincipalKind::Agent, Some(AgentRole::Implementer)).await?;
-    let principals = ops::principals(&ctx).await?;
+    let new = made(&graph, "builder", PrincipalKind::Agent, Some(AgentRole::Implementer)).await?;
+    let principals = ops::principals(&graph).await?;
     let offered: Vec<EntityId> =
         naming::mentionable(&principals, "build", 8, fwd_core::now_ms()).iter().map(|p| p.id()).collect();
     assert_eq!(offered, vec![new], "the mention search offers only principals that belong");
     assert_eq!(
-        refused(naming::principal_named(&ctx, "builder", None).await),
+        refused(naming::principal_named(&graph, "builder", None).await),
         format!(
             "2 principals of this project are named `builder` ({}); give one's id, or its first eight characters, in place of the name",
             two((old, "implementer, retired, in no scope"), (new, "implementer, in no scope"))
@@ -249,12 +258,12 @@ async fn a_retired_principal_is_named_still_and_counts_among_those_sharing_its_n
 
 #[tokio::test]
 async fn a_person_and_an_agent_sharing_a_name_are_told_apart_only_where_a_command_takes_a_person() -> Result<()> {
-    let ctx = context().await?;
-    let person = ops::ensure_principal(&ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
-    ops::join(&ctx, person).await?; // as `fwd init` makes its person belong
-    let agent = made(&ctx, "dnorman", PrincipalKind::Agent, Some(AgentRole::Implementer)).await?;
+    let graph = project().await?;
+    let person = ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    ops::join(&graph, person).await?; // as `fwd init` makes its person belong
+    let agent = made(&graph, "dnorman", PrincipalKind::Agent, Some(AgentRole::Implementer)).await?;
     assert_eq!(
-        refused(naming::principal_named(&ctx, "dnorman", None).await),
+        refused(naming::principal_named(&graph, "dnorman", None).await),
         format!(
             "2 principals of this project are named `dnorman` ({}); give one's id, or its first eight characters, in place of the name",
             two((person, "person, in no scope"), (agent, "implementer, in no scope"))
@@ -262,18 +271,18 @@ async fn a_person_and_an_agent_sharing_a_name_are_told_apart_only_where_a_comman
         "--as, --to, --for and task assign take either, so they refuse it"
     );
     // A ruling is a person's, and the CLI's own person is found among people.
-    assert_eq!(ops::person_by_handle(&ctx, "@dnorman").await?, person);
+    assert_eq!(ops::person_by_handle(&graph, "@dnorman").await?, person);
     assert_eq!(
-        naming::principal_named(&ctx, "dnorman", Some(PrincipalKind::Human)).await?.map(|p| p.id()),
+        naming::principal_named(&graph, "dnorman", Some(PrincipalKind::Human)).await?.map(|p| p.id()),
         Some(person)
     );
-    assert_eq!(ops::ensure_principal(&ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?, person);
+    assert_eq!(ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?, person);
     // Naming the agent by its id still works where either is taken.
-    assert_eq!(ops::set_role(&ctx, &short(agent), AgentRole::Reviewer, None).await?, agent);
+    assert_eq!(ops::set_role(&graph, &short(agent), AgentRole::Reviewer, None).await?, agent);
     // An agent whose name only an agent has is refused as a decider, as before.
-    ops::add_principal(&ctx, "triage-bot", Some(AgentRole::Triage), Some(ops::Serves::ProjectWide), None, None, None)
+    ops::add_principal(&graph, "triage-bot", Some(AgentRole::Triage), Some(ops::Serves::ProjectWide), None, None, None)
         .await?;
-    let err = ops::person_by_handle(&ctx, "triage-bot").await.unwrap_err().to_string();
+    let err = ops::person_by_handle(&graph, "triage-bot").await.unwrap_err().to_string();
     assert!(err.contains("`@triage-bot` is an agent, not a person"), "{err}");
     Ok(())
 }
@@ -286,24 +295,24 @@ async fn a_person_and_an_agent_sharing_a_name_are_told_apart_only_where_a_comman
 /// u-nZCXww; docs/design/agents-and-inbox.md, "A principal's name").
 #[tokio::test]
 async fn an_agent_renames_itself_and_keeps_its_id_and_everything_that_refers_to_it() -> Result<()> {
-    let ctx = context().await?;
-    let daniel = ops::ensure_principal(&ctx, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let graph = project().await?;
+    let daniel = ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     let subject = "claude-code:s1/a1";
-    let one =
-        ops::add_principal(&ctx, "implementer", Some(AgentRole::Implementer), None, None, None, Some(subject)).await?;
-    let other = made(&ctx, "implementer", PrincipalKind::Agent, Some(AgentRole::Reviewer)).await?;
+    let one = ops::add_principal(&graph, "implementer", Some(AgentRole::Implementer), None, None, None, Some(subject))
+        .await?;
+    let other = made(&graph, "implementer", PrincipalKind::Agent, Some(AgentRole::Reviewer)).await?;
     let alice =
-        ops::add_principal(&ctx, "impl-alice", Some(AgentRole::Implementer), None, Some("Alice"), None, None).await?;
+        ops::add_principal(&graph, "impl-alice", Some(AgentRole::Implementer), None, Some("Alice"), None, None).await?;
 
     // Under the shared name `one` made a task and commented on it, Daniel named it by its id, and a
     // question waits unread in its inbox.
-    let task = ops::create_task(&ctx, one, CreateTask { title: "Replicate".into(), ..Default::default() }).await?;
+    let task = ops::create_task(&graph, one, CreateTask { title: "Replicate".into(), ..Default::default() }).await?;
     let on_task = MessageContext { task_id: Some(task), ..Default::default() };
-    let said = ops::post_message(&ctx, one, "started", Priority::Later, on_task).await?;
+    let said = ops::post_message(&graph, one, "started", Priority::Later, on_task).await?;
     let naming_it = format!("over to @{}", short(one));
-    let mention = ops::post_message(&ctx, daniel, &naming_it, Priority::Later, MessageContext::default()).await?;
+    let mention = ops::post_message(&graph, daniel, &naming_it, Priority::Later, MessageContext::default()).await?;
     let waiting = ops::create_notification(
-        &ctx,
+        &graph,
         one,
         NotificationType::QuestionAsked,
         Priority::Now,
@@ -311,45 +320,45 @@ async fn an_agent_renames_itself_and_keeps_its_id_and_everything_that_refers_to_
         serde_json::json!({"actor_id": daniel.to_base64(), "why": "addressee"}),
     )
     .await?;
-    refused(naming::principal_named(&ctx, "implementer", None).await);
+    refused(naming::principal_named(&graph, "implementer", None).await);
 
-    assert_eq!(ops::rename_principal(&ctx, one, "@implementer-replication").await?, one);
-    assert_eq!(named(&ctx, "implementer-replication").await?, Some(one), "the new name names it");
-    assert_eq!(named(&ctx, "implementer").await?, Some(other), "and the old one names the other alone");
-    let renamed: PrincipalView = ctx.get(one).await?;
+    assert_eq!(ops::rename_principal(&graph, one, "@implementer-replication").await?, one);
+    assert_eq!(named(&graph, "implementer-replication").await?, Some(one), "the new name names it");
+    assert_eq!(named(&graph, "implementer").await?, Some(other), "and the old one names the other alone");
+    let renamed: PrincipalView = graph.get(one).await?;
     assert_eq!(renamed.handle()?, "implementer-replication");
     assert_eq!(renamed.display_name()?, "implementer-replication", "the display name, which was the name, follows");
     assert_eq!(ops::role_of(&renamed), Some(AgentRole::Implementer), "its role stays");
     assert_eq!(renamed.subject()?.as_deref(), Some(subject), "and so does the agent bound to it");
-    assert_eq!(EntityId::from(ctx.get::<TaskView>(task).await?.created_by()?), one);
-    assert_eq!(EntityId::from(ctx.get::<MessageView>(said).await?.author()?), one);
-    let unread: Vec<EntityId> = ops::inbox(&ctx, one, true).await?.iter().map(|n| n.id()).collect();
+    assert_eq!(EntityId::from(graph.get::<TaskView>(task).await?.created_by()?), one);
+    assert_eq!(EntityId::from(graph.get::<MessageView>(said).await?.author()?), one);
+    let unread: Vec<EntityId> = ops::inbox(&graph, one, true).await?.iter().map(|n| n.id()).collect();
     assert_eq!(unread, vec![waiting], "its inbox is its own still");
-    let content = ctx.get::<MessageView>(mention).await?.content()?;
-    assert_eq!(ops::render_references(&ctx, &content).await, "over to @implementer-replication");
-    let principals = ops::principals(&ctx).await?;
+    let content = graph.get::<MessageView>(mention).await?.content()?;
+    assert_eq!(ops::render_references(&graph, &content).await?, "over to @implementer-replication");
+    let principals = ops::principals(&graph).await?;
     assert!(!naming::shows_scopes(&principals, "implementer-replication"), "a picker shows it bare");
-    assert_eq!(ops::rename_principal(&ctx, one, "implementer-replication").await?, one, "its own name again");
+    assert_eq!(ops::rename_principal(&graph, one, "implementer-replication").await?, one, "its own name again");
 
     // A display name given apart from the name stays.
-    ops::rename_principal(&ctx, alice, "impl-alice-2").await?;
-    assert_eq!(ctx.get::<PrincipalView>(alice).await?.display_name()?, "Alice");
+    ops::rename_principal(&graph, alice, "impl-alice-2").await?;
+    assert_eq!(graph.get::<PrincipalView>(alice).await?.display_name()?, "Alice");
 
     // A name another principal has is refused, listing it, and so is one that names another by
     // its id; the name stays as it was.
     let refusal = |result: Result<EntityId>| result.expect_err("refused").to_string();
     let choose = "choose a name no other principal of this project has, as every agent does (a role and a qualifier reads well: `implementer-replication`; docs/DECISIONS.md, D110)";
     assert_eq!(
-        refusal(ops::rename_principal(&ctx, alice, "implementer").await),
+        refusal(ops::rename_principal(&graph, alice, "implementer").await),
         format!(
             "the name `implementer` is taken: {} (reviewer, in no scope) has it in this project; {choose}",
             short(other)
         )
     );
-    let third = made(&ctx, "implementer", PrincipalKind::Agent, Some(AgentRole::Reviewer)).await?;
+    let third = made(&graph, "implementer", PrincipalKind::Agent, Some(AgentRole::Reviewer)).await?;
     let (first, second) = if other.to_base64() < third.to_base64() { (other, third) } else { (third, other) };
     assert_eq!(
-        refusal(ops::rename_principal(&ctx, alice, "implementer").await),
+        refusal(ops::rename_principal(&graph, alice, "implementer").await),
         format!(
             "the name `implementer` is taken: {} (reviewer, in no scope) and {} (reviewer, in no scope) have it in this project; {choose}",
             short(first),
@@ -357,17 +366,17 @@ async fn an_agent_renames_itself_and_keeps_its_id_and_everything_that_refers_to_
         )
     );
     assert_eq!(
-        refusal(ops::rename_principal(&ctx, alice, &short(one)).await),
+        refusal(ops::rename_principal(&graph, alice, &short(one)).await),
         format!(
             "`{0}` names {0} (implementer, in no scope) by its id, wherever a name is typed; choose a name that starts no principal's id and that no other principal of this project has (a role and a qualifier reads well: `implementer-replication`)",
             short(one)
         )
     );
     assert_eq!(
-        refusal(ops::rename_principal(&ctx, daniel, "daniel").await),
+        refusal(ops::rename_principal(&graph, daniel, "daniel").await),
         "`@dnorman` is a person, whose name is the handle `fwd init` recorded on this machine, by which every command finds them: `fwd principal rename` renames the agent the command acts as"
     );
-    assert_eq!(refusal(ops::rename_principal(&ctx, alice, " @ ").await), "a name cannot be blank");
-    assert_eq!(ctx.get::<PrincipalView>(alice).await?.handle()?, "impl-alice-2");
+    assert_eq!(refusal(ops::rename_principal(&graph, alice, " @ ").await), "a name cannot be blank");
+    assert_eq!(graph.get::<PrincipalView>(alice).await?.handle()?, "impl-alice-2");
     Ok(())
 }

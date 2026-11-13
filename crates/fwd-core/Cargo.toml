@@ -16,7 +16,6 @@ native = [
     "dep:ankurah-websocket-client",
     "dep:fs4",
     "dep:libc",
-    "dep:uuid",
     "dep:toml",
     "dep:dirs",
     "dep:tokio",
@@ -27,10 +26,11 @@ native = [
 # The browser (crates/fwd-web): models, rules, operations and routing plans on wasm32. Ankurah's
 # `wasm` feature makes the Model derive emit wasm-bindgen wrappers, whose getters need every
 # property type to cross the ABI; the string enums get that from `#[wasm_bindgen]` (C-style
-# enums). The getrandom lines turn on the browser entropy backends for every getrandom major in
-# the graph.
+# enums). The getrandom lines, and uuid's `js`, turn on the browser entropy backends for every
+# getrandom major in the graph.
 wasm = [
     "ankurah/wasm",
+    "uuid/js",
     "dep:wasm-bindgen",
     "dep:js-sys",
     "dep:getrandom02",
@@ -54,7 +54,7 @@ bb8 = { workspace = true, optional = true }
 ankurah-websocket-client = { workspace = true, optional = true }
 fs4 = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
+uuid = { workspace = true }
 toml = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

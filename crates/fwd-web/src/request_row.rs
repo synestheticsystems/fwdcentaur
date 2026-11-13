@@ -36,8 +36,7 @@ use crate::comment_box::{self, CommentBox};
 use crate::lozenges::{self, Target};
 use crate::mentions::{MentionList, Mentions};
 use crate::referents::Models;
-use crate::route::{self, Route};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::{self, Hooks, Model};
 use crate::waiting::{Kind, Row, Sorted};
 use crate::{claim, empty, fmt, keys, notification_card, references, store, whose};
@@ -297,17 +296,17 @@ fn move_facts(kind: Kind, subject: EntityId) -> MoveFacts {
 /// Makes the move `mv` on `subject` as `me`, `why` being the reason its box asked for: the
 /// operation the task's panel, a decision's own row and a message's resolve run.
 async fn make(mv: Move, me: EntityId, subject: EntityId, why: Option<&str>) -> anyhow::Result<()> {
-    let ctx = ctx();
+    let graph = graph();
     let reason = why.unwrap_or("");
     match mv {
-        Move::Resolve => ops::resolve_message(&ctx, me, subject).await.map(drop),
-        Move::AcceptRuling => ops::move_decision(&ctx, me, subject, DecisionMove::Accept, reason).await.map(drop),
-        Move::RejectRuling => ops::move_decision(&ctx, me, subject, DecisionMove::Reject, reason).await.map(drop),
-        Move::AcceptReview => ops::transition(&ctx, me, subject, Verb::Accept, None).await.map(drop),
-        Move::Return => ops::transition(&ctx, me, subject, Verb::Return, why).await.map(drop),
-        Move::Approve => ops::transition(&ctx, me, subject, Verb::Approve, None).await.map(drop),
-        Move::RejectTask => ops::transition(&ctx, me, subject, Verb::Reject, why).await.map(drop),
-        Move::Done => ops::transition(&ctx, me, subject, Verb::Done, None).await.map(drop),
+        Move::Resolve => ops::resolve_message(&graph, me, subject).await.map(drop),
+        Move::AcceptRuling => ops::move_decision(&graph, me, subject, DecisionMove::Accept, reason).await.map(drop),
+        Move::RejectRuling => ops::move_decision(&graph, me, subject, DecisionMove::Reject, reason).await.map(drop),
+        Move::AcceptReview => ops::transition(&graph, me, subject, Verb::Accept, None).await.map(drop),
+        Move::Return => ops::transition(&graph, me, subject, Verb::Return, why).await.map(drop),
+        Move::Approve => ops::transition(&graph, me, subject, Verb::Approve, None).await.map(drop),
+        Move::RejectTask => ops::transition(&graph, me, subject, Verb::Reject, why).await.map(drop),
+        Move::Done => ops::transition(&graph, me, subject, Verb::Done, None).await.map(drop),
         // A reply is sent from the row's box, and Start from its own control (`claim::row_control`).
         Move::Reply | Move::Start => Ok(()),
     }
@@ -348,7 +347,7 @@ fn title(kind: Kind, subject: EntityId) -> AnyView {
     match kind {
         Kind::Question => (move || {
             let Some(m) = store::message(subject) else {
-                return view! { <span class="muted">{empty::absent(Some(Model::Message))}</span> }.into_any();
+                return view! { <span class="muted">{empty::absent(subject, Some(Model::Message))}</span> }.into_any();
             };
             let asker = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
             let text = references::plain(&ops::text(m.content()).unwrap_or_default());
@@ -357,13 +356,13 @@ fn title(kind: Kind, subject: EntityId) -> AnyView {
         .into_any(),
         Kind::Ruling => (move || {
             let Some(d) = store::decision(subject) else {
-                return view! { <span class="muted">{empty::absent(Some(Model::Decision))}</span> }.into_any();
+                return view! { <span class="muted">{empty::absent(subject, Some(Model::Decision))}</span> }.into_any();
             };
             let status = d.status().ok().filter(|s| *s != DecisionStatus::Proposed);
             view! {
                 <span class="decision-number">{format!("D{}", d.number().unwrap_or(0))}</span>
                 " "
-                <a href=Route::decision(subject).hash()>{d.title().unwrap_or_default()}</a>
+                <a href=move || lozenges::href(Target::Decision(subject))>{store::named(d.title().unwrap_or_default(), &d)}</a>
                 {status.map(|s| view! { " " <span class=format!("pill decision-{s}")>{s.to_string()}</span> })}
             }
             .into_any()
@@ -371,7 +370,7 @@ fn title(kind: Kind, subject: EntityId) -> AnyView {
         .into_any(),
         Kind::Review | Kind::Proposal | Kind::Assignment => (move || {
             let Some(t) = store::task(subject) else {
-                return view! { <span class="muted">{empty::absent(Some(Model::Task))}</span> }.into_any();
+                return view! { <span class="muted">{empty::absent(subject, Some(Model::Task))}</span> }.into_any();
             };
             let status = t.status().ok();
             let ready = kind == Kind::Assignment && status == Some(TaskStatus::Open) && store::readiness(&t).is_ready();
@@ -382,7 +381,8 @@ fn title(kind: Kind, subject: EntityId) -> AnyView {
                 }
                 (false, None) => None,
             };
-            view! { <a href=Route::task(subject).hash()>{t.title().unwrap_or_default()}</a> " " {pill} }.into_any()
+            let title = store::named(t.title().unwrap_or_default(), &t);
+            view! { <a href=move || lozenges::href(Target::Task(subject))>{title}</a> " " {pill} }.into_any()
         })
         .into_any(),
     }
@@ -612,7 +612,7 @@ pub fn RequestRow(
         spawn_local(async move {
             let done = match make(mv, me, subject, why.as_deref()).await {
                 Ok(()) => match then_done {
-                    Some(task) => ops::transition(&ctx(), me, task, Verb::Done, None).await.map(drop),
+                    Some(task) => ops::transition(&graph(), me, task, Verb::Done, None).await.map(drop),
                     None => Ok(()),
                 },
                 failed => failed,
@@ -675,7 +675,7 @@ pub fn RequestRow(
             // At the priority of what it answers, as `fwd reply` and a reply box send it.
             let priority = store::message(subject).and_then(|m| m.priority().ok()).unwrap_or(Priority::Next);
             let mc = MessageContext { reply_to: Some(subject), ..Default::default() };
-            match ops::post_message(&ctx(), me, &text, priority, mc).await {
+            match ops::post_message(&graph(), me, &text, priority, mc).await {
                 Ok(_) => {
                     session::wrote(me);
                     reply.try_update(|written| {
@@ -709,8 +709,8 @@ pub fn RequestRow(
     };
     let activate = move || match kind {
         Kind::Question => open_reply(),
-        Kind::Ruling => route::go(Route::decision(subject)),
-        Kind::Review | Kind::Proposal | Kind::Assignment => route::go(Route::task(subject)),
+        Kind::Ruling => lozenges::follow(Target::Decision(subject)),
+        Kind::Review | Kind::Proposal | Kind::Assignment => lozenges::follow(Target::Task(subject)),
     };
     let on_key = move |ev: web_sys::KeyboardEvent| {
         if ev.default_prevented() || !keys::is_plain(&ev) {
@@ -842,7 +842,7 @@ pub fn RequestRow(
                 {move || {
                     // In plain sight, checked by default: the task the move also marks done.
                     let task = paired.get().filter(|p| also_done(mv, Some(*p), true).is_some())?.task;
-                    let title = store::task(task).and_then(|t| t.title().ok()).unwrap_or_default();
+                    let title = store::task_title(task);
                     Some(view! {
                         <label class="check">
                             <input type="checkbox" prop:checked=move || done_too.get()

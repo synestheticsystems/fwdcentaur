@@ -1,14 +1,26 @@
 //! Routing: who needs to know about a thing. Produces notifications from messages, new tasks,
 //! task status changes, a task's new assignee, relations, new decisions, decision moves and a
 //! change of what a triage agent serves, following the rules in docs/design/agents-and-inbox.md.
-//! The daemon runs this as a live-query service; tests call it directly.
+//! The daemon runs this as one live-query service over every project it hosts (D177); tests call it
+//! directly.
+//!
+//! A project is a grouping, not a wall (D176), so routing follows each id a record holds into
+//! whichever project its record is in. Each plan is given the graph of the project of the record
+//! whose change it routes, and each rule reads its principals where its subject is: whom a question
+//! asked by handle names, and who rules on a proposed decision, are the record's project's; who
+//! triages a scope is that scope's project's, wherever the scope is; a task that concerns no scope
+//! falls to the triage agent that serves its own project whole. A recipient is followed wherever it
+//! is (the assignee of a dependent of another project, the author of a record of another project
+//! that cites a repealed decision, a principal of another project a message names), and what tells
+//! it is made in its own project, whose inbox lists it ([`apply`]).
 //!
 //! What reached the project's one triage agent until 2026-09-30 reaches the triage agent of the
-//! scope it concerns, else the one that serves the whole project (docs/DECISIONS.md, D122; the
-//! scopes: [`scopes_concerned`], `ops::worked_in`; the agent: `ops::front_line`). What concerns a
-//! task concerns each scope it is worked in, any number since D136 ("A task may be worked in
+//! scope it concerns, else the one that serves that scope's project whole (docs/DECISIONS.md, D122;
+//! the scopes: [`scopes_concerned`], `ops::worked_in`; the agent: `ops::triage_for`). What concerns
+//! a task concerns each scope it is worked in, any number since D136 ("A task may be worked in
 //! several scopes", 2026-10-03), so it reaches the triage agent of each, each agent once
-//! (`ops::front_lines`), save a question asked of no one, which asks one scope ([`asked_scope`]).
+//! (`ops::triage_for_scopes`), save a question asked of no one, which asks one scope
+//! ([`asked_scope`]).
 //!
 //! Each planned notification records in its `originator` why its recipient was chosen (`why`,
 //! one of [`Why`]), so an inbox can say in words why the notification is there (`reason.rs`).
@@ -24,13 +36,14 @@
 //! step; a comment routed after such a step tells them nothing more of it.
 //!
 //! What would reach a principal a successor took over (`fwd principal succeed`; D114) reaches the
-//! last of its successors instead, and says whom it was for ([`Successors`]).
+//! last of its successors instead, and says whom it was for ([`reached`]).
 
 use crate::model::*;
 use crate::naming;
 use crate::ops;
+use crate::project_graph::{Followed, ProjectGraph};
 use crate::query::with_id;
-use ankurah::{Context, EntityId};
+use ankurah::EntityId;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -358,11 +371,10 @@ fn precedence(t: NotificationType) -> u8 {
     }
 }
 
-/// Whom what reaches a principal reaches now. A principal a successor took over, when an agent was
-/// relaunched to carry on its job (`fwd principal succeed`; docs/DECISIONS.md, D114), is retired,
-/// and no agent reads its inbox, so each plan for it goes to the last of its successors, recording
-/// whom it was for (`for_id`, which the inbox's sentence names: `reason::sentence`). The same
-/// successors edit the messages it wrote (`rules::can_edit_message`, given [`Successors::chain`]).
+/// The principals that took over a principal's job in turn, when an agent was relaunched to carry
+/// on its job (`fwd principal succeed`; docs/DECISIONS.md, D114), as one project's principals record
+/// them: they edit the messages it wrote (`rules::can_edit_message`, given [`Successors::chain`]).
+/// Routing reads the same chain by following each principal's successor ([`reached`]).
 pub struct Successors(HashMap<EntityId, EntityId>);
 
 impl Successors {
@@ -377,8 +389,8 @@ impl Successors {
     }
 
     /// The successors of the project's principals, read from its graph.
-    pub async fn load(ctx: &Context) -> Result<Successors> {
-        Ok(Successors::of(&ops::principals(ctx).await?))
+    pub async fn load(graph: &ProjectGraph) -> Result<Successors> {
+        Ok(Successors::of(&ops::principals(graph).await?))
     }
 
     /// The principals that took over `principal`'s job in turn: its successor first, then that
@@ -396,40 +408,59 @@ impl Successors {
         }
         chain
     }
+}
 
-    /// The last successor of `principal`, following each successor's own in turn ([`Self::chain`]),
-    /// or `principal` when no one took it over.
-    pub fn last(&self, principal: EntityId) -> EntityId {
-        self.chain(principal).last().copied().unwrap_or(principal)
+/// Whom what reaches `principal` reaches now. A principal a successor took over is retired, and no
+/// agent reads its inbox, so what would reach it reaches the last of the principals that took over
+/// its job in turn, each read where the one before it names it; `principal` itself when no one took
+/// it over. A loop, which `fwd principal succeed` never makes, ends where it would come round again.
+async fn reached(graph: &ProjectGraph, principal: EntityId) -> Result<EntityId> {
+    let mut chain = vec![principal];
+    while let Followed::Held { found, .. } = graph.follow::<PrincipalView>(chain[chain.len() - 1]).await? {
+        match found.succeeded_by().ok().flatten().map(EntityId::from) {
+            Some(next) if !chain.contains(&next) => chain.push(next),
+            _ => break,
+        }
     }
+    Ok(chain[chain.len() - 1])
+}
 
-    /// `planned`, each plan for a principal a successor took over given to its last successor,
-    /// with whom it was for in its `originator` (`for_id`), unless that says so already.
-    pub fn redirect(&self, planned: Vec<Planned>) -> Vec<Planned> {
-        planned
-            .into_iter()
-            .map(|mut p| {
-                let to = self.last(p.recipient);
-                if to != p.recipient {
-                    if p.originator.get("for_id").is_none() {
-                        p.originator["for_id"] = json!(p.recipient.to_base64());
-                    }
-                    p.recipient = to;
-                }
-                p
-            })
-            .collect()
+/// `planned`, each plan for a principal a successor took over given to the one it reaches now
+/// ([`reached`]), recording whom it was for (`for_id`, which the inbox's sentence names:
+/// `reason::sentence`), unless it says so already.
+async fn redirect(graph: &ProjectGraph, planned: Vec<Planned>) -> Result<Vec<Planned>> {
+    let mut out = Vec::with_capacity(planned.len());
+    for mut p in planned {
+        let to = reached(graph, p.recipient).await?;
+        if to != p.recipient {
+            if p.originator.get("for_id").is_none() {
+                p.originator["for_id"] = json!(p.recipient.to_base64());
+            }
+            p.recipient = to;
+        }
+        out.push(p);
     }
+    Ok(out)
 }
 
 /// `planned` as it is delivered: each plan for a principal a successor took over given to the
-/// successor ([`Successors`]), then one per recipient, `exclude`, whoever caused it, getting none
+/// successor ([`redirect`]), then one per recipient, `exclude`, whoever caused it, getting none
 /// ([`dedupe`]), so that a successor never hears of what it did itself.
-async fn deliver(ctx: &Context, planned: Vec<Planned>, exclude: Option<EntityId>) -> Result<Vec<Planned>> {
+async fn deliver(graph: &ProjectGraph, planned: Vec<Planned>, exclude: Option<EntityId>) -> Result<Vec<Planned>> {
     if planned.is_empty() {
         return Ok(planned);
     }
-    Ok(dedupe(Successors::load(ctx).await?.redirect(planned), exclude))
+    Ok(dedupe(redirect(graph, planned).await?, exclude))
+}
+
+/// The graph of the project `recipient` is a principal of, whose inbox lists what tells it, where a
+/// notification for it is made and found; for a recipient the node holds no principal for, `graph`,
+/// the project whose rule chose it.
+async fn inbox_graph(graph: &ProjectGraph, recipient: EntityId) -> Result<ProjectGraph> {
+    Ok(match graph.follow::<PrincipalView>(recipient).await? {
+        Followed::Held { found, .. } => graph.graph_of(&found)?,
+        Followed::NotHeld => graph.clone(),
+    })
 }
 
 /// One notification per recipient per cause; `exclude`, whoever caused it, gets none. Of two
@@ -453,27 +484,30 @@ pub fn dedupe(planned: Vec<Planned>, exclude: Option<EntityId>) -> Vec<Planned> 
     out
 }
 
-/// A task's assignee, if it is a task and has one: the one doing it, whom a comment on the task
-/// reaches (rule 2) and, since scopes lost their owner, a comment on code near it (rule 1).
-async fn assignee(ctx: &Context, task: EntityId) -> Result<Option<EntityId>> {
-    match ctx.get::<TaskView>(task).await {
-        Ok(t) => ops::assignee_of(&t),
-        Err(_) => Ok(None),
+/// A task's assignee, if it is a task, in whichever project, and has one: the one doing it, whom a
+/// comment on the task reaches (rule 2) and, since scopes lost their owner, a comment on code near
+/// it (rule 1).
+async fn assignee(graph: &ProjectGraph, task: EntityId) -> Result<Option<EntityId>> {
+    match graph.follow::<TaskView>(task).await? {
+        Followed::Held { found, .. } => ops::assignee_of(&found),
+        Followed::NotHeld => Ok(None),
     }
 }
 
-/// The people and agents a message names inline: the ends of its `mention` relations that are
-/// principals, which `ops::post_message` wrote with it. A relation an edit wrote is left to
-/// [`plan_for_edited_mention`], which tells its end once whichever of the two runs first.
-async fn mentioned(ctx: &Context, message: EntityId) -> Result<Vec<EntityId>> {
+/// The people and agents a message names inline, of whichever project: the ends of its `mention`
+/// relations that are principals, which `ops::post_message` wrote with it. A relation an edit
+/// wrote is left to [`plan_for_edited_mention`], which tells its end once whichever of the two runs
+/// first.
+async fn mentioned(graph: &ProjectGraph, message: EntityId) -> Result<Vec<EntityId>> {
     let mut out = Vec::new();
-    for rel in ops::relations_from(ctx, message, Some(RelationKind::Mention)).await? {
+    for rel in ops::relations_from(graph, message, Some(RelationKind::Mention)).await? {
         if rel.status()? != RelationStatus::Accepted || written_by_edit(&rel) {
             continue;
         }
-        let to: EntityId = rel.to_id()?;
-        if !out.contains(&to) && ctx.get::<PrincipalView>(to).await.is_ok() {
-            out.push(to);
+        if let Followed::Held { record, .. } = graph.follow::<PrincipalView>(rel.to_id()?).await? {
+            if !out.contains(&record) {
+                out.push(record);
+            }
         }
     }
     Ok(out)
@@ -500,9 +534,9 @@ fn message_originator(msg: &MessageView, mc: &ops::MessageContext) -> Result<Val
 }
 
 /// The tasks a highlight is a step of, by the `step_of` relations from it that hold.
-async fn tasks_stepped(ctx: &Context, anchor: EntityId) -> Result<Vec<EntityId>> {
+async fn tasks_stepped(graph: &ProjectGraph, anchor: EntityId) -> Result<Vec<EntityId>> {
     let mut tasks = Vec::new();
-    for rel in ops::relations_from(ctx, anchor, Some(RelationKind::StepOf)).await? {
+    for rel in ops::relations_from(graph, anchor, Some(RelationKind::StepOf)).await? {
         if crate::rules::holds(RelationKind::StepOf, rel.status()?) {
             tasks.push(rel.to_id()?);
         }
@@ -512,15 +546,15 @@ async fn tasks_stepped(ctx: &Context, anchor: EntityId) -> Result<Vec<EntityId>>
 
 /// The tasks anchored near a highlight, in the same file within [`NEARBY_LINES`] of it, or anywhere
 /// in it when either is on the whole file (rule 1), each once, in the order of their anchors.
-async fn tasks_near(ctx: &Context, anchor: EntityId) -> Result<Vec<EntityId>> {
-    let Ok(view) = ctx.get::<CodeAnchorView>(anchor).await else { return Ok(vec![]) };
+async fn tasks_near(graph: &ProjectGraph, anchor: EntityId) -> Result<Vec<EntityId>> {
+    let Ok(view) = graph.get::<CodeAnchorView>(anchor).await else { return Ok(vec![]) };
     let (path, lines) = (view.path()?, ops::lines_of(&view)?);
     let mut tasks = Vec::new();
-    for other in ops::anchors_in_path(ctx, &path).await? {
+    for other in ops::anchors_in_path(graph, &path).await? {
         if !nearby(lines, ops::lines_of(&other)?) {
             continue;
         }
-        for rel in ops::relations_to(ctx, other.id(), Some(RelationKind::AnchoredAt)).await? {
+        for rel in ops::relations_to(graph, other.id(), Some(RelationKind::AnchoredAt)).await? {
             let task: EntityId = rel.from_id()?;
             if rel.status()? == RelationStatus::Accepted && !tasks.contains(&task) {
                 tasks.push(task);
@@ -539,31 +573,32 @@ fn push_scope(scopes: &mut Vec<EntityId>, scope: Option<EntityId>) {
 
 /// The scopes a message concerns, whose triage agents answer first for it (docs/DECISIONS.md,
 /// D122: what is asked of no one reaches "the triage agent of the scope it concerns"; `mc` holding
-/// what the message is about, as `ops::MessageContext` reads it): the scope it is about; the scopes
-/// the task it is about is worked in (`ops::worked_in`); for a highlight, those of the tasks it is a
-/// step of and of the tasks anchored near it; the scope the decision it is about governs; each
-/// once, in that order. Where none of these finds a scope, the scope its author wrote it in
+/// what the message is about, as `ops::MessageContext` reads it), of whichever project each is
+/// (`ops::triage_for` reads its agent there): the scope it is about; the scopes the task it is
+/// about is worked in (`ops::worked_in`); for a highlight, those of the tasks it is a step of and of
+/// the tasks anchored near it; the scope the decision it is about governs; each once, in that
+/// order. Where none of these finds a scope, the scope its author wrote it in
 /// (`written_in`), so that what concerns no scope's work reaches the triage agent of the scope its
 /// author works in; none beyond that, when the triage agent that serves the whole project answers
 /// for it.
-pub async fn scopes_concerned(ctx: &Context, mc: &ops::MessageContext) -> Result<Vec<EntityId>> {
+pub async fn scopes_concerned(graph: &ProjectGraph, mc: &ops::MessageContext) -> Result<Vec<EntityId>> {
     let mut scopes = Vec::new();
     push_scope(&mut scopes, mc.scope_id);
     if let Some(task) = mc.task_id {
-        for scope in ops::worked_in(ctx, task).await? {
+        for scope in ops::worked_in(graph, task).await? {
             push_scope(&mut scopes, Some(scope));
         }
     }
     if let Some(anchor) = mc.anchor_id {
-        for task in tasks_stepped(ctx, anchor).await?.into_iter().chain(tasks_near(ctx, anchor).await?) {
-            for scope in ops::worked_in(ctx, task).await? {
+        for task in tasks_stepped(graph, anchor).await?.into_iter().chain(tasks_near(graph, anchor).await?) {
+            for scope in ops::worked_in(graph, task).await? {
                 push_scope(&mut scopes, Some(scope));
             }
         }
     }
     if let Some(decision) = mc.decision_id {
-        if let Ok(d) = ctx.get::<DecisionView>(decision).await {
-            push_scope(&mut scopes, ops::governs(&d)?);
+        if let Followed::Held { found, .. } = graph.follow::<DecisionView>(decision).await? {
+            push_scope(&mut scopes, ops::governs(&found)?);
         }
     }
     if scopes.is_empty() {
@@ -575,10 +610,10 @@ pub async fn scopes_concerned(ctx: &Context, mc: &ops::MessageContext) -> Result
 /// The scope a question asked of no one in particular asks: the one it recorded as it was posted
 /// (`ops::ASKS_SCOPE_KEY`), else, for a question from before 2026-09-30, which recorded none, the
 /// one [`scope_to_ask`] picks; none when it asks the project.
-pub async fn asked_scope(ctx: &Context, mc: &ops::MessageContext) -> Result<Option<EntityId>> {
+pub async fn asked_scope(graph: &ProjectGraph, mc: &ops::MessageContext) -> Result<Option<EntityId>> {
     match mc.asks_scope {
         Some(scope) => Ok(Some(scope)),
-        None => scope_to_ask(ctx, mc).await,
+        None => scope_to_ask(graph, mc).await,
     }
 }
 
@@ -589,8 +624,8 @@ pub async fn asked_scope(ctx: &Context, mc: &ops::MessageContext) -> Result<Opti
 /// that is one of them, else the first, which for a task worked in several scopes is the scope it
 /// came to be worked in first (the lead, 2026-10-03, on D136, "A task may be worked in several
 /// scopes"); none when what it is about concerns no scope and its asker works in none.
-pub async fn scope_to_ask(ctx: &Context, mc: &ops::MessageContext) -> Result<Option<EntityId>> {
-    let concerned = scopes_concerned(ctx, mc).await?;
+pub async fn scope_to_ask(graph: &ProjectGraph, mc: &ops::MessageContext) -> Result<Option<EntityId>> {
+    let concerned = scopes_concerned(graph, mc).await?;
     Ok(mc.written_in.filter(|own| concerned.contains(own)).or_else(|| concerned.first().copied()))
 }
 
@@ -601,7 +636,7 @@ enum Asked {
     /// principal's name").
     Principal(EntityId),
     /// For a question asked of no one in particular, the triage agent that answers first for the
-    /// scope it asks ([`asked_scope`], `ops::front_line`).
+    /// scope it asks ([`asked_scope`], `ops::triage_for`).
     FrontLine(ops::FrontLine),
 }
 
@@ -617,10 +652,16 @@ impl Asked {
 
 /// Whom the message `mc` describes asks (rule 5), so that the rule and a step's list of the threads
 /// on its lines, which leaves a question out for the party it asks (`plan_for_relation`), read it
-/// alike: of `principals`, the project's, the one its `to` names, or for a question asked of no one
-/// in particular the triage agent that answers first for the scope it asks; none for a message that
-/// asks no one, or no one this project has, or while no triage agent answers for its scope.
-async fn asked_of(ctx: &Context, principals: &[PrincipalView], mc: &ops::MessageContext) -> Result<Option<Asked>> {
+/// alike: the one principal its `to` names, by id wherever it is, or by a handle one of
+/// `principals`, those of the message's project, has; or for a question asked of no one in
+/// particular the triage agent that answers first for the scope it asks, in that scope's project;
+/// none for a message that asks no one, or no one its project has, or while no triage agent answers
+/// for its scope.
+async fn asked_of(
+    graph: &ProjectGraph,
+    principals: &[PrincipalView],
+    mc: &ops::MessageContext,
+) -> Result<Option<Asked>> {
     if let Some(to) = mc.to.as_deref() {
         if let Ok(id) = to.parse::<EntityId>() {
             return Ok(Some(Asked::Principal(id)));
@@ -631,7 +672,7 @@ async fn asked_of(ctx: &Context, principals: &[PrincipalView], mc: &ops::Message
         });
     }
     if mc.asks_project {
-        return Ok(ops::front_line(principals, asked_scope(ctx, mc).await?).map(Asked::FrontLine));
+        return Ok(ops::triage_for(graph, asked_scope(graph, mc).await?).await?.map(Asked::FrontLine));
     }
     Ok(None)
 }
@@ -646,7 +687,7 @@ fn for_front_line(p: Planned, f: ops::FrontLine) -> Planned {
 }
 
 /// Rules 1 to 6, and the rule for a comment on a highlight that is a step, for a new message.
-pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Planned>> {
+pub async fn plan_for_message(graph: &ProjectGraph, msg: &MessageView) -> Result<Vec<Planned>> {
     let author: EntityId = msg.author()?.into();
     let priority = msg.priority()?;
     let mc = ops::MessageContext::from_view(msg)?;
@@ -656,7 +697,7 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     let note = |recipient: EntityId, t: NotificationType, tgt: Value, why: Why| {
         Planned::new(recipient, t, priority, tgt, &originator, why)
     };
-    let principals = ops::principals(ctx).await?;
+    let principals = ops::principals(graph).await?;
     // Whether it asks someone: one principal, or no one in particular. A forward is a reply that
     // does.
     let addressed = mc.to.is_some() || mc.asks_project;
@@ -667,14 +708,14 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     // project, and while neither exists the agent that comes to answer first for it, as it does
     // ([`plan_for_waiting_questions`]).
     let asked = if mc.reply_to.is_some() { Why::Forwarded } else { Why::Addressee };
-    match asked_of(ctx, &principals, &mc).await? {
+    match asked_of(graph, &principals, &mc).await? {
         Some(Asked::Principal(id)) => {
             planned.push(note(id, NotificationType::QuestionAsked, msg_target.clone(), asked))
         }
         // A question written just before an agent came to answer first for it, or while the daemon
         // told that agent of the questions that waited, may have reached it that way before this
         // plan runs; it hears of the question once.
-        Some(Asked::FrontLine(f)) if !asked_already(ctx, f.agent, msg.id()).await? => {
+        Some(Asked::FrontLine(f)) if !asked_already(graph, f.agent, msg.id()).await? => {
             let question = note(f.agent, NotificationType::QuestionAsked, msg_target.clone(), Why::Triage);
             planned.push(for_front_line(question, f));
         }
@@ -687,11 +728,11 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
         let root_id = msg.thread()?.map(EntityId::from).unwrap_or(reply_to);
         let mut participants = Vec::new();
         for (id, why) in [(reply_to, Why::ParentAuthor), (root_id, Why::ThreadAuthor)] {
-            if let Ok(m) = ctx.get::<MessageView>(id).await {
-                participants.push((EntityId::from(m.author()?), why));
+            if let Followed::Held { found, .. } = graph.follow::<MessageView>(id).await? {
+                participants.push((EntityId::from(found.author()?), why));
             }
         }
-        let thread: Vec<MessageView> = ops::messages_about(ctx, "thread", root_id).await?;
+        let thread: Vec<MessageView> = ops::messages_about(graph, "thread", root_id).await?;
         for m in thread {
             participants.push((m.author()?.into(), Why::Participant));
         }
@@ -700,21 +741,22 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
         }
     }
     // The people it names inline.
-    for principal in mentioned(ctx, msg.id()).await? {
+    for principal in mentioned(graph, msg.id()).await? {
         planned.push(note(principal, NotificationType::Mentioned, msg_target.clone(), Why::Mentioned));
     }
     // The triage agents that answer first for a comment on a task, on code or on a scope (rules 1
-    // to 3): the one of each scope it concerns, else the one that serves the whole project.
+    // to 3): the one of each scope it concerns, in that scope's project, else the one that serves
+    // that project whole; for one that concerns no scope, the one that serves its own project whole.
     let front = match (mc.task_id, mc.anchor_id, mc.scope_id) {
         (None, None, None) => Vec::new(),
-        _ => ops::front_lines(&principals, &scopes_concerned(ctx, &mc).await?),
+        _ => ops::triage_for_scopes(graph, &scopes_concerned(graph, &mc).await?).await?,
     };
     let triage_notes = |t: NotificationType, tgt: Value| {
         front.iter().map(move |f| for_front_line(note(f.agent, t, tgt.clone(), Why::Triage), *f)).collect::<Vec<_>>()
     };
     // A comment on a task: its assignee and its triage agents.
     if let Some(task) = mc.task_id {
-        if let Some(assignee) = assignee(ctx, task).await? {
+        if let Some(assignee) = assignee(graph, task).await? {
             planned.push(note(assignee, NotificationType::TaskCommented, target("Task", task), Why::Assignee));
         }
         planned.extend(triage_notes(NotificationType::TaskCommented, target("Task", task)));
@@ -726,8 +768,8 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     let mut step_of = Vec::new();
     let mut step_parties = Vec::new();
     if let (Some(anchor), None, None) = (mc.anchor_id, mc.task_id, mc.reply_to) {
-        for task in tasks_stepped(ctx, anchor).await? {
-            let Ok(t) = ctx.get::<TaskView>(task).await else { continue };
+        for task in tasks_stepped(graph, anchor).await? {
+            let Followed::Held { found: t, .. } = graph.follow::<TaskView>(task).await? else { continue };
             step_of.push(task);
             let parties = [Some(EntityId::from(t.created_by()?)), ops::assignee_of(&t)?];
             for party in parties.into_iter().flatten() {
@@ -744,8 +786,8 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     // in (D108).
     if let Some(anchor) = mc.anchor_id {
         planned.extend(triage_notes(NotificationType::CodeCommented, target("CodeAnchor", anchor)));
-        for task in tasks_near(ctx, anchor).await? {
-            if let Some(assignee) = assignee(ctx, task).await? {
+        for task in tasks_near(graph, anchor).await? {
+            if let Some(assignee) = assignee(graph, task).await? {
                 let near = note(assignee, NotificationType::CodeCommented, target("CodeAnchor", anchor), Why::Assignee);
                 planned.push(near.naming("near_task_id", task));
             }
@@ -760,7 +802,7 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     // A comment on a decision (the reason for a move among them): whoever filed it and whoever
     // ruled on it.
     if let Some(decision) = mc.decision_id {
-        if let Ok(d) = ctx.get::<DecisionView>(decision).await {
+        if let Followed::Held { found: d, .. } = graph.follow::<DecisionView>(decision).await? {
             let about = target("Decision", decision);
             planned.push(note(
                 d.author()?.into(),
@@ -775,8 +817,7 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     }
     // What would reach a principal a successor took over reaches the successor (D114), before the
     // rules below read who the recipients are.
-    let successors = Successors::load(ctx).await?;
-    let mut planned = successors.redirect(planned);
+    let mut planned = redirect(graph, planned).await?;
     // A message always notifies the party to which it was directed, even when that party wrote it,
     // so a question asked of oneself stays in one's own inbox until it is answered or dismissed, and
     // a triage agent that asks the project hears its own question. Every other rule leaves the
@@ -795,9 +836,9 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     let mut checked = HashSet::new();
     let mut told = HashSet::new();
     for party in step_parties {
-        let reached = successors.last(party);
-        if checked.insert(reached) && told_messages(ctx, reached).await?.contains(&msg.id()) {
-            told.insert(reached);
+        let reader = reached(graph, party).await?;
+        if checked.insert(reader) && told_messages(graph, reader).await?.contains(&msg.id()) {
+            told.insert(reader);
         }
     }
     planned.retain(|p| !told.contains(&p.recipient) || p.notification_type == NotificationType::QuestionAsked);
@@ -805,8 +846,10 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     // decision through the move's own notification (rule 12), which carries this comment; told
     // here too, they would hear of one move twice.
     if let Some(decision) = mc.decision_id.filter(|_| gives_reason_for_fall(msg)) {
-        let told: Vec<EntityId> =
-            citing_authors(ctx, decision).await?.into_iter().map(|author| successors.last(author)).collect();
+        let mut told = Vec::new();
+        for author in citing_authors(graph, decision).await? {
+            told.push(reached(graph, author).await?);
+        }
         planned.retain(|p| !told.contains(&p.recipient));
     }
     let mut planned = dedupe(planned, None);
@@ -832,40 +875,54 @@ pub async fn plan_for_message(ctx: &Context, msg: &MessageView) -> Result<Vec<Pl
     Ok(planned)
 }
 
-/// Rule 5 for the questions that waited: each active question asked of no one in particular that
-/// no triage agent has heard of ([`heard_by_triage`]) reaches the triage agent that answers first
-/// for the scope it asks now ([`asked_scope`], `ops::front_line`), so that a question asked while no
-/// agent answered for its scope reaches that scope's front line the moment it has one, rather than
-/// wait unheard until someone looks at the Questions page (Daniel, 2026-09-30, of a question he had
-/// asked of a project with no triage agent: "lets make sure that does not get lost in the
-/// shuffle"; task 5RoOJZl9; per scope since D122). The routing service plans this whenever what a
-/// triage agent serves changes: an agent that takes triage, a scope or the endorsement to serve the
-/// whole project (`fwd principal add --role triage`, `role`, `scope add`, `scope project-wide`,
-/// coming back with them, or succeeding the agent that had them) hears of the questions of what it
-/// takes, a project-wide one of those asked of no scope and of scopes no agent serves; and one that
-/// gives them up (retired, another role, `scope remove`) leaves those it had not heard of, and
-/// those it left unread, to whichever agent answers first for them then. This plans `QuestionAsked`,
-/// `why` triage, one notification each, oldest first, as `plan_for_message` plans one for the
-/// triage agent of the moment; a question whose scope no agent answers for keeps waiting. Its plans
-/// are not passed through [`dedupe`], which keeps one per recipient, since each is a question of
-/// its own. Until 2026-09-30 it planned for the one agent that came to hold the project's triage
-/// (`plan_for_triage_taken`).
-pub async fn plan_for_waiting_questions(ctx: &Context) -> Result<Vec<Planned>> {
-    let principals = ops::principals(ctx).await?;
-    let heard = heard_by_triage(ctx, &principals).await?;
+/// Rule 5 for the questions that waited in `graph`'s project: each active question asked of no one
+/// in particular that no triage agent has heard of ([`heard_by_triage`]) reaches the triage agent
+/// that answers first for the scope it asks now ([`asked_scope`], `ops::triage_for`, in that
+/// scope's project), so that a question asked while no agent answered for its scope reaches that
+/// scope's front line the moment it has one, rather than wait unheard until someone looks at the
+/// Questions page (Daniel, 2026-09-30, of a question he had asked of a project with no triage
+/// agent: "lets make sure that does not get lost in the shuffle"; task 5RoOJZl9; per scope since
+/// D122). The routing service plans this whenever what a triage agent serves changes: an agent that
+/// takes triage, a scope or the endorsement to serve the whole project (`fwd principal add --role
+/// triage`, `role`, `scope add`, `scope project-wide`, coming back with them, or succeeding the
+/// agent that had them) hears of the questions of what it takes, a project-wide one of those asked
+/// of no scope and of scopes no agent serves; and one that gives them up (retired, another role,
+/// `scope remove`) leaves those it had not heard of, and those it left unread, to whichever agent
+/// answers first for them then. This plans `QuestionAsked`, `why` triage, one notification each,
+/// oldest first, as `plan_for_message` plans one for the triage agent of the moment; a question
+/// whose scope no agent answers for keeps waiting. Its plans are not passed through [`dedupe`],
+/// which keeps one per recipient, since each is a question of its own. Until 2026-09-30 it planned
+/// for the one agent that came to hold the project's triage (`plan_for_triage_taken`).
+pub async fn plan_for_waiting_questions(graph: &ProjectGraph) -> Result<Vec<Planned>> {
     let active = format!("status = '{}'", MessageStatus::Active);
-    let mut waiting = Vec::new();
-    for msg in ctx.fetch::<MessageView>(active.as_str()).await? {
-        if heard.contains(&msg.id()) {
-            continue;
-        }
+    let mut asking = Vec::new();
+    // The projects whose triage agents a question may have reached: its own, and the project of
+    // each scope one of them asks.
+    let mut projects = vec![graph.clone()];
+    for msg in graph.fetch::<MessageView>(active.as_str()).await? {
         // A message whose fields cannot be read is left to the Questions page, rather than keep
         // the questions after it from their agents.
         let Ok(mc) = ops::MessageContext::from_view(&msg) else { continue };
         if !mc.asks_project || mc.to.is_some() {
             continue;
         }
-        if let Some(f) = ops::front_line(&principals, asked_scope(ctx, &mc).await?) {
+        let scope = asked_scope(graph, &mc).await?;
+        if let Some(scope) = scope {
+            if let Followed::Held { found, .. } = graph.follow::<ScopeView>(scope).await? {
+                if !projects.iter().any(|p| p.owns(&found)) {
+                    projects.push(graph.graph_of(&found)?);
+                }
+            }
+        }
+        asking.push((msg, mc, scope));
+    }
+    let heard = heard_by_triage(&projects).await?;
+    let mut waiting = Vec::new();
+    for (msg, mc, scope) in asking {
+        if heard.contains(&msg.id()) {
+            continue;
+        }
+        if let Some(f) = ops::triage_for(graph, scope).await? {
             waiting.push((msg.created().unwrap_or(0), msg, mc, f));
         }
     }
@@ -882,35 +939,41 @@ pub async fn plan_for_waiting_questions(ctx: &Context) -> Result<Vec<Planned>> {
 }
 
 /// The questions a triage agent has heard of, which no triage agent is told of again
-/// ([`plan_for_waiting_questions`]): each message a `QuestionAsked` with `why` triage names, that
-/// its recipient read or dismissed, or holds unread while it is active (of `principals`, the
-/// project's). The agent that succeeded a triage agent holds what that one left unread
-/// (`ops::succeed_principal` moves it), so a question told to the triage agent it succeeded counts;
-/// a triage agent retired with no successor reads nothing more, so a question it left unread counts
-/// as heard by no one, and reaches the next. A `QuestionAsked` with no `why` was routed before
-/// routing recorded it (2026-09-26), when a question to the supervisor role, asked of the project
-/// since `fwd admin migrate`, reached the supervisors, and counts as one with `why` triage, as the
-/// inbox's sentence reads it (`reason.rs`).
-async fn heard_by_triage(ctx: &Context, principals: &[PrincipalView]) -> Result<HashSet<EntityId>> {
-    let active: HashSet<EntityId> = principals.iter().filter(|p| p.active().unwrap_or(false)).map(|p| p.id()).collect();
+/// ([`plan_for_waiting_questions`]), read in the inboxes of each of `projects`: each message a
+/// `QuestionAsked` with `why` triage names, that its recipient read or dismissed, or holds unread
+/// while it is active (of the principals of the notification's project). The agent that succeeded a
+/// triage agent holds what that one left unread (`ops::succeed_principal` moves it), so a question
+/// told to the triage agent it succeeded counts; a triage agent retired with no successor reads
+/// nothing more, so a question it left unread counts as heard by no one, and reaches the next. A
+/// `QuestionAsked` with no `why` was routed before routing recorded it (2026-09-26), when a
+/// question to the supervisor role, asked of the project since `fwd admin migrate`, reached the
+/// supervisors, and counts as one with `why` triage, as the inbox's sentence reads it
+/// (`reason.rs`).
+async fn heard_by_triage(projects: &[ProjectGraph]) -> Result<HashSet<EntityId>> {
     let questions = format!("notification_type = '{}'", NotificationType::QuestionAsked);
-    let asked: Vec<NotificationView> = ctx.fetch(questions.as_str()).await?;
-    Ok(asked
-        .iter()
-        .filter_map(|n| {
+    let mut heard = HashSet::new();
+    for graph in projects {
+        let principals = ops::principals(graph).await?;
+        let active: HashSet<EntityId> =
+            principals.iter().filter(|p| p.active().unwrap_or(false)).map(|p| p.id()).collect();
+        let asked: Vec<NotificationView> = graph.fetch(questions.as_str()).await?;
+        heard.extend(asked.iter().filter_map(|n| {
             let originator: Value = n.originator().ok()?.into();
             let for_triage = originator.get("why").is_none() || why_of(&originator) == Some(Why::Triage);
             let read = n.status().ok()? != NotificationStatus::Unread;
             let reads_still = active.contains(&EntityId::from(n.recipient().ok()?));
             (for_triage && (read || reads_still)).then(|| id_at(&originator, "message_id")).flatten()
-        })
-        .collect())
+        }));
+    }
+    Ok(heard)
 }
 
-/// Whether `recipient` holds a `QuestionAsked` for `message` already, whatever its status.
-async fn asked_already(ctx: &Context, recipient: EntityId, message: EntityId) -> Result<bool> {
+/// Whether `recipient` holds a `QuestionAsked` for `message` already, whatever its status, in its
+/// project's inbox.
+async fn asked_already(graph: &ProjectGraph, recipient: EntityId, message: EntityId) -> Result<bool> {
     let predicate = format!("recipient = ? AND notification_type = '{}'", NotificationType::QuestionAsked);
-    let theirs: Vec<NotificationView> = ctx.fetch(with_id(&predicate, recipient)?).await?;
+    let theirs: Vec<NotificationView> =
+        inbox_graph(graph, recipient).await?.fetch(with_id(&predicate, recipient)?).await?;
     Ok(theirs.iter().any(|n| {
         let originator: Value = n.originator().map(Into::into).unwrap_or(Value::Null);
         id_at(&originator, "message_id") == Some(message)
@@ -927,13 +990,13 @@ fn gives_reason_for_fall(msg: &MessageView) -> bool {
 
 /// The authors of everything that stands on `decision` by a standing `cites` relation: whom its
 /// repeal or supersession tells.
-async fn citing_authors(ctx: &Context, decision: EntityId) -> Result<Vec<EntityId>> {
+async fn citing_authors(graph: &ProjectGraph, decision: EntityId) -> Result<Vec<EntityId>> {
     let mut authors = Vec::new();
-    for rel in ops::relations_to(ctx, decision, Some(RelationKind::Cites)).await? {
+    for rel in ops::relations_to(graph, decision, Some(RelationKind::Cites)).await? {
         if !ops::standing(&rel) {
             continue;
         }
-        if let Some(author) = ops::author_of(ctx, rel.from_id()?).await? {
+        if let Some(author) = ops::author_of(graph, rel.from_id()?).await? {
             authors.push(author);
         }
     }
@@ -945,25 +1008,25 @@ async fn citing_authors(ctx: &Context, decision: EntityId) -> Result<Vec<EntityI
 /// (docs/DECISIONS.md, D136: "A proposal reaches the triage agent of each of its scopes"), and for a
 /// task worked in none to the one that serves the whole project; TaskCreated to the authors of the
 /// messages it was discovered from or motivated by.
-pub async fn plan_for_task_created(ctx: &Context, task: &TaskView) -> Result<Vec<Planned>> {
+pub async fn plan_for_task_created(graph: &ProjectGraph, task: &TaskView) -> Result<Vec<Planned>> {
     let creator: EntityId = task.created_by()?.into();
     let priority = Priority::Next;
     let originator = json!({"actor_id": creator.to_base64(), "task_id": task.id().to_base64()});
     let tgt = target("Task", task.id());
     let mut planned = Vec::new();
     if task.status()? == TaskStatus::Proposed {
-        for f in ops::triage_for_scopes(ctx, &ops::worked_in(ctx, task.id()).await?).await? {
+        for f in ops::triage_for_scopes(graph, &ops::worked_in(graph, task.id()).await?).await? {
             let proposed =
                 Planned::new(f.agent, NotificationType::TaskProposed, priority, tgt.clone(), &originator, Why::Triage);
             planned.push(for_front_line(proposed, f));
         }
     }
-    for rel in ops::relations_from(ctx, task.id(), None).await? {
+    for rel in ops::relations_from(graph, task.id(), None).await? {
         if !matches!(rel.kind()?, RelationKind::DiscoveredFrom | RelationKind::MotivatedBy) {
             continue;
         }
         let source: EntityId = rel.to_id()?;
-        if let Ok(m) = ctx.get::<MessageView>(source).await {
+        if let Followed::Held { found: m, .. } = graph.follow::<MessageView>(source).await? {
             let created = Planned::new(
                 m.author()?.into(),
                 NotificationType::TaskCreated,
@@ -975,7 +1038,7 @@ pub async fn plan_for_task_created(ctx: &Context, task: &TaskView) -> Result<Vec
             planned.push(created.naming("message_id", source));
         }
     }
-    deliver(ctx, planned, Some(creator)).await
+    deliver(graph, planned, Some(creator)).await
 }
 
 /// A status change: ReviewRequested on submit to the triage agent of each scope the task is worked
@@ -988,7 +1051,7 @@ pub async fn plan_for_task_created(ctx: &Context, task: &TaskView) -> Result<Vec
 /// none of its scopes is primary (D136, "A task may be worked in several scopes"; the lead,
 /// 2026-10-03, for reviews and tasks that became ready).
 pub async fn plan_for_task_status(
-    ctx: &Context,
+    graph: &ProjectGraph,
     task: &TaskView,
     previous: TaskStatus,
     actor: Option<EntityId>,
@@ -1013,13 +1076,12 @@ pub async fn plan_for_task_status(
         // submitted goes to the other scopes' agents, or with none to the agent that serves the
         // whole project, and where none can take it, as in a project with no triage agent, to the
         // approver or the creator.
-        let principals = ops::principals(ctx).await?;
-        let scopes = ops::worked_in(ctx, task.id()).await?;
+        let scopes = ops::worked_in(graph, task.id()).await?;
         let not_submitter = |f: &ops::FrontLine| Some(f.agent) != actor;
         let mut reviewers: Vec<ops::FrontLine> =
-            ops::front_lines(&principals, &scopes).into_iter().filter(not_submitter).collect();
+            ops::triage_for_scopes(graph, &scopes).await?.into_iter().filter(not_submitter).collect();
         if reviewers.is_empty() {
-            reviewers.extend(ops::front_line(&principals, None).filter(not_submitter));
+            reviewers.extend(ops::triage_for(graph, None).await?.filter(not_submitter));
         }
         let review = |reviewer: EntityId, why: Why| {
             Planned::new(reviewer, NotificationType::ReviewRequested, Priority::Next, tgt.clone(), &originator, why)
@@ -1037,13 +1099,18 @@ pub async fn plan_for_task_status(
         }
     }
     if matches!(status, TaskStatus::Done | TaskStatus::Cancelled | TaskStatus::Rejected) {
-        for rel in ops::relations_to(ctx, task.id(), Some(RelationKind::DependsOn)).await? {
+        for rel in ops::relations_to(graph, task.id(), Some(RelationKind::DependsOn)).await? {
             if rel.status()? != RelationStatus::Accepted {
                 continue;
             }
-            let dependent: EntityId = rel.from_id()?;
-            let Ok(dep_view) = ctx.get::<TaskView>(dependent).await else { continue };
-            if !ops::readiness(ctx, &dep_view).await?.is_ready() {
+            // A dependent of another project tells its own assignee, or the triage agents of its
+            // own scopes, read in its project.
+            let Followed::Held { record: dependent, found: dep_view, .. } =
+                graph.follow::<TaskView>(rel.from_id()?).await?
+            else {
+                continue;
+            };
+            if !ops::readiness(graph, &dep_view).await?.is_ready() {
                 continue;
             }
             let dep_target = target("Task", dependent);
@@ -1057,7 +1124,8 @@ pub async fn plan_for_task_status(
                     Why::Assignee,
                 )),
                 None => {
-                    for f in ops::triage_for_scopes(ctx, &ops::worked_in(ctx, dependent).await?).await? {
+                    let there = graph.graph_of(&dep_view)?;
+                    for f in ops::triage_for_scopes(&there, &ops::worked_in(&there, dependent).await?).await? {
                         let unblocked = Planned::new(
                             f.agent,
                             NotificationType::TaskUnblocked,
@@ -1072,14 +1140,14 @@ pub async fn plan_for_task_status(
             }
         }
     }
-    deliver(ctx, planned, actor).await
+    deliver(graph, planned, actor).await
 }
 
 /// A task's assignee changed from `previous` to the one it has now: TaskAssigned to the new
 /// assignee (rule 7), never to `actor`, who made the change. An assignee cleared tells no one. It
 /// reads nothing but the task, and who succeeded the assignee when a successor took it over.
 pub async fn plan_for_assignee(
-    ctx: &Context,
+    graph: &ProjectGraph,
     task: &TaskView,
     previous: Option<EntityId>,
     actor: Option<EntityId>,
@@ -1103,7 +1171,7 @@ pub async fn plan_for_assignee(
         &originator,
         Why::Assignee,
     );
-    deliver(ctx, vec![assigned], actor).await
+    deliver(graph, vec![assigned], actor).await
 }
 
 /// A thread open on a highlight, as the plan for a step made of the highlight reads it: its first
@@ -1126,15 +1194,15 @@ struct OpenThread {
 /// informational): what routing finds is what it lists, and rule 14 tells nothing more of a comment
 /// to a party this list told of it. A message whose fields cannot be read is left out, rather than
 /// keep the step's people from hearing of the step. A step that is no highlight has none.
-async fn open_threads(ctx: &Context, highlight: EntityId, step: EntityId) -> Result<Vec<OpenThread>> {
-    let on_it = ops::messages_about(ctx, "anchor", highlight).await?;
+async fn open_threads(graph: &ProjectGraph, highlight: EntityId, step: EntityId) -> Result<Vec<OpenThread>> {
+    let on_it = ops::messages_about(graph, "anchor", highlight).await?;
     if on_it.is_empty() {
         return Ok(Vec::new());
     }
-    let principals = ops::principals(ctx).await?;
+    let principals = ops::principals(graph).await?;
     let mut threads = Vec::new();
     for m in &on_it {
-        if let Ok(Some(thread)) = open_thread(ctx, &principals, m, step).await {
+        if let Ok(Some(thread)) = open_thread(graph, &principals, m, step).await {
             threads.push(thread);
         }
     }
@@ -1145,7 +1213,7 @@ async fn open_threads(ctx: &Context, highlight: EntityId, step: EntityId) -> Res
 /// the first comment of the step whose relation is `step`, and none otherwise; of `principals`,
 /// the project's, whom it asks.
 async fn open_thread(
-    ctx: &Context,
+    graph: &ProjectGraph,
     principals: &[PrincipalView],
     m: &MessageView,
     step: EntityId,
@@ -1156,10 +1224,10 @@ async fn open_thread(
         return Ok(None);
     }
     let mut writers = vec![EntityId::from(m.author()?)];
-    for reply in ops::messages_about(ctx, "thread", m.id()).await? {
+    for reply in ops::messages_about(graph, "thread", m.id()).await? {
         writers.push(reply.author()?.into());
     }
-    let asks = asked_of(ctx, principals, &mc).await?.map(|a| a.recipient());
+    let asks = asked_of(graph, principals, &mc).await?.map(|a| a.recipient());
     Ok(Some(OpenThread { message: m.id(), writers, asks, at: m.created()?, priority: m.priority()? }))
 }
 
@@ -1178,16 +1246,16 @@ async fn open_thread(
 /// The notification is as urgent as the most urgent of the step and the threads it lists, as a
 /// digest is as urgent as its items, and names as its message the one message it lists, when it
 /// lists one ([`Batch::message_behind`]). No one hears of a relation they made.
-pub async fn plan_for_relation(ctx: &Context, rel: &RelationView) -> Result<Vec<Planned>> {
+pub async fn plan_for_relation(graph: &ProjectGraph, rel: &RelationView) -> Result<Vec<Planned>> {
     let (kind, status) = (rel.kind()?, rel.status()?);
     if kind == RelationKind::Mention {
-        return plan_for_edited_mention(ctx, rel).await;
+        return plan_for_edited_mention(graph, rel).await;
     }
     let creator: EntityId = rel.created_by()?.into();
     let originator = json!({"actor_id": creator.to_base64(), "relation_id": rel.id().to_base64()});
     let mut planned = Vec::new();
     if status == RelationStatus::Proposed {
-        for f in ops::triage_for_scopes(ctx, &relation_scopes(ctx, rel).await?).await? {
+        for f in ops::triage_for_scopes(graph, &relation_scopes(graph, rel).await?).await? {
             let proposed = Planned::new(
                 f.agent,
                 NotificationType::TaskProposed,
@@ -1199,26 +1267,24 @@ pub async fn plan_for_relation(ctx: &Context, rel: &RelationView) -> Result<Vec<
             planned.push(for_front_line(proposed, f));
         }
     } else if kind == RelationKind::StepOf && crate::rules::holds(kind, status) {
-        let task: EntityId = rel.to_id()?;
-        if let Ok(t) = ctx.get::<TaskView>(task).await {
+        if let Followed::Held { record: task, found: t, .. } = graph.follow::<TaskView>(rel.to_id()?).await? {
             let step = rel.from_id()?;
             let item = BatchItem::Step { relation: rel.id(), step, at: rel.created()? };
-            let threads = open_threads(ctx, step, rel.id()).await?;
-            let successors = if threads.is_empty() { None } else { Some(Successors::load(ctx).await?) };
+            let threads = open_threads(graph, step, rel.id()).await?;
             for party in [Some(EntityId::from(t.created_by()?)), ops::assignee_of(&t)?].into_iter().flatten() {
                 let mut batch = Batch::of_one(task, item);
                 let mut priority = Priority::Next;
-                if let Some(successors) = &successors {
+                if !threads.is_empty() {
                     // Whom the notification reaches: the party, or the last of its successors
                     // (D114). It is listed no thread that it, or a principal it succeeded, wrote
                     // in or is asked by, nor one it was told of already.
-                    let reached = successors.last(party);
-                    let theirs = |principal: EntityId| successors.last(principal) == reached;
-                    let told = told_messages(ctx, reached).await?;
+                    let reader = reached(graph, party).await?;
+                    let told = told_messages(graph, reader).await?;
                     for thread in &threads {
-                        let known = thread.writers.iter().any(|writer| theirs(*writer))
-                            || thread.asks.is_some_and(theirs)
-                            || told.contains(&thread.message);
+                        let mut known = told.contains(&thread.message);
+                        for principal in thread.writers.iter().chain(&thread.asks) {
+                            known = known || reached(graph, *principal).await? == reader;
+                        }
                         if !known {
                             batch.add(BatchItem::Thread { message: thread.message, at: thread.at });
                             priority = priority.min(thread.priority);
@@ -1242,17 +1308,17 @@ pub async fn plan_for_relation(ctx: &Context, rel: &RelationView) -> Result<Vec<
             }
         }
     }
-    deliver(ctx, planned, Some(creator)).await
+    deliver(graph, planned, Some(creator)).await
 }
 
-/// The scopes whose triage agents decide a proposed relation: the scopes the task at its `from` end
-/// is worked in (`ops::worked_in`), else those of the task at its `to` end; none when neither end is
-/// a task, or neither task is worked in a scope, when the triage agent that serves the whole project
-/// decides it.
-async fn relation_scopes(ctx: &Context, rel: &RelationView) -> Result<Vec<EntityId>> {
+/// The scopes whose triage agents decide a proposed relation, of whichever project: the scopes the
+/// task at its `from` end is worked in (`ops::worked_in`), else those of the task at its `to` end,
+/// which may be another project's; none when neither end is a task, or neither task is worked in a
+/// scope, when the triage agent that serves the relation's project whole decides it.
+async fn relation_scopes(graph: &ProjectGraph, rel: &RelationView) -> Result<Vec<EntityId>> {
     for end in [rel.from_id()?, rel.to_id()?] {
-        if ctx.get::<TaskView>(end).await.is_ok() {
-            let scopes = ops::worked_in(ctx, end).await?;
+        if let Followed::Held { record, .. } = graph.follow::<TaskView>(end).await? {
+            let scopes = ops::worked_in(graph, record).await?;
             if !scopes.is_empty() {
                 return Ok(scopes);
             }
@@ -1271,25 +1337,25 @@ async fn relation_scopes(ctx: &Context, rel: &RelationView) -> Result<Vec<Entity
 /// who mentioned them: the author, or an agent that succeeded the author
 /// (`rules::can_edit_message`), which the author's name would misattribute. Nothing else an edit
 /// does tells anyone.
-async fn plan_for_edited_mention(ctx: &Context, rel: &RelationView) -> Result<Vec<Planned>> {
+async fn plan_for_edited_mention(graph: &ProjectGraph, rel: &RelationView) -> Result<Vec<Planned>> {
     if !written_by_edit(rel) || rel.status()? != RelationStatus::Accepted {
         return Ok(vec![]);
     }
-    let (message, named) = (rel.from_id()?, rel.to_id()?);
-    let Ok(msg) = ctx.get::<MessageView>(message).await else { return Ok(vec![]) };
-    if ctx.get::<PrincipalView>(named).await.is_err() {
+    let message = rel.from_id()?;
+    let Ok(msg) = graph.get::<MessageView>(message).await else { return Ok(vec![]) };
+    let Followed::Held { record: named, .. } = graph.follow::<PrincipalView>(rel.to_id()?).await? else {
         return Ok(vec![]);
-    }
+    };
     let place = |r: &RelationView| (r.created().unwrap_or(0), ops::mention_ordinal(r));
-    let named_before = ops::relations_from(ctx, message, Some(RelationKind::Mention)).await?.iter().any(|r| {
+    let named_before = ops::relations_from(graph, message, Some(RelationKind::Mention)).await?.iter().any(|r| {
         r.id() != rel.id()
             && r.to_id().ok() == Some(named)
             && r.status().ok() == Some(RelationStatus::Accepted)
             && place(r) < place(rel)
     });
     // Told already: whoever it reaches now, the principal named or its successor (D114).
-    let reached = Successors::load(ctx).await?.last(named);
-    if named_before || told_of(ctx, reached, message).await? {
+    let reader = reached(graph, named).await?;
+    if named_before || told_of(graph, reader, message).await? {
         return Ok(vec![]);
     }
     let editor: EntityId = rel.created_by()?.into();
@@ -1303,7 +1369,7 @@ async fn plan_for_edited_mention(ctx: &Context, rel: &RelationView) -> Result<Ve
         &originator,
         Why::Mentioned,
     );
-    deliver(ctx, vec![mentioned], Some(editor)).await
+    deliver(graph, vec![mentioned], Some(editor)).await
 }
 
 /// Whether an edit of its message wrote this `mention` relation, rather than the post.
@@ -1314,15 +1380,16 @@ fn written_by_edit(rel: &RelationView) -> bool {
 
 /// Whether `recipient` has a notification that `message` caused, whatever its status
 /// ([`told_messages`]).
-async fn told_of(ctx: &Context, recipient: EntityId, message: EntityId) -> Result<bool> {
-    Ok(told_messages(ctx, recipient).await?.contains(&message))
+async fn told_of(graph: &ProjectGraph, recipient: EntityId, message: EntityId) -> Result<bool> {
+    Ok(told_messages(graph, recipient).await?.contains(&message))
 }
 
-/// The messages `recipient` has a notification of, whatever its status: each a notification names
-/// as its message, and each a batch holds among its items, a comment or a thread a step came with,
-/// since a batch names only one message (rule 10).
-async fn told_messages(ctx: &Context, recipient: EntityId) -> Result<HashSet<EntityId>> {
-    let theirs: Vec<NotificationView> = ctx.fetch(with_id("recipient = ?", recipient)?).await?;
+/// The messages `recipient` has a notification of in its project's inbox, whatever its status: each
+/// a notification names as its message, and each a batch holds among its items, a comment or a
+/// thread a step came with, since a batch names only one message (rule 10).
+async fn told_messages(graph: &ProjectGraph, recipient: EntityId) -> Result<HashSet<EntityId>> {
+    let theirs: Vec<NotificationView> =
+        inbox_graph(graph, recipient).await?.fetch(with_id("recipient = ?", recipient)?).await?;
     let mut told = HashSet::new();
     for n in &theirs {
         let originator: Value = n.originator().map(Into::into).unwrap_or(Value::Null);
@@ -1335,7 +1402,7 @@ async fn told_messages(ctx: &Context, recipient: EntityId) -> Result<HashSet<Ent
 /// A new decision: a proposal reaches the triage agent of the scope it governs (`ops::governs`),
 /// else the one that serves the whole project, and the project's people, who may accept or reject
 /// it; never its author. A ruling recorded as given notifies no one.
-pub async fn plan_for_decision_created(ctx: &Context, decision: &DecisionView) -> Result<Vec<Planned>> {
+pub async fn plan_for_decision_created(graph: &ProjectGraph, decision: &DecisionView) -> Result<Vec<Planned>> {
     let author: EntityId = decision.author()?.into();
     if decision.status()? != DecisionStatus::Proposed {
         return Ok(vec![]);
@@ -1352,20 +1419,20 @@ pub async fn plan_for_decision_created(ctx: &Context, decision: &DecisionView) -
         )
     };
     let mut planned = Vec::new();
-    if let Some(f) = ops::triage_for(ctx, ops::governs(decision)?).await? {
+    if let Some(f) = ops::triage_for(graph, ops::governs(decision)?).await? {
         planned.push(for_front_line(proposed(f.agent, Why::Triage), f));
     }
-    for person in ops::people(ctx).await? {
+    for person in ops::people(graph).await? {
         planned.push(proposed(person, Why::Person));
     }
-    deliver(ctx, planned, Some(author)).await
+    deliver(graph, planned, Some(author)).await
 }
 
 /// A decision repealed or superseded: the authors of everything that cites it (tasks, messages
 /// and decisions resting on the ruling) are told, since each needs re-justifying; never whoever
 /// moved it. This is the inbox side of the retraction audit.
 pub async fn plan_for_decision_status(
-    ctx: &Context,
+    graph: &ProjectGraph,
     decision: &DecisionView,
     previous: DecisionStatus,
     actor: Option<EntityId>,
@@ -1392,12 +1459,12 @@ pub async fn plan_for_decision_status(
         originator["message_id"] = json!(EntityId::from(reason).to_base64());
     }
     let mut planned = Vec::new();
-    for rel in ops::relations_to(ctx, decision.id(), Some(RelationKind::Cites)).await? {
+    for rel in ops::relations_to(graph, decision.id(), Some(RelationKind::Cites)).await? {
         if !ops::standing(&rel) {
             continue;
         }
         let citing: EntityId = rel.from_id()?;
-        if let Some(author) = ops::author_of(ctx, citing).await? {
+        if let Some(author) = ops::author_of(graph, citing).await? {
             let told = Planned::new(
                 author,
                 notification_type,
@@ -1409,7 +1476,7 @@ pub async fn plan_for_decision_status(
             planned.push(told.naming("citing_id", citing));
         }
     }
-    deliver(ctx, planned, actor).await
+    deliver(graph, planned, actor).await
 }
 
 /// How far, in milliseconds, the clock of whoever made an item may run ahead of the daemon's for
@@ -1421,23 +1488,25 @@ const CLOCK_SLACK_MS: i64 = 10 * 60 * 1000;
 const ITEM_KEYS: &[&str] =
     &["message_id", "task_id", "anchor_id", "scope_id", "decision_id", "relation_id", "step_task_id"];
 
-/// Makes the planned notifications. A plan carrying a batch of one item (a step added, with the
-/// threads it came with, or a comment on a task or on a step's highlight) joins the batch its
-/// recipient already holds unread from the same author about the same task, and makes a
+/// Makes the planned notifications, each in its recipient's project, whose inbox lists it, whichever
+/// project's record caused it ([`inbox_graph`]). A plan carrying a batch of one item (a step added,
+/// with the threads it came with, or a comment on a task or on a step's highlight) joins the batch
+/// its recipient already holds unread from the same author about the same task, and makes a
 /// notification only when there is none (rule 10); reading or dismissing that batch ends it, so the
 /// next item starts another. Answers the notifications made or joined.
-pub async fn apply(ctx: &Context, planned: &[Planned]) -> Result<Vec<EntityId>> {
+pub async fn apply(graph: &ProjectGraph, planned: &[Planned]) -> Result<Vec<EntityId>> {
     let mut ids = Vec::new();
     for p in planned {
+        let inbox = inbox_graph(graph, p.recipient).await?;
         let joined = match batch_of(&p.originator) {
-            Some(batch) => join(ctx, p, batch).await?,
+            Some(batch) => join(&inbox, p, batch).await?,
             None => None,
         };
         let id = match joined {
             Some(id) => id,
             None => {
                 ops::create_notification(
-                    ctx,
+                    &inbox,
                     p.recipient,
                     p.notification_type,
                     p.priority,
@@ -1457,7 +1526,7 @@ pub async fn apply(ctx: &Context, planned: &[Planned]) -> Result<Vec<EntityId>> 
 /// already, so an item routed twice is held once; else the batch the recipient holds unread from
 /// the same author about the same task, which it joins with its threads, and which becomes a
 /// `Digest` of them all. None when there is neither.
-async fn join(ctx: &Context, p: &Planned, planned: Batch) -> Result<Option<EntityId>> {
+async fn join(graph: &ProjectGraph, p: &Planned, planned: Batch) -> Result<Option<EntityId>> {
     let Some(&item) = planned.items.iter().find(|i| !matches!(i, BatchItem::Thread { .. })) else {
         return Ok(None);
     };
@@ -1467,7 +1536,7 @@ async fn join(ctx: &Context, p: &Planned, planned: Batch) -> Result<Option<Entit
     let since = item.at() - CLOCK_SLACK_MS;
     let predicate = format!("recipient = ? AND (status = 'unread' OR created >= {since} OR updated >= {since})");
     let mut open: Option<(NotificationView, Value, Batch)> = None;
-    for n in ctx.fetch::<NotificationView>(with_id(&predicate, p.recipient)?).await? {
+    for n in graph.fetch::<NotificationView>(with_id(&predicate, p.recipient)?).await? {
         let originator: Value = n.originator()?.into();
         let Some(batch) = batch_of(&originator).filter(|b| b.task == planned.task) else { continue };
         if originator.get("actor_id") != actor {
@@ -1503,7 +1572,7 @@ async fn join(ctx: &Context, p: &Planned, planned: Batch) -> Result<Option<Entit
     originator["batch"] = batch.to_json();
     // The most urgent of its items' priorities.
     let priority = n.priority()?.min(p.priority);
-    ops::update_notification(ctx, &n, NotificationType::Digest, priority, target("Task", batch.task), originator)
+    ops::update_notification(graph, &n, NotificationType::Digest, priority, target("Task", batch.task), originator)
         .await?;
     Ok(Some(n.id()))
 }

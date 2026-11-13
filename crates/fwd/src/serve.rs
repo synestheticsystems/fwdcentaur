@@ -1,13 +1,20 @@
 //! `fwd daemon serve`: the daemon side of the contract. The CLI re-executes its own binary with
 //! this hidden subcommand (tmux, watchman, sccache and Caddy do the same), so there is one
 //! artifact to install and client and daemon are always the same build. One daemon per OS user
-//! hosts a durable node for every project in the index. See docs/design/daemon.md.
+//! keeps every project in the index in one durable node and one store (docs/DECISIONS.md, D135),
+//! where each record names its project, and hosts each project by its graph over that node
+//! (`fwd_core::project_graph`). See docs/design/daemon.md.
 //!
 //! Besides each project's Ankurah WebSocket, the listener carries local-control routes (the
 //! health check, the project list, each project's checkout registry, stop), the MCP endpoint at
 //! `/mcp` (crates/fwd/src/mcp.rs), and the web UI's files. None of the control routes is a data
 //! path: every read and write of a graph goes through Ankurah, the MCP endpoint's through the
-//! daemon's own durable node, by the same operations the CLI's commands run.
+//! project's graph over the daemon's own durable node, by the same operations the CLI's commands
+//! run. Every project's socket joins the one node, and its path names the project its client
+//! works in (`fwd_core::daemon_socket`); nothing at the socket keeps a client to that project yet,
+//! which Ankurah's policy hooks are to do (docs/design/daemon.md, "Projects in one node"). A
+//! client built for the daemons that kept a store per project, whose reads name no project, is
+//! refused at the path those daemons served their sockets at.
 //!
 //! Who may talk to it: the daemon listens on loopback unless the person chose the LAN
 //! (`daemon.toml`). Every request must carry one of the daemon's own `Host` names and, when a
@@ -24,7 +31,7 @@ use ankurah::policy::DEFAULT_CONTEXT;
 use ankurah::{Context as NodeContext, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use ankurah_websocket_server::WebsocketServer;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::{ConnectInfo, Path as RoutePath, Request, State};
 use axum::handler::Handler;
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
@@ -32,13 +39,14 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, routing::post, Json, Router};
 use fwd_core::daemon::{try_lock, write_port_file, Bind, CheckoutRecord, DaemonConfig, HostedProject, PortFile};
-use fwd_core::project::{self, Index, Paths, Project};
+use fwd_core::daemon_socket;
+use fwd_core::project::{self, Index, NamedProject, Paths};
+use fwd_core::project_graph::{NodeGraph, ProjectGraph};
 use include_dir::{include_dir, Dir};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fs::File;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -60,10 +68,12 @@ struct AppState {
     paths: Arc<Paths>,
     shutdown: Arc<Notify>,
     info: Arc<PortFile>,
+    /// The node that holds every project.
+    node: Arc<DaemonNode>,
     /// Every project in the index, open or with the reason it could not open.
     projects: Arc<RwLock<BTreeMap<Uuid, Slot>>>,
-    /// Held while a project opens after start, so two requests for one project never open its
-    /// database twice.
+    /// Held while a project opens after start, so two requests for one project never make its
+    /// record twice.
     opening: Arc<tokio::sync::Mutex<()>>,
     allowed: Arc<RwLock<Allowed>>,
     /// The daemon's dev-runner entry: its status file counts the projects open, including those
@@ -75,6 +85,7 @@ impl AppState {
     fn new(
         paths: &Paths,
         info: Arc<PortFile>,
+        node: Arc<DaemonNode>,
         projects: BTreeMap<Uuid, Slot>,
         dev_runner: Arc<dev_runner::Entry>,
     ) -> AppState {
@@ -83,6 +94,7 @@ impl AppState {
             shutdown: Arc::new(Notify::new()),
             allowed: Arc::new(RwLock::new(Allowed::list(info.bind, info.port))),
             info,
+            node,
             projects: Arc::new(RwLock::new(projects)),
             opening: Arc::new(tokio::sync::Mutex::new(())),
             dev_runner,
@@ -174,7 +186,7 @@ fn webview_origin(origin: &str) -> bool {
 
 enum Slot {
     Open(Arc<Hosted>),
-    Failed { project: Project, error: String },
+    Failed { project: NamedProject, error: String },
 }
 
 impl Slot {
@@ -190,25 +202,85 @@ impl Slot {
     }
 }
 
-/// Upgrades a request to one project's Ankurah WebSocket.
+/// Upgrades a request to the daemon's Ankurah WebSocket.
 type Socket = Box<dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
 
-/// One project the daemon hosts: its durable node with the routing service over it, the socket
-/// clients join it through, the checkouts of it seen on this machine, and its `<uuid>.lock`.
-struct Hosted {
-    project: Project,
-    socket: Socket,
-    registry: Mutex<Registry>,
-    registry_path: PathBuf,
-    /// `<uuid>.lock` in the runtime directory, held while the node runs. An `fwd` from before one
-    /// daemon hosted every project spawns a daemon of its own for a project whose `<uuid>.lock`
-    /// it finds free, and that daemon would open the same database as a second durable node.
-    lock: File,
-    /// A context on the project's durable node, which the MCP endpoint runs its calls through.
+/// The daemon's one durable node, over the store that holds every project's records, the socket
+/// every project's clients join it through, and the one routing service, which tells whoever a
+/// change in any project concerns (docs/DECISIONS.md, D177).
+struct DaemonNode {
+    /// A context on the node, from which each hosted project's graph is made.
     ctx: NodeContext,
+    socket: Socket,
     _routing: services::Routing,
     _node: Node<SqliteStorageEngine, PermissiveAgent>,
 }
+
+impl DaemonNode {
+    /// Opens the node over `store` (made on first use), with its Ankurah system (created on first
+    /// use), starts the routing service over every project's records in it, and readies the
+    /// socket clients join it through. Runs under the lifetime lock.
+    async fn open(store: SqliteStorageEngine) -> Result<DaemonNode> {
+        let node = Node::new_durable(Arc::new(store), PermissiveAgent::new());
+        node.system.wait_loaded().await?;
+        if node.system.root().is_none() {
+            info!("creating the Ankurah system");
+            node.system.create().await?;
+        }
+        node.system.wait_system_ready().await.map_err(|e| anyhow!("the Ankurah system did not become ready: {e}"))?;
+        let ctx = node.context_async(DEFAULT_CONTEXT).await?;
+        let routing = services::start(NodeGraph::new(ctx.clone())).await.context("starting the routing service")?;
+        let upgrade = WebsocketServer::new(node.clone()).route_handler();
+        let socket: Socket = Box::new(move |req| {
+            let upgrade = upgrade.clone();
+            Box::pin(async move { upgrade.call(req, ()).await })
+        });
+        Ok(DaemonNode { ctx, socket, _routing: routing, _node: node })
+    }
+}
+
+/// One project the daemon hosts: its graph over the daemon's node, and the checkouts of it seen
+/// on this machine.
+struct Hosted {
+    project: NamedProject,
+    registry: Mutex<Registry>,
+    registry_path: PathBuf,
+    /// The project's graph, which the MCP endpoint runs its calls through.
+    graph: ProjectGraph,
+}
+
+/// Why the daemon does not host a project whose records are still in a store of the project's
+/// own, from before the daemon kept every project in one store: it would show the project empty
+/// over records it cannot see, and the two would part from then on.
+#[derive(Debug, thiserror::Error)]
+#[error("project {name}'s records are still in a store of its own, {}, which this build of fwd does not read; {MOVE_THEM}", .store.display())]
+struct Unmoved {
+    name: String,
+    store: PathBuf,
+}
+
+/// Refuses to start over a data folder whose every project still has its records in a store of its
+/// own and which has no store of the daemon's yet: the store the daemon would make there could host
+/// none of them, and the folder is left as the per-project build wrote it, for that build or for
+/// fwd-store-merge.
+fn refuse_a_folder_not_moved(paths: &Paths, index: &Index) -> Result<()> {
+    if paths.store_path().exists() || index.projects.is_empty() {
+        return Ok(());
+    }
+    let unmoved: Vec<PathBuf> =
+        index.projects.iter().filter_map(|entry| paths.unmoved_store(&NamedProject::from(entry))).collect();
+    if unmoved.len() < index.projects.len() {
+        return Ok(());
+    }
+    bail!(
+        "every project's records are still in a store of its own ({}), and this build of fwd does not read those; {MOVE_THEM}",
+        unmoved.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// What brings a project's own store into the daemon's one store, for the refusals here to name.
+const MOVE_THEM: &str = "it opens once fwd-store-merge has moved every project's store into the daemon's one store \
+    (crates/fwd-store-merge/README.md says how to switch a machine over)";
 
 /// The checkouts of a project seen on this machine: local-only, persisted beside the database so
 /// it survives a restart, refreshed from git when a client reports.
@@ -230,14 +302,14 @@ pub async fn serve(paths: Paths) -> Result<()> {
     paths.ensure()?;
 
     // The lifetime lock is held for the whole run; a second daemon exits quietly (its launcher
-    // connects to the winner). Only under it may a project's storage move or its database open.
+    // connects to the winner). Only under it may the store open.
     let Some(lifetime) = try_lock(&paths.lifetime_lock())? else {
         info!("another daemon holds the lifetime lock; exiting");
         return Ok(());
     };
-    retire_per_project_files(&paths);
     let config = DaemonConfig::load(&paths)?;
     let index = Index::load(&paths)?;
+    refuse_a_folder_not_moved(&paths, &index)?;
 
     // The daemon's dev-runner entry, first cleared of what a crashed daemon for this data directory
     // left. Only under the lifetime lock: without it, those files could be a running daemon's.
@@ -245,10 +317,12 @@ pub async fn serve(paths: Paths) -> Result<()> {
     dev_runner.clear();
     dev_runner.starting();
 
+    let store = SqliteStorageEngine::open(paths.store_path()).await.context("opening the daemon's store")?;
+    let node = Arc::new(DaemonNode::open(store).await?);
     let mut projects = BTreeMap::new();
     for entry in &index.projects {
-        let project = Project::from(entry);
-        projects.insert(project.id, open_slot(&paths, project).await);
+        let project = NamedProject::from(entry);
+        projects.insert(project.id, open_slot(&paths, &node, project).await);
     }
 
     let listener = listen(config.bind, config.port).await?;
@@ -268,9 +342,8 @@ pub async fn serve(paths: Paths) -> Result<()> {
 
     let hosted = projects.len();
     let open = open_projects(&projects);
-    let state = AppState::new(&paths, info.clone(), projects, dev_runner.clone());
+    let state = AppState::new(&paths, info.clone(), node, projects, dev_runner.clone());
     let shutdown = state.shutdown.clone();
-    let projects = state.projects.clone();
     let app = router(state);
 
     write_port_file(&paths.port_file(), &info)?;
@@ -302,21 +375,11 @@ pub async fn serve(paths: Paths) -> Result<()> {
     let _ = std::fs::remove_file(paths.port_file());
     dev_runner.clear();
     info!("daemon exiting");
-    // Sockets that were upgraded before the stop keep their project's node open until the
-    // runtime shuts down, after this returns. The locks therefore stay held until the process
-    // exits (the operating system releases them then): the lifetime lock, so a new daemon never
-    // opens a database this one still has open, and every hosted project's `<uuid>.lock`, so a
-    // per-project daemon from an earlier build does not either. A project's lock is a file
-    // descriptor in its `Hosted`, which drops before the runtime does; a second descriptor for
-    // the same open file keeps the lock, and is never closed.
+    // Sockets that were upgraded before the stop keep the node, and the store under it, open until
+    // the runtime shuts down, after this returns. The lifetime lock therefore stays held until the
+    // process exits (the operating system releases it then), so a new daemon never opens the
+    // store while this one still has it open.
     std::mem::forget(lifetime);
-    for slot in projects.read().expect("projects lock").values() {
-        if let Slot::Open(hosted) = slot {
-            if let Ok(descriptor) = hosted.lock.try_clone() {
-                std::mem::forget(descriptor);
-            }
-        }
-    }
     result.map_err(Into::into)
 }
 
@@ -327,9 +390,10 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/projects", get(projects_list).merge(post(projects_open).route_layer(control())))
-        // A project's Ankurah socket. Ankurah's connectors take a base URL and append `/ws`, so
-        // the project is named in the path before it.
-        .route("/p/{project}/ws", get(project_socket))
+        // A project's Ankurah socket, at the base path every client builds with the project's id
+        // (here the route's capture in its place) and the `/ws` Ankurah's connectors append.
+        .route(&format!("{}/ws", daemon_socket::base_path("{project}")), get(project_socket))
+        .route(PER_PROJECT_SOCKET, get(refuse_older_client))
         .route("/p/{project}/checkouts", get(checkouts_list).post(checkouts_report).route_layer(control()))
         .route("/webview-origins", post(admit_webview).route_layer(control()))
         .route("/stop", post(stop).route_layer(control()))
@@ -389,13 +453,13 @@ impl mcp::Hosting for AppState {
         list
     }
 
-    fn open(&self, id: Uuid) -> Option<(Project, NodeContext)> {
+    fn open(&self, id: Uuid) -> Option<(NamedProject, ProjectGraph)> {
         let hosted = hosted(self, id)?;
         let mut project = hosted.project.clone();
         if let Some(name) = mcp::Hosting::projects(self).into_iter().find(|p| p.0 == id).map(|p| p.1) {
             project.name = name;
         }
-        Some((project, hosted.ctx.clone()))
+        Some((project, hosted.graph.clone()))
     }
 }
 
@@ -477,50 +541,8 @@ fn local_name() -> Option<String> {
     None
 }
 
-/// Before one daemon hosted every project, each project had a daemon of its own, with
-/// `<uuid>.lock`, `<uuid>.ws` and `<uuid>.bootstrap.lock` in the runtime directory. The port
-/// files and bootstrap locks left behind go. The `<uuid>.lock` files stay: `open_project` takes
-/// each hosted project's lock and holds it, so an `fwd` from an earlier build finds it held
-/// instead of spawning a daemon of its own on the same database. The files of such a daemon that
-/// still runs (an earlier build, holding its `<uuid>.lock`) stay too, and so does its project:
-/// `open_project` refuses it while that daemon has the database open.
-fn retire_per_project_files(paths: &Paths) {
-    let Ok(entries) = std::fs::read_dir(&paths.runtime_dir) else { return };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some((id, rest)) = name.split_once('.') else { continue };
-        let Ok(id) = Uuid::parse_str(id) else { continue };
-        if rest == "lock" {
-            continue;
-        }
-        match earlier_daemon_holds(paths, id) {
-            Ok(false) => {
-                let _ = std::fs::remove_file(entry.path());
-            }
-            Ok(true) => {}
-            Err(e) => warn!("could not check {}: {e:#}", entry.path().display()),
-        }
-    }
-}
-
-/// True while a per-project daemon from an earlier build still holds `<uuid>.lock`: it has the
-/// project's database open. Asked at start, before this daemon holds any project's lock.
-fn earlier_daemon_holds(paths: &Paths, id: Uuid) -> Result<bool> {
-    let lock = project_lock(paths, id);
-    if !lock.exists() {
-        return Ok(false);
-    }
-    Ok(try_lock(&lock)?.is_none())
-}
-
-/// `<uuid>.lock` in the runtime directory: the lifetime lock of the per-project daemons that
-/// came before, which this daemon holds for every project it hosts.
-fn project_lock(paths: &Paths, id: Uuid) -> PathBuf {
-    paths.runtime_dir.join(format!("{id}.lock"))
-}
-
-async fn open_slot(paths: &Paths, project: Project) -> Slot {
-    match open_project(paths, &project).await {
+async fn open_slot(paths: &Paths, node: &DaemonNode, project: NamedProject) -> Slot {
+    match host_project(paths, node, &project).await {
         Ok(hosted) => {
             info!("hosting project {} ({})", project.name, project.id);
             Slot::Open(Arc::new(hosted))
@@ -539,57 +561,19 @@ fn open_projects(projects: &BTreeMap<Uuid, Slot>) -> usize {
     projects.values().filter(|slot| matches!(slot, Slot::Open(_))).count()
 }
 
-/// Opens one project's durable node: its `<uuid>.lock` (held until the node closes), its SQLite
-/// database (moved out of the pre-2026-09-25 layout first when needed), its Ankurah system
-/// (created on first use), the routing service over it, and its checkout registry. Runs under
-/// the lifetime lock.
-async fn open_project(paths: &Paths, project: &Project) -> Result<Hosted> {
-    // A per-project daemon from an earlier build that holds the lock has the database open.
-    let Some(lock) = try_lock(&project_lock(paths, project.id))? else {
-        let pid = std::fs::read_to_string(paths.runtime_dir.join(format!("{}.ws", project.id)))
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|v| v["pid"].as_u64());
-        let stop = match pid {
-            Some(pid) => format!(" (pid {pid}); stop it with `kill {pid}`"),
-            None => "; stop it".to_string(),
-        };
-        return Err(anyhow!(
-            "a daemon from an earlier build of fwd still has this project open{stop}, then run any fwd command in the project and this daemon opens it"
-        ));
-    };
-    paths.migrate_legacy(project)?;
-    std::fs::create_dir_all(paths.storage_dir(project))?;
-    let storage = SqliteStorageEngine::open(paths.db_path(project)).await.context("opening the project database")?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.wait_loaded().await?;
-    if node.system.root().is_none() {
-        info!("creating the Ankurah system for project {} ({})", project.name, project.id);
-        node.system.create().await?;
+/// Hosts one project over the daemon's node: its record found, or made on first use, its graph,
+/// and its checkout registry. The node's one routing service routes its records from the moment
+/// the record exists. A project whose records are still in a store of its own is refused
+/// ([`Unmoved`]).
+async fn host_project(paths: &Paths, node: &DaemonNode, project: &NamedProject) -> Result<Hosted> {
+    if let Some(store) = paths.unmoved_store(project) {
+        return Err(Unmoved { name: project.name.clone(), store }.into());
     }
-    node.system
-        .wait_system_ready()
-        .await
-        .map_err(|e| anyhow!("the project's Ankurah system did not become ready: {e}"))?;
-    let routing = services::start(node.clone()).await.context("starting the routing service")?;
-    let ctx = node.context_async(DEFAULT_CONTEXT).await?;
+    std::fs::create_dir_all(paths.storage_dir(project))?;
+    let graph = ProjectGraph::ensure(node.ctx.clone(), project.id, &project.name).await?;
     let registry_path = paths.checkouts_path(project);
     let registry = Registry { checkouts: load_registry(&registry_path)?, expanded: HashMap::new() };
-    let upgrade = WebsocketServer::new(node.clone()).route_handler();
-    let socket: Socket = Box::new(move |req| {
-        let upgrade = upgrade.clone();
-        Box::pin(async move { upgrade.call(req, ()).await })
-    });
-    Ok(Hosted {
-        project: project.clone(),
-        socket,
-        registry: Mutex::new(registry),
-        registry_path,
-        lock,
-        ctx,
-        _routing: routing,
-        _node: node,
-    })
+    Ok(Hosted { project: project.clone(), registry: Mutex::new(registry), registry_path, graph })
 }
 
 fn not_found() -> Response {
@@ -735,7 +719,7 @@ async fn projects_open(State(state): State<AppState>, Json(request): Json<OpenRe
         let error = format!("no project has the id {} in {}", request.id, state.paths.index_path().display());
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": error }))).into_response();
     };
-    let slot = open_slot(&state.paths, Project::from(&entry)).await;
+    let slot = open_slot(&state.paths, &state.node, NamedProject::from(&entry)).await;
     let report = slot.report();
     state.projects.write().expect("projects lock").insert(request.id, slot);
     if report.error.is_none() {
@@ -764,9 +748,29 @@ async fn project_socket(
     req: Request,
 ) -> Response {
     match hosted(&state, path.project) {
-        Some(hosted) => (hosted.socket)(req).await,
+        Some(_) => (state.node.socket)(req).await,
         None => not_found(),
     }
+}
+
+/// The path at which the daemons that kept a store per project served each project's socket, and
+/// at which a client built for them still asks for it.
+const PER_PROJECT_SOCKET: &str = "/p/{project}/ws";
+
+/// What such a client is told, whatever project it names.
+const OLDER_CLIENT_REFUSAL: &str =
+    "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's.\n";
+
+/// Refuses a client built for the daemons that kept a store per project, which would read every
+/// project's records here (`fwd_core::daemon_socket` says how). `410 Gone`, since that socket is
+/// gone from this path for good, unlike the socket's `404` for a project the daemon does not host.
+/// No status stops those clients sooner, since none of them reads it: a command's Ankurah client
+/// fails its first attempt on any answer but `101` and the command ends with it, a `fwd watch`
+/// that was running keeps trying, at most every 30 s, until its ten-minute outage limit ends it,
+/// and a page's browser hides the answer from it while its connector tries again, at most every
+/// 10 s.
+async fn refuse_older_client() -> Response {
+    (StatusCode::GONE, OLDER_CLIENT_REFUSAL).into_response()
 }
 
 /// The project's registry, minus checkouts whose directory is gone (a deleted worktree simply
@@ -975,12 +979,14 @@ mod tests {
     const PHONE: [u8; 4] = [192, 168, 1, 20];
     const THIS_MACHINE: [u8; 4] = [127, 0, 0, 1];
 
-    /// The state of a daemon that hosts no project.
-    fn state(dir: &Path, bind: Bind) -> AppState {
+    /// The state of a daemon that hosts no project, over a store in memory.
+    async fn state(dir: &Path, bind: Bind) -> AppState {
         let paths = Paths { runtime_dir: dir.join("run"), data_dir: dir.join("data") };
         let info = PortFile { port: PORT, pid: std::process::id(), instance_id: "test".into(), started: 0, bind };
         let dev_runner = dev_runner::Entry::new(Some(dir.join("dev-runner")), &paths.data_dir);
-        AppState::new(&paths, Arc::new(info), BTreeMap::new(), Arc::new(dev_runner))
+        let store = SqliteStorageEngine::open_in_memory().await.expect("a store in memory");
+        let node = DaemonNode::open(store).await.expect("the daemon's node");
+        AppState::new(&paths, Arc::new(info), Arc::new(node), BTreeMap::new(), Arc::new(dev_runner))
     }
 
     /// The daemon's router, with every request arriving from `peer`.
@@ -1016,7 +1022,7 @@ mod tests {
     async fn stop_answers_only_a_peer_on_this_machine() {
         let dir = tempfile::tempdir().expect("a temp dir");
         // Naming 127.0.0.1 as the host passes the host check; the peer's address decides.
-        let from_the_phone = app(state(dir.path(), Bind::Lan), PHONE);
+        let from_the_phone = app(state(dir.path(), Bind::Lan).await, PHONE);
         assert_eq!(send(&from_the_phone, request(Method::POST, "/stop", HERE)).await.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             send(&from_the_phone, request(Method::POST, "/projects", HERE)).await.status(),
@@ -1026,7 +1032,7 @@ mod tests {
         assert_eq!(send(&from_the_phone, request(Method::GET, &checkouts, HERE)).await.status(), StatusCode::FORBIDDEN);
         assert_eq!(register(&from_the_phone, "vscode-webview://abc").await, StatusCode::FORBIDDEN);
 
-        let from_here = app(state(dir.path(), Bind::Lan), THIS_MACHINE);
+        let from_here = app(state(dir.path(), Bind::Lan).await, THIS_MACHINE);
         assert_eq!(send(&from_here, request(Method::POST, "/stop", HERE)).await.status(), StatusCode::OK);
     }
 
@@ -1043,9 +1049,9 @@ mod tests {
             app.oneshot(request.body(body()).expect("a request")).await.expect("the router answers").status()
         };
         // The endpoint asks for no login, so a LAN bind must not expose it.
-        let from_the_phone = app(state(dir.path(), Bind::Lan), PHONE);
+        let from_the_phone = app(state(dir.path(), Bind::Lan).await, PHONE);
         assert_eq!(answer(from_the_phone, list()).await, StatusCode::FORBIDDEN);
-        let from_here = app(state(dir.path(), Bind::Loopback), THIS_MACHINE);
+        let from_here = app(state(dir.path(), Bind::Loopback).await, THIS_MACHINE);
         for origin in ["http://127.0.0.1:4242", "https://evil.example", "null"] {
             assert_eq!(
                 answer(from_here.clone(), list().header(header::ORIGIN, origin)).await,
@@ -1059,7 +1065,7 @@ mod tests {
     #[tokio::test]
     async fn the_control_routes_refuse_every_web_page_the_daemons_own_and_a_webviews_included() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let state = state(dir.path(), Bind::Loopback);
+        let state = state(dir.path(), Bind::Loopback).await;
         let app = app(state.clone(), THIS_MACHINE);
         assert_eq!(register(&app, "vscode-webview://ours").await, StatusCode::OK);
         let checkouts = format!("/p/{}/checkouts", Uuid::nil());
@@ -1088,7 +1094,7 @@ mod tests {
     #[tokio::test]
     async fn only_a_webview_origin_is_registered_and_the_oldest_goes_first() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let state = state(dir.path(), Bind::Loopback);
+        let state = state(dir.path(), Bind::Loopback).await;
         let app = app(state.clone(), THIS_MACHINE);
         for not_one in [
             "https://evil.example",
@@ -1116,9 +1122,9 @@ mod tests {
     #[tokio::test]
     async fn a_socket_upgrade_from_another_sites_page_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let app = app(state(dir.path(), Bind::Loopback), THIS_MACHINE);
+        let app = app(state(dir.path(), Bind::Loopback).await, THIS_MACHINE);
         let upgrade = |origin: Option<&str>| {
-            let request = request(Method::GET, &format!("/p/{}/ws", Uuid::nil()), HERE)
+            let request = request(Method::GET, &format!("{}/ws", daemon_socket::base_path(Uuid::nil())), HERE)
                 .header(header::CONNECTION, "Upgrade")
                 .header(header::UPGRADE, "websocket")
                 .header(header::SEC_WEBSOCKET_VERSION, "13")
@@ -1139,10 +1145,76 @@ mod tests {
         assert_eq!(send(&app, upgrade(Some("vscode-webview://other"))).await.status(), StatusCode::FORBIDDEN);
     }
 
+    /// One socket upgrade to `path`, sent as Ankurah's clients send it over a real connection to
+    /// the listener on `port`, so that an upgrade can succeed: the answer's status line, and its
+    /// body (none when the socket opened).
+    async fn upgrade_over_tcp(port: u16, path: &str) -> (String, String) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let connection = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("a connection");
+        let mut answer = BufReader::new(connection);
+        let head = format!(
+            "GET {path} HTTP/1.1\r\nHost: {HERE}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        answer.get_mut().write_all(head.as_bytes()).await.expect("the request is sent");
+        let mut status = String::new();
+        answer.read_line(&mut status).await.expect("a status line");
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            answer.read_line(&mut line).await.expect("a header");
+            match line.split_once(':') {
+                _ if line == "\r\n" => break,
+                Some((name, value)) if name.eq_ignore_ascii_case("content-length") => {
+                    length = value.trim().parse().expect("a length");
+                }
+                _ => {}
+            }
+        }
+        let mut body = vec![0; length];
+        answer.read_exact(&mut body).await.expect("the body");
+        (status.trim_end().to_string(), String::from_utf8(body).expect("a text body"))
+    }
+
+    /// A client built for the daemons that kept a store per project asks for its socket where
+    /// those daemons served it, and is refused with `410 Gone` and the sentence saying why,
+    /// whatever project it names, so that it never reads the one store; a client of this build
+    /// asks where `fwd_core::daemon_socket` says, and its socket opens.
+    #[tokio::test]
+    async fn an_older_client_is_refused_at_the_per_project_socket_and_this_builds_socket_opens() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let state = state(dir.path(), Bind::Loopback).await;
+        let project = NamedProject { id: Uuid::new_v4(), name: "test".into() };
+        let hosted = host_project(&state.paths, &state.node, &project).await.expect("the project is hosted");
+        state.projects.write().expect("projects lock").insert(project.id, Slot::Open(Arc::new(hosted)));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("a listener");
+        let port = listener.local_addr().expect("the listener's address").port();
+        // The peer's address as `serve` gives it, which Ankurah's upgrade reads from the request
+        // itself, where `MockConnectInfo` puts nothing.
+        let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        for named in [project.id, Uuid::nil()] {
+            assert_eq!(
+                upgrade_over_tcp(port, &format!("/p/{named}/ws")).await,
+                (
+                    "HTTP/1.1 410 Gone".to_string(),
+                    "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's.\n"
+                        .to_string()
+                )
+            );
+        }
+        assert_eq!(
+            upgrade_over_tcp(port, &format!("{}/ws", daemon_socket::base_path(project.id))).await,
+            ("HTTP/1.1 101 Switching Protocols".to_string(), String::new())
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn only_the_webview_the_extension_registered_may_read_the_daemon() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let app = app(state(dir.path(), Bind::Loopback), THIS_MACHINE);
+        let app = app(state(dir.path(), Bind::Loopback).await, THIS_MACHINE);
         let get =
             |path: &str, origin: &str, host: &str| request(Method::GET, path, host).header(header::ORIGIN, origin);
         let allowed_origin = |response: &Response| response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).cloned();
@@ -1176,7 +1248,7 @@ mod tests {
     #[tokio::test]
     async fn the_health_check_names_the_build() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let app = app(state(dir.path(), Bind::Loopback), THIS_MACHINE);
+        let app = app(state(dir.path(), Bind::Loopback).await, THIS_MACHINE);
         let response = send(&app, request(Method::GET, "/health", HERE)).await;
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("the answer's body");
         let health: serde_json::Value = serde_json::from_slice(&body).expect("the answer is JSON");
@@ -1187,7 +1259,7 @@ mod tests {
     #[tokio::test]
     async fn a_request_for_another_host_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let app = app(state(dir.path(), Bind::Loopback), THIS_MACHINE);
+        let app = app(state(dir.path(), Bind::Loopback).await, THIS_MACHINE);
         assert_eq!(
             send(&app, request(Method::GET, "/health", "evil.example:4242")).await.status(),
             StatusCode::FORBIDDEN
@@ -1200,7 +1272,7 @@ mod tests {
     #[tokio::test]
     async fn no_other_site_may_frame_the_page() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let app = app(state(dir.path(), Bind::Loopback), THIS_MACHINE);
+        let app = app(state(dir.path(), Bind::Loopback).await, THIS_MACHINE);
         for path in ["/", "/index.html", "/no-such-file.js"] {
             let response = send(&app, request(Method::GET, path, HERE)).await;
             let headers = response.headers();
@@ -1216,8 +1288,8 @@ mod tests {
     #[tokio::test]
     async fn the_project_list_names_projects_as_the_index_does_now() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let state = state(dir.path(), Bind::Loopback);
-        let project = Project { id: Uuid::new_v4(), name: "before".into() };
+        let state = state(dir.path(), Bind::Loopback).await;
+        let project = NamedProject { id: Uuid::new_v4(), name: "before".into() };
         state
             .projects
             .write()
@@ -1264,7 +1336,7 @@ mod tests {
             return;
         };
         let dir = tempfile::tempdir().expect("a temp dir");
-        let state = state(dir.path(), Bind::Lan);
+        let state = state(dir.path(), Bind::Lan).await;
         let allowed = state.allowed.clone();
         let app = app(state, PHONE);
         let host = format!("{ip}:{PORT}");

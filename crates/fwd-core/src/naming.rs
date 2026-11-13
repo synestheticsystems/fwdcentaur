@@ -14,10 +14,12 @@
 //! applies it to its standing queries and a command to what it fetched ([`principal_named`]).
 
 use crate::dormancy;
+use crate::former_ids::FormerIds;
 use crate::model::*;
 use crate::ops;
+use crate::project_graph::ProjectGraph;
 use crate::query::with_id;
-use ankurah::{Context, EntityId};
+use ankurah::EntityId;
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -52,9 +54,15 @@ pub fn by_name<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
 
 /// What `name` names among `principals`, of `kind` when one is given, retired principals
 /// included: first the principals that have it as their name, one or several; else the principal
-/// whose whole id it is; else, for six characters or more, the principals whose id it starts.
-/// The name comes first so that a name that happens to read as an id still names its principal.
-pub fn resolve<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<PrincipalKind>) -> Named<'a> {
+/// whose whole id, or one of whose ids before it was renumbered (`former`), it is; else, for six
+/// characters or more, the principals whose id, or a former id, it starts, each once. The name
+/// comes first so that a name that happens to read as an id still names its principal.
+pub fn resolve<'a>(
+    principals: &'a [PrincipalView],
+    name: &str,
+    kind: Option<PrincipalKind>,
+    former: &FormerIds,
+) -> Named<'a> {
     let name = bare(name);
     match by_name(principals, name, kind).as_slice() {
         [] => {}
@@ -62,7 +70,8 @@ pub fn resolve<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
         several => return Named::Shared(several.to_vec()),
     }
     let of_kind = || principals.iter().filter(|p| kind.is_none() || p.kind().ok() == kind);
-    if let Ok(id) = name.parse::<EntityId>() {
+    let whole = name.parse::<EntityId>().ok().into_iter().chain(former.named(name));
+    for id in whole {
         if let Some(p) = of_kind().find(|p| p.id() == id) {
             return Named::One(p);
         }
@@ -70,7 +79,14 @@ pub fn resolve<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
     if !ops::may_start_an_id(name) {
         return Named::NoOne;
     }
-    let started: Vec<&PrincipalView> = of_kind().filter(|p| p.id().to_base64().starts_with(name)).collect();
+    let mut started: Vec<&PrincipalView> = of_kind().filter(|p| p.id().to_base64().starts_with(name)).collect();
+    for (_, record) in former.starting(name) {
+        if let Some(p) = of_kind().find(|p| p.id() == record) {
+            if !started.iter().any(|q| q.id() == record) {
+                started.push(p);
+            }
+        }
+    }
     match started.as_slice() {
         [] => Named::NoOne,
         [one] => Named::One(one),
@@ -82,13 +98,23 @@ pub fn resolve<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
 /// given: none when no principal has the name or an id it names, and a refusal ([`Refused`]) when
 /// it names several, listing each with the scopes its work is in. The caller words what none
 /// means where it is: the command that makes a principal, or that a person was wanted.
-pub async fn principal_named(ctx: &Context, name: &str, kind: Option<PrincipalKind>) -> Result<Option<PrincipalView>> {
-    let principals = ops::principals(ctx).await?;
-    match resolve(&principals, name, kind) {
+pub async fn principal_named(
+    graph: &ProjectGraph,
+    name: &str,
+    kind: Option<PrincipalKind>,
+) -> Result<Option<PrincipalView>> {
+    let principals = ops::principals(graph).await?;
+    // The former ids are read only for a name no principal has that may be an id.
+    let former = if by_name(&principals, name, kind).is_empty() && ops::may_start_an_id(bare(name)) {
+        FormerIds::of(graph).await?
+    } else {
+        FormerIds::default()
+    };
+    match resolve(&principals, name, kind, &former) {
         Named::One(p) => Ok(Some(p.clone())),
         Named::NoOne => Ok(None),
-        Named::Shared(several) => Err(refused(ctx, name, &several, false).await?.into()),
-        Named::Started(several) => Err(refused(ctx, name, &several, true).await?.into()),
+        Named::Shared(several) => Err(refused(graph, name, &several, false).await?.into()),
+        Named::Started(several) => Err(refused(graph, name, &several, true).await?.into()),
     }
 }
 
@@ -108,8 +134,8 @@ impl std::error::Error for Refused {}
 
 /// The refusal of `name`, which `several` share, or whose ids it starts (`started`), each listed
 /// with the scopes its work is in, read from the graph.
-pub async fn refused(ctx: &Context, name: &str, several: &[&PrincipalView], started: bool) -> Result<Refused> {
-    let loaded = Loaded::of(ctx, &several.iter().map(|p| p.id()).collect::<Vec<_>>()).await?;
+pub async fn refused(graph: &ProjectGraph, name: &str, several: &[&PrincipalView], started: bool) -> Result<Refused> {
+    let loaded = Loaded::of(graph, &several.iter().map(|p| p.id()).collect::<Vec<_>>()).await?;
     let work = loaded.work();
     Ok(Refused(refusal(name, several, started, |id| scope_titles(&scopes_of(id, &work), work.scopes))))
 }
@@ -165,8 +191,8 @@ fn standing(p: &PrincipalView) -> &'static str {
 /// graph: the first eight characters of its id, which name it wherever a name is typed, then what
 /// it is, whether it is retired or does not belong here, and the scopes its work is in:
 /// `Ab3dEf12 (implementer, in Replication)`.
-pub async fn described(ctx: &Context, p: &PrincipalView) -> Result<String> {
-    let loaded = Loaded::of(ctx, &[p.id()]).await?;
+pub async fn described(graph: &ProjectGraph, p: &PrincipalView) -> Result<String> {
+    let loaded = Loaded::of(graph, &[p.id()]).await?;
     let work = loaded.work();
     let scopes = scope_titles(&scopes_of(p.id(), &work), work.scopes);
     let id: String = p.id().to_base64().chars().take(8).collect();
@@ -358,19 +384,14 @@ pub struct Loaded {
 
 impl Loaded {
     /// The work of `principals` in the project's graph.
-    pub async fn of(ctx: &Context, principals: &[EntityId]) -> Result<Loaded> {
-        let mut relations: Vec<RelationView> = ctx.fetch("kind = 'worked_in' AND status = 'accepted'").await?;
-        relations.extend(ctx.fetch::<RelationView>("kind = 'assigned_to' AND status = 'accepted'").await?);
+    pub async fn of(graph: &ProjectGraph, principals: &[EntityId]) -> Result<Loaded> {
+        let mut relations: Vec<RelationView> = graph.fetch("kind = 'worked_in' AND status = 'accepted'").await?;
+        relations.extend(graph.fetch::<RelationView>("kind = 'assigned_to' AND status = 'accepted'").await?);
         let mut messages = Vec::new();
         for p in principals {
-            messages.extend(ctx.fetch::<MessageView>(with_id("author = ?", *p)?).await?);
+            messages.extend(graph.fetch::<MessageView>(with_id("author = ?", *p)?).await?);
         }
-        Ok(Loaded {
-            tasks: ctx.fetch("created > 0").await?,
-            relations,
-            scopes: ctx.fetch("created > 0").await?,
-            messages,
-        })
+        Ok(Loaded { tasks: graph.all().await?, relations, scopes: graph.all().await?, messages })
     }
 
     pub fn work(&self) -> Work<'_> {

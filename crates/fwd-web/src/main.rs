@@ -29,6 +29,7 @@ mod decision_row;
 mod decisions;
 mod empty;
 mod fmt;
+mod followed;
 mod graph;
 mod inbox;
 mod keys;

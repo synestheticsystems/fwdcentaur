@@ -1,0 +1,25 @@
+[package]
+name = "fwd-store-convert"
+description = "fwdcentaur: converts a fwd data folder whose stores Ankurah f8e85d2 wrote into one Ankurah main 5d8a000b reads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ankurah = { workspace = true }
+ankurah-storage-sqlite = { workspace = true }
+rusqlite = { workspace = true }
+# The encoding Ankurah stores its binary columns and state buffers in; the same major as its own.
+bincode = "1.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

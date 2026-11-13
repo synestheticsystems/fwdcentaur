@@ -33,7 +33,7 @@ use crate::panel::{FullScreenToggle, PanelEdge, PanelSize};
 use crate::referents::{Mode, Models};
 use crate::route::{self, Route};
 use crate::scope_filter::{self, ScopeChoice};
-use crate::session::ctx;
+use crate::session::graph;
 use crate::thread::{self, Hooks, Model, OpenQueries, ThreadState};
 use crate::{back, decision_row, fmt, keys, lozenges, modes, page_state, session, store};
 use ankurah::EntityId;
@@ -422,6 +422,7 @@ pub fn full(id: EntityId) -> AnyView {
 /// it, and a box for commenting.
 #[component]
 fn DecisionDetail(id: EntityId) -> impl IntoView {
+    Effect::new(move |_| lozenges::open_in_its_project(lozenges::Target::Decision(id)));
     // The head and the record, each redrawn whenever the decision changes.
     let head = move || {
         let Some(d) = store::decision(id) else {
@@ -530,8 +531,8 @@ fn Governs(decision: EntityId) -> impl IntoView {
         let change = reattach(governs.get_untracked(), chosen);
         spawn_local(async move {
             let done = match change {
-                Reattach::Attach(scope) => ops::attach_decision(&ctx(), me, decision, scope).await,
-                Reattach::Detach => ops::detach_decision(&ctx(), me, decision).await,
+                Reattach::Attach(scope) => ops::attach_decision(&graph(), me, decision, scope).await,
+                Reattach::Detach => ops::detach_decision(&graph(), me, decision).await,
                 Reattach::Keep => Ok(()),
             };
             match done {

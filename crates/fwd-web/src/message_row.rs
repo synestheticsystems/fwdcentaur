@@ -12,7 +12,7 @@
 
 use crate::lozenges::{self, Target};
 use crate::referents::{Child, Listing, Models};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::{self, Actions, Editor, Hooks, Link, Model, Query, RowAt, Sending, ThreadState};
 use crate::{empty, fmt, references, steps, store};
 use ankurah::EntityId;
@@ -28,7 +28,7 @@ pub const FOLLOWS: &[Link] = &[Link::Replies];
 
 /// The live query behind a message's replies.
 pub fn open(parent: EntityId, link: Link) -> Option<Query> {
-    (link == Link::Replies).then(|| thread::messages_where("reply_to = ?", parent))
+    (link == Link::Replies).then(|| thread::messages_about("reply_to", parent))
 }
 
 /// The messages beneath the message `parent` through `link`.
@@ -67,12 +67,14 @@ pub fn addressee(m: &MessageView) -> Option<String> {
     Some(to.parse::<EntityId>().map(store::handle_of).unwrap_or_else(|_| to.to_string()))
 }
 
-/// Who wrote the message and how it begins, to name it where it shows again.
+/// Who wrote the message and how it begins, to name it where it shows again, with its project's
+/// name after it when it is another project's, which its author's does not tell, and the author's
+/// own only when it is another still (`store::handle_beside`).
 pub fn name(id: EntityId) -> Option<String> {
     let m = store::message(id)?;
-    let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+    let author = m.author().ok().map(|a| store::handle_beside(EntityId::from(a), &m)).unwrap_or_default();
     let text = references::plain(&ops::text(m.content()).unwrap_or_default());
-    Some(format!("{author} “{}”", fmt::truncate(&text, 60)))
+    Some(store::named(format!("{author} “{}”", fmt::truncate(&text, 60)), &m))
 }
 
 /// The lozenge mode: its author and its first words.
@@ -85,7 +87,7 @@ pub fn lozenge(id: EntityId) -> AnyView {
 pub fn list_item(id: EntityId) -> AnyView {
     (move || {
         let Some(m) = store::message(id) else {
-            let absent = format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Message)));
+            let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Message)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
         let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
@@ -239,7 +241,7 @@ fn send_reply(me: EntityId, parent: EntityId, text: String) -> Sending {
     Box::pin(async move {
         let priority = store::message(parent).and_then(|m| m.priority().ok()).unwrap_or(Priority::Next);
         let mc = MessageContext { reply_to: Some(parent), ..Default::default() };
-        ops::post_message(&ctx(), me, &text, priority, mc).await.map_err(|e| e.to_string())
+        ops::post_message(&graph(), me, &text, priority, mc).await.map_err(|e| e.to_string())
     })
 }
 
@@ -251,8 +253,7 @@ fn resolve_words(tasks: &[EntityId]) -> (&'static str, Option<String>) {
     if tasks.is_empty() {
         return ("resolve", None);
     }
-    let names: Vec<String> =
-        tasks.iter().map(|t| store::task(*t).and_then(|t| t.title().ok()).unwrap_or_else(|| fmt::short(*t))).collect();
+    let names: Vec<String> = tasks.iter().map(|t| store::task_title(*t)).collect();
     (
         "resolve and check the step",
         Some(format!("resolves this thread and checks its highlight's step of {}", names.join(", "))),
@@ -266,14 +267,14 @@ const EDIT: Editor = Editor { placeholder: "what the message should say", send: 
 /// Saves `text` as `me`'s new text of `message`; a refusal (another's message, a name that fits
 /// nothing, a blank text) comes back in the words `ops::edit_message` gives it.
 fn save_edit(me: EntityId, message: EntityId, text: String) -> Sending {
-    Box::pin(
-        async move { ops::edit_message(&ctx(), me, message, &text).await.map(|()| message).map_err(|e| e.to_string()) },
-    )
+    Box::pin(async move {
+        ops::edit_message(&graph(), me, message, &text).await.map(|()| message).map_err(|e| e.to_string())
+    })
 }
 
 fn resolve(me: EntityId, message: EntityId, report: Callback<String>) {
     spawn_local(async move {
-        match ops::resolve_message(&ctx(), me, message).await {
+        match ops::resolve_message(&graph(), me, message).await {
             Ok(_) => session::wrote(me),
             Err(e) => {
                 report.try_run(e.to_string());

@@ -140,23 +140,23 @@ html, body, body *, body *::before, body *::after { cursor: none !important; }
 .wallboard-graph svg.dag .wallboard-availability rect { fill: var(--wb-scope); }
 .wallboard-graph svg.dag .wallboard-availability text { font: 600 14px var(--font); fill: var(--wb-ink); }
 .wallboard-wave { position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: 0; }
-.wallboard-replay {
+.wallboard-status {
   position: relative; z-index: 2; order: 1; flex: none; display: flex; align-items: center;
   flex-wrap: wrap; gap: 12px clamp(16px, 1vw, 38px); box-sizing: border-box;
   min-height: clamp(68px, 5.2vh, 112px); padding: clamp(14px, 1vh, 22px) clamp(18px, .85vw, 32px);
   color: var(--wb-status); font-variant-numeric: tabular-nums;
 }
-.wallboard-replay.replaying { background: var(--wb-history); color: var(--wb-history-ink); }
+.wallboard-status.replaying { background: var(--wb-history); color: var(--wb-history-ink); }
 .wallboard-mode-tag { display: flex; align-items: center; gap: .5em; font-size: clamp(18px, .9vw, 36px); font-weight: 700; letter-spacing: .06em; }
 .wallboard-mode-time { font-size: clamp(26px, 1.3vw, 50px); font-weight: 600; }
 .wallboard-mode-detail { margin-left: auto; font-size: clamp(16px, .8vw, 30px); }
-.wallboard-replay.current .wallboard-mode-tag::before { content: ''; width: .38em; height: .38em; border-radius: 50%; background: var(--wb-live); }
-.wallboard-replay.offline .wallboard-mode-tag { color: var(--wb-offline); }
+.wallboard-status.current .wallboard-mode-tag::before { content: ''; width: .38em; height: .38em; border-radius: 50%; background: var(--wb-live); }
+.wallboard-status.offline .wallboard-mode-tag { color: var(--wb-offline); }
 /* The status row says the connection's state in every mode but replay; while replay plays, the
    connection's own indicator says it. */
-.wallboard:has(.wallboard-replay:not(.replaying)) .wallboard-connection { display: none; }
+.wallboard:has(.wallboard-status:not(.replaying)) .wallboard-connection { display: none; }
 @media (max-width: 700px) { .wallboard-mode-detail { flex-basis: 100%; margin-left: 0; } }
-.wallboard-replay:empty, .wallboard-replay[hidden], .wallboard-wait[hidden] { display: none; }
+.wallboard-status:empty, .wallboard-status[hidden], .wallboard-wait[hidden] { display: none; }
 .wallboard-wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--wb-status); margin: 32px; text-align: center; }
 .wallboard-connection { position: absolute; z-index: 2; right: 12px; bottom: 8px; font-size: 11px; color: var(--wb-status); opacity: .65; }
 .wallboard-connection.offline { color: var(--wb-offline); opacity: .9; }

@@ -16,7 +16,7 @@
 
 use crate::empty::LOADING;
 use crate::fmt;
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::store::{self, Group};
 use ankurah::EntityId;
 use fwd_core::naming;
@@ -48,7 +48,7 @@ pub fn found(named: Memo<Option<String>>) -> Memo<Found> {
     Effect::new(move |_| {
         let Some(handle) = named.get() else { return };
         spawn_local(async move {
-            let why = match naming::principal_named(&ctx(), &handle, None).await {
+            let why = match naming::principal_named(&graph(), &handle, None).await {
                 Ok(Some(_)) => return,
                 Ok(None) => format!("No principal has the handle `{handle}`."),
                 Err(e) if e.downcast_ref::<naming::Refused>().is_some() => format!("{e}."),

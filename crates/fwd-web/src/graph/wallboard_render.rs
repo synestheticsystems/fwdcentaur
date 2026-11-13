@@ -4,7 +4,7 @@
 //! (`markup::frame`), the only stage that reads the counts of messages.
 // main.rs lets what only the app uses go unused in the wallboard's build; the wallboard's own code may not.
 #![warn(dead_code)]
-use crate::wallboard::{Dependencies, Presentation, Settings, TaskSelection};
+use crate::wallboard::{Presentation, Settings, TaskSelection};
 use crate::{fmt, layout, session, store};
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::EntityId;
@@ -49,14 +49,12 @@ pub fn WallboardGraph(presentation: RwSignal<Presentation>, selection: TaskSelec
             }
         })
     });
-    let prerequisites = StoredValue::new(send_wrapper::SendWrapper::new(Dependencies::default()));
     let cards = Memo::new({
         let stopwatch = stopwatch.clone();
         move |_| {
             let presentation = presentation.get();
             let stop = stopwatch(Stage::Cards);
-            let mut read = Cards::default();
-            prerequisites.update_value(|queries| read = cards::read(&selection, &presentation, queries));
+            let read = cards::read(&selection, &presentation);
             stop();
             read
         }

@@ -12,7 +12,7 @@
 
 use crate::lozenges::{self, Target};
 use crate::referents::{Child, Listing, Models};
-use crate::session::ctx;
+use crate::session::graph;
 use crate::thread::{self, Actions, Editor, Link, Model, Query, RowAt, Sending, ThreadState};
 use crate::{empty, fmt, store};
 use ankurah::EntityId;
@@ -31,7 +31,7 @@ pub const FOLLOWS: &[Link] = &[Link::AnchorComments];
 
 /// The live query behind a highlight's threads.
 pub fn open(parent: EntityId, link: Link) -> Option<Query> {
-    (link == Link::AnchorComments).then(|| thread::messages_where("anchor = ?", parent))
+    (link == Link::AnchorComments).then(|| thread::messages_about("anchor", parent))
 }
 
 /// The messages beneath the highlight `parent` through `link`: each that is on it and answers no
@@ -97,14 +97,17 @@ impl Shown {
 
 /// `path:lines`, to name a highlight where it shows again and in its lozenge.
 pub fn name(id: EntityId) -> Option<String> {
-    Some(AnchorName::of(&store::anchor(id)?).place)
+    let a = store::anchor(id)?;
+    Some(store::named(AnchorName::of(&a).place, &a))
 }
 
 /// The path of the whole-file highlight `id` and the version a mention names it at, `docs/cli.md
 /// e13b8e2`, to name a file a message names (`fwd_core::file_mention`) where it shows again and in
-/// its lozenge; none while the page does not hold the highlight.
+/// its lozenge, with its project's name after it when the highlight is another project's; none
+/// while the page does not hold the highlight.
 pub fn file_name(id: EntityId, version: &Version) -> Option<String> {
-    Some(AnchorName::file_at(&store::anchor(id)?.path().ok()?, version).text())
+    let a = store::anchor(id)?;
+    Some(store::named(AnchorName::file_at(&a.path().ok()?, version).text(), &a))
 }
 
 /// The page's messages on the highlight `id`.
@@ -151,7 +154,7 @@ pub fn lozenge(id: EntityId) -> AnyView {
 pub fn list_item(id: EntityId) -> AnyView {
     (move || {
         let Some(a) = store::anchor(id) else {
-            let absent = format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Anchor)));
+            let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Anchor)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
         let name = AnchorName::of(&a);
@@ -203,7 +206,7 @@ fn AnchorRow(state: ThreadState, at: RowAt) -> impl IntoView {
     let head = move || {
         anchor.with(|shown| match shown {
             Some(shown) => shown.heading(),
-            None => format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Anchor))),
+            None => format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Anchor))),
         })
     };
     let text = move || anchor.with(|shown| shown.as_ref().map(text_view));
@@ -247,7 +250,7 @@ const COMMENT: Editor = Editor { placeholder: "comment on this highlight", send:
 fn send_comment(me: EntityId, anchor: EntityId, text: String) -> Sending {
     Box::pin(async move {
         let mc = MessageContext { anchor_id: Some(anchor), ..Default::default() };
-        ops::post_message(&ctx(), me, &text, Priority::Next, mc).await.map_err(|e| e.to_string())
+        ops::post_message(&graph(), me, &text, Priority::Next, mc).await.map_err(|e| e.to_string())
     })
 }
 

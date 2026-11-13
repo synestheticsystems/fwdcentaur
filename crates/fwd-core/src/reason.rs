@@ -18,8 +18,9 @@
 //! from what it fetched ([`gather`]) and the page from its standing queries, and both say the same.
 
 use crate::model::*;
+use crate::project_graph::ProjectGraph;
 use crate::routing::{self, Why};
-use ankurah::{Context, EntityId};
+use ankurah::EntityId;
 use anyhow::Result;
 use serde_json::Value;
 use std::cell::RefCell;
@@ -114,13 +115,33 @@ pub struct RelationFacts {
     pub to: EntityId,
 }
 
+/// What a sentence needs to know about a decision to name it: its number, which is its own
+/// project's, its title, and its project's name when that is another than the reader's, since
+/// `D12` there names another decision than `D12` here: such a decision is named `D12 (Use SQLite)
+/// in beta`, and `D12 in beta` in a message's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionFacts {
+    pub number: i64,
+    pub title: String,
+    pub elsewhere: Option<String>,
+}
+
+impl DecisionFacts {
+    /// `name`, which names the decision, with its project's name after it when that is another.
+    fn named(&self, name: String) -> String {
+        match &self.elsewhere {
+            Some(project) => format!("{name} in {project}"),
+            None => name,
+        }
+    }
+}
+
 /// Where a sentence finds the names of what it mentions. Each answers `None` for what it does not
 /// hold (not loaded yet, or of another kind).
 pub trait Names {
     fn handle(&self, principal: EntityId) -> Option<String>;
     fn task_title(&self, id: EntityId) -> Option<String>;
-    /// A decision's number and title.
-    fn decision(&self, id: EntityId) -> Option<(i64, String)>;
+    fn decision(&self, id: EntityId) -> Option<DecisionFacts>;
     fn scope_name(&self, id: EntityId) -> Option<String>;
     /// An anchor's path, and its lines as stored (0-based, the end exclusive), or none for an
     /// anchor on the whole file (`ops::lines_of`).
@@ -608,7 +629,7 @@ impl Builder<'_> {
 
     fn decision(&mut self, id: EntityId) {
         let text = match self.names.decision(id) {
-            Some((number, title)) => format!("D{number} ({title})"),
+            Some(d) => d.named(format!("D{} ({})", d.number, d.title)),
             None => "a decision".into(),
         };
         self.name(Named::Decision, id, text);
@@ -696,7 +717,7 @@ impl Builder<'_> {
             });
             file.or_else(|| self.names.handle(id).map(|h| format!("@{h}")))
                 .or_else(|| self.names.task_title(id))
-                .or_else(|| self.names.decision(id).map(|(number, _)| format!("D{number}")))
+                .or_else(|| self.names.decision(id).map(|d| d.named(format!("D{}", d.number))))
                 .or_else(|| Some("…".into()))
         })
     }
@@ -827,7 +848,7 @@ impl Builder<'_> {
 pub struct Fetched {
     handles: HashMap<EntityId, String>,
     tasks: HashMap<EntityId, String>,
-    decisions: HashMap<EntityId, (i64, String)>,
+    decisions: HashMap<EntityId, DecisionFacts>,
     scopes: HashMap<EntityId, String>,
     anchors: HashMap<EntityId, (String, Option<(i64, i64)>)>,
     messages: HashMap<EntityId, MessageFacts>,
@@ -863,7 +884,7 @@ impl Names for Fetched {
     fn task_title(&self, id: EntityId) -> Option<String> {
         self.held(&self.tasks, Want::Task, id)
     }
-    fn decision(&self, id: EntityId) -> Option<(i64, String)> {
+    fn decision(&self, id: EntityId) -> Option<DecisionFacts> {
         self.held(&self.decisions, Want::Decision, id)
     }
     fn scope_name(&self, id: EntityId) -> Option<String> {
@@ -882,10 +903,10 @@ impl Names for Fetched {
 
 /// The sentence for the notification `n` as `reader` reads it, ending with how to answer the
 /// message behind it when it has one to answer and `reader` is its recipient ([`reply_id`]), with
-/// the names fetched from `ctx`: the sentence is built, what it asked for and did not have is
+/// the names fetched from `graph`: the sentence is built, what it asked for and did not have is
 /// fetched, and it is built again, until it asks for nothing new (a message's thread is a second
 /// step, its first message's author a third).
-pub async fn gather(ctx: &Context, n: &NotificationView, reader: Option<EntityId>) -> Result<Vec<Part>> {
+pub async fn gather(graph: &ProjectGraph, n: &NotificationView, reader: Option<EntityId>) -> Result<Vec<Part>> {
     let recipient: EntityId = n.recipient()?.into();
     let reply = reply_id(n.id(), recipient, reader);
     let t = n.notification_type()?;
@@ -901,56 +922,67 @@ pub async fn gather(ctx: &Context, n: &NotificationView, reader: Option<EntityId
             return Ok(parts);
         }
         for (want, id) in wanted {
-            fetch(ctx, &mut fetched, want, id).await;
+            fetch(graph, &mut fetched, want, id).await?;
         }
     }
     Ok(sentence(&fetched, recipient, reply, t, &target, &originator))
 }
 
-/// Fetches one name into `f`; a name that cannot be read (another kind of entity, or gone) is
+/// Fetches one name into `f`, following the record wherever in the node it is (`ProjectGraph::
+/// follow`): a record of another project is named with that project's name after it (`alice in
+/// beta`, `D12 (Use SQLite) in beta`), since a handle, a title or a number names something else
+/// there. A name that cannot be read (another kind of entity, or one the node does not hold) is
 /// left out, and the sentence says "a task" or "someone" in its place.
-async fn fetch(ctx: &Context, f: &mut Fetched, want: Want, id: EntityId) {
+async fn fetch(graph: &ProjectGraph, f: &mut Fetched, want: Want, id: EntityId) -> Result<()> {
+    use crate::ops::in_project;
+    use crate::project_graph::{Followed::Held, Whose};
     match want {
         Want::Handle => {
-            if let Some(h) = ctx.get::<PrincipalView>(id).await.ok().and_then(|p| p.handle().ok()) {
-                f.handles.insert(id, h);
+            if let Held { project, found, .. } = graph.follow::<PrincipalView>(id).await? {
+                f.handles.insert(id, in_project(found.handle()?, &project));
             }
         }
         Want::Task => {
-            if let Some(title) = ctx.get::<TaskView>(id).await.ok().and_then(|t| t.title().ok()) {
-                f.tasks.insert(id, title);
+            if let Held { project, found, .. } = graph.follow::<TaskView>(id).await? {
+                f.tasks.insert(id, in_project(found.title()?, &project));
             }
         }
         Want::Decision => {
-            if let Ok(d) = ctx.get::<DecisionView>(id).await {
-                f.decisions.insert(id, (d.number().unwrap_or(0), d.title().unwrap_or_default()));
+            if let Held { project, found, .. } = graph.follow::<DecisionView>(id).await? {
+                let elsewhere = match project {
+                    Whose::This => None,
+                    Whose::Other(p) => Some(p.name),
+                };
+                f.decisions.insert(id, DecisionFacts { number: found.number()?, title: found.title()?, elsewhere });
             }
         }
         Want::Scope => {
-            if let Some(title) = ctx.get::<ScopeView>(id).await.ok().and_then(|s| s.title().ok()) {
-                f.scopes.insert(id, title);
+            if let Held { project, found, .. } = graph.follow::<ScopeView>(id).await? {
+                f.scopes.insert(id, in_project(found.title()?, &project));
             }
         }
         Want::Anchor => {
-            if let Ok(a) = ctx.get::<CodeAnchorView>(id).await {
-                if let (Ok(path), Ok(lines)) = (a.path(), crate::ops::lines_of(&a)) {
-                    f.anchors.insert(id, (path, lines));
-                }
+            if let Held { found, .. } = graph.follow::<CodeAnchorView>(id).await? {
+                f.anchors.insert(id, (found.path()?, crate::ops::lines_of(&found)?));
             }
         }
         Want::Message => {
-            if let Ok(m) = ctx.get::<MessageView>(id).await {
-                f.messages.insert(id, MessageFacts::of(&m));
+            if let Held { found, .. } = graph.follow::<MessageView>(id).await? {
+                f.messages.insert(id, MessageFacts::of(&found));
             }
         }
-        Want::Relation => {
-            if let Ok(r) = ctx.get::<RelationView>(id).await {
-                if let (Ok(kind), Ok(from), Ok(to)) = (r.kind(), r.from_id(), r.to_id()) {
-                    f.relations.insert(id, RelationFacts { kind, from, to });
-                }
+        Want::Relation => match graph.relation(id).await {
+            Ok(r) => {
+                f.relations.insert(id, RelationFacts { kind: r.kind()?, from: r.from_id()?, to: r.to_id()? });
             }
-        }
+            Err(
+                ankurah::error::RetrievalError::EntityNotFound(_)
+                | ankurah::error::RetrievalError::MissingComponent { .. },
+            ) => {}
+            Err(e) => return Err(e.into()),
+        },
     }
+    Ok(())
 }
 
 /// The batch a notification lists beneath its sentence, on its inbox card and in `fwd inbox`
@@ -1416,7 +1448,8 @@ mod tests {
         let (daniel, claude) = (g.person("dnorman"), g.person("claude"));
         let task = g.task("Cap the retry delay");
         let d = id();
-        g.f.decisions.insert(d, (3, "Retries back off exponentially".into()));
+        g.f.decisions
+            .insert(d, DecisionFacts { number: 3, title: "Retries back off exponentially".into(), elsewhere: None });
         let mut o = cause(daniel, "citing_author");
         o["citing_id"] = json!(task.to_base64());
         assert_eq!(

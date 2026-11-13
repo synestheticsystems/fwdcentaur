@@ -5,7 +5,7 @@
 
 use crate::keys;
 use crate::mentions::{MentionList, Mentions};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use ankurah::EntityId;
 use fwd_core::model::Priority;
 use fwd_core::ops::{self, MessageContext};
@@ -46,7 +46,7 @@ pub fn CommentBox(about: Subject) -> impl IntoView {
         let Some(me) = session::me().filter(|_| !comment.is_empty()) else { return };
         text.set(String::new());
         spawn_local(async move {
-            match ops::post_message(&ctx(), me, &comment, Priority::Next, about.context()).await {
+            match ops::post_message(&graph(), me, &comment, Priority::Next, about.context()).await {
                 Ok(_) => {
                     session::wrote(me);
                     error.set(None);

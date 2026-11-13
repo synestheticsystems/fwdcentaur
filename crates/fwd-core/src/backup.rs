@@ -1,7 +1,7 @@
 //! Backups of this machine's data folder, taken while the daemon runs, and restores of them.
 //!
-//! The data folder holds the only copy of every project's graph on this machine (`Paths` in
-//! `project.rs`). `take` copies it into a new dated folder: each SQLite database through SQLite's
+//! The data folder holds the only copy of every project's graph on this machine, in the daemon's
+//! one store (`Paths` in `project.rs`). `take` copies it into a new dated folder: each SQLite database through SQLite's
 //! online backup (`copy_database` says why never as a file), every other file as it is, leaving
 //! out logs, locks and files still being written. It checks each copied database with SQLite's
 //! integrity check, writes a manifest naming every file with its size and SHA-256 last, and then
@@ -11,7 +11,7 @@
 //! daemon serves it. See docs/design/daemon.md, "Backups".
 
 use crate::daemon::{read_port_file, try_lock};
-use crate::project::{fsync_dir, Index, Paths, Project};
+use crate::project::{fsync_dir, Index, NamedProject, Paths};
 use anyhow::{anyhow, bail, Context as _, Result};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, OpenFlags};
@@ -42,7 +42,7 @@ pub struct Manifest {
     pub host: String,
     pub data_dir: PathBuf,
     /// The projects the data folder's index listed.
-    pub projects: Vec<Project>,
+    pub projects: Vec<NamedProject>,
     pub files: Vec<Entry>,
 }
 
@@ -165,7 +165,7 @@ fn copy_out(data_dir: &Path, partial: &Path, taken: i64) -> Result<Manifest> {
         taken,
         host: host_name(),
         data_dir: data_dir.to_path_buf(),
-        projects: index.projects.iter().map(Project::from).collect(),
+        projects: index.projects.iter().map(NamedProject::from).collect(),
         files,
     };
     let manifest_path = partial.join(MANIFEST);
@@ -571,8 +571,9 @@ fn host_name() -> String {
 }
 
 impl Manifest {
-    /// What the backup holds, for people: a line per project naming its files with their sizes,
-    /// then a line for the files beside the projects.
+    /// What the backup holds, for people: a line per project naming its local files with their
+    /// sizes, then a line for the files beside the projects, the store that holds every project's
+    /// records among them.
     pub fn contents(&self) -> Vec<String> {
         let mut rest: Vec<&Entry> = self.files.iter().collect();
         let mut lines = Vec::new();
@@ -673,14 +674,14 @@ impl LocalTime {
 mod tests {
     use super::*;
 
-    /// A data folder with one project whose database has committed rows still in its write-ahead
+    /// A data folder with one project, and a store with committed rows still in its write-ahead
     /// log, held open the way the daemon holds it, beside the files a backup leaves out.
     fn data_folder(root: &Path) -> Result<(Paths, Connection)> {
         let paths = Paths { runtime_dir: root.join("run"), data_dir: root.join("data") };
-        let project = Project { id: uuid::Uuid::new_v4(), name: "widgets".into() };
+        let project = NamedProject { id: uuid::Uuid::new_v4(), name: "widgets".into() };
         Index::update(&paths, |index| index.register(&project, Some("github.com/acme/widgets")))?;
         std::fs::create_dir_all(paths.storage_dir(&project))?;
-        let daemon = Connection::open(paths.db_path(&project))?;
+        let daemon = Connection::open(paths.store_path())?;
         daemon.pragma_update(None, "journal_mode", "WAL")?;
         // Nothing moves the log into the main file while this connection stays open.
         daemon.pragma_update(None, "wal_autocheckpoint", 0)?;
@@ -698,20 +699,16 @@ mod tests {
     fn a_backup_holds_the_writes_still_in_the_log_and_leaves_out_logs_and_temporary_files() -> Result<()> {
         let root = tempfile::tempdir()?;
         let (paths, _daemon) = data_folder(root.path())?;
-        let storage = std::fs::read_dir(paths.data_dir.join("projects"))?.next().expect("a project")?.path();
-        assert!(storage.join("project.sqlite-wal").metadata()?.len() > 0, "the rows are in the log");
+        assert!(paths.data_dir.join("store.sqlite-wal").metadata()?.len() > 0, "the rows are in the log");
 
         let taken = take(&paths, &root.path().join("backups"), 7)?;
         let names: Vec<&str> = taken.manifest.files.iter().map(|entry| entry.path.as_str()).collect();
         let id = &taken.manifest.projects[0].id;
-        assert_eq!(
-            names,
-            [format!("projects/{id}/checkouts.json"), format!("projects/{id}/project.sqlite"), "projects.toml".into()]
-        );
-        let copy = Connection::open(taken.backup.join(format!("projects/{id}/project.sqlite")))?;
+        assert_eq!(names, [format!("projects/{id}/checkouts.json"), "projects.toml".into(), "store.sqlite".into()]);
+        let copy = Connection::open(taken.backup.join("store.sqlite"))?;
         let rows: i64 = copy.query_row("SELECT count(*) FROM task", [], |row| row.get(0))?;
         assert_eq!(rows, 100, "the copy holds what the log held");
-        let files: Vec<String> = std::fs::read_dir(taken.backup.join(format!("projects/{id}")))?
+        let files: Vec<String> = std::fs::read_dir(&taken.backup)?
             .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
             .collect::<Result<_>>()?;
         assert!(!files.iter().any(|f| f.ends_with("-wal") || f.ends_with("-shm")), "the copy is one file: {files:?}");
@@ -736,7 +733,7 @@ mod tests {
         for path in ["../elsewhere", "/etc/passwd", "projects/../../x", ""] {
             assert!(inside(path).is_err(), "{path:?} is refused");
         }
-        assert_eq!(inside("projects/a/project.sqlite").ok(), Some(PathBuf::from("projects/a/project.sqlite")));
+        assert_eq!(inside("projects/a/anchors.sqlite").ok(), Some(PathBuf::from("projects/a/anchors.sqlite")));
     }
 
     #[test]
@@ -744,10 +741,10 @@ mod tests {
         for name in ["daemon.log", "daemon.log.legacy", "fwdd.log", "projects.toml.lock", "checkouts.json.tmp"] {
             assert!(left_out(name), "{name}");
         }
-        for name in ["project.sqlite-wal", "project.sqlite-shm", "anchors.sqlite-journal"] {
+        for name in ["store.sqlite-wal", "store.sqlite-shm", "anchors.sqlite-journal"] {
             assert!(left_out(name), "{name}");
         }
-        for name in ["project.sqlite", "anchors.sqlite", "checkouts.json", "checkouts.json.corrupt", "identity.toml"] {
+        for name in ["store.sqlite", "anchors.sqlite", "checkouts.json", "checkouts.json.corrupt", "identity.toml"] {
             assert!(!left_out(name), "{name}");
         }
     }

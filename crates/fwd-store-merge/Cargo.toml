@@ -1,0 +1,25 @@
+[package]
+name = "fwd-store-merge"
+description = "fwdcentaur: moves every project's store of a fwd data folder into the one store the daemon keeps for all of them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fwd-core = { path = "../fwd-core" }
+ankurah = { workspace = true }
+ankurah-storage-sqlite = { workspace = true }
+rusqlite = { workspace = true }
+# The encoding Ankurah stores its model keys in; the same major as its own.
+bincode = "1.3"
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

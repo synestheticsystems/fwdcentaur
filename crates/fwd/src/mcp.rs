@@ -19,13 +19,14 @@
 pub mod caller;
 pub mod tools;
 
-use crate::{App, Captured, Command, Format, Output, PrincipalCommand};
-use ankurah::{Context, EntityId};
+use crate::{runs_in, App, Captured, Command, Format, Output, PrincipalCommand};
+use ankurah::EntityId;
 use anyhow::{anyhow, bail, Context as _, Result};
 use caller::Caller;
 use clap::{CommandFactory, FromArgMatches};
 use fwd_core::ops;
-use fwd_core::project::{Paths, Project};
+use fwd_core::project::{NamedProject, Paths};
+use fwd_core::project_graph::{ProjectGraph, Whose};
 use fwd_core::subject;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, InitializeResult,
@@ -38,15 +39,15 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 /// What the endpoint needs of the daemon: the data folder, its port, and the projects it hosts,
-/// each with a context on its durable node. The daemon gives it (serve.rs); a hosted server would
+/// each by its graph over the daemon's node. The daemon gives it (serve.rs); a hosted server would
 /// give its own.
 pub trait Hosting: Send + Sync + 'static {
     fn paths(&self) -> &Paths;
     fn port(&self) -> u16;
     /// Every project hosted, by id and name, with why it could not open when it could not.
     fn projects(&self) -> Vec<(Uuid, String, Option<String>)>;
-    /// The project with this id, and a context on its node, when it is open.
-    fn open(&self, id: Uuid) -> Option<(Project, Context)>;
+    /// The project with this id, and its graph, when it is open.
+    fn open(&self, id: Uuid) -> Option<(NamedProject, ProjectGraph)>;
 }
 
 /// What the daemon does for a caller it attributed a call to, beyond the graph: the place where
@@ -170,13 +171,12 @@ impl Operations {
             bail!("`{WHOAMI}` takes no argument `{key}`; it takes project");
         }
         let Some(project) = args.get(tools::PROJECT) else { return Ok(v) };
-        let (project, ctx) = self.project(project)?;
+        let (project, graph) = self.project(project)?;
         v["project"] = json!({"id": project.id.to_string(), "name": project.name});
-        match subject::principal_of(&ctx, &caller.subject).await? {
-            Some(p) => v["principal"] = crate::principal_json(&ctx, &p).await?,
+        match subject::principal_of(&graph, &caller.subject).await? {
+            Some(p) => v["principal"] = crate::principal_json(&graph, &p).await?,
             None => {
-                v["first_write_makes"] =
-                    json!({"handle": self.free_handle(&ctx, caller).await?, "role": caller.default_role().to_string()});
+                v["first_write_makes"] = json!({"handle": self.free_handle(&graph, caller).await?, "role": caller.default_role().to_string()});
                 v["bind_instead"] = json!(format!(
                     "a lead from before automatic attachment, which worked by --as, is carried over to this thread by a person in a terminal: fwd admin bind <its name> --subject {} --project '{}'. Bind it before this thread's first call that writes or reads its own inbox or tasks, even one that is refused, which makes the thread a principal of its own; if that happened, retire that one first (fwd principal retire <its id>)",
                     caller.subject, project.name
@@ -186,8 +186,8 @@ impl Operations {
         Ok(v)
     }
 
-    /// The project a call names, by id or name, and a context on its node.
-    fn project(&self, named: &Value) -> Result<(Project, Context)> {
+    /// The project a call names, by id or name, and its graph.
+    fn project(&self, named: &Value) -> Result<(NamedProject, ProjectGraph)> {
         let named = named
             .as_str()
             .map(str::trim)
@@ -221,9 +221,12 @@ impl Operations {
     }
 
     /// Runs the CLI command `spec` stands for, for `caller`, as the CLI runs it after connecting
-    /// (`crate::run_cli`): the command parsed by the CLI's parser, the principal the caller acts as
-    /// found (and made when the command needs one), the CLI's refusals, the command, and its
-    /// bookkeeping; its answer captured.
+    /// (`crate::run_cli`): the command parsed by the CLI's parser, run in the project the call's
+    /// `project` names, or in the project of the record the command acts on, or without one of the
+    /// call's `scope`, when that is a record of another, as the CLI places it (`crate::runs_in`,
+    /// docs/DECISIONS.md, D181); the principal the caller acts as there found (and made when the
+    /// command needs one), the CLI's refusals, the command, and its bookkeeping; its answer
+    /// captured.
     /// What the command printed and said goes in `out`, whether it ran or failed.
     async fn command(
         &self,
@@ -232,7 +235,7 @@ impl Operations {
         args: &Map<String, Value>,
         out: &mut Captured,
     ) -> Result<()> {
-        let (project, ctx) = self.project(args.get(tools::PROJECT).unwrap_or(&Value::Null))?;
+        let (started_in, start) = self.project(args.get(tools::PROJECT).unwrap_or(&Value::Null))?;
         let argv = spec.argv(args).map_err(|e| anyhow!(e))?;
         // The CLI's grammar with no argument read from the environment: the daemon's FWD_AS,
         // FWD_PROJECT or FWD_SCOPE, inherited from whichever command started it, mean nothing to a
@@ -248,84 +251,116 @@ impl Operations {
         }
         let command = crate::Cli::from_arg_matches(&matches)?.command;
         crate::refuse_before_running(&command)?;
-        let joining = crate::joins(&matches);
-        let writes = joining || crate::WRITES_TOO.contains(&spec.words);
-        let stamping = crate::stamps(joining, spec.words);
-        let scope = match args.get(tools::SCOPE).filter(|v| !v.is_null()) {
-            Some(s) => {
-                let s = s.as_str().context(
+        let scoped =
+            match args.get(tools::SCOPE).filter(|v| !v.is_null()) {
+                Some(s) => Some(s.as_str().context(
                     "`scope` is a scope's id, or its first six characters or more, as the CLI's --scope takes",
-                )?;
-                // As the CLI reads `--scope` (`crate::caller`): an id, or its first characters.
-                Some(ops::resolve_id(&ctx, s, &[ops::Kind::Scope]).await?)
+                )?),
+                None => None,
+            };
+        // Placed before the caller's principal is found, which is found, or made, where the call
+        // runs, as the CLI places a command (`crate::run_cli`). The call's `project` is where it
+        // starts, which every call names, as the directory is for the CLI, so a `scope` of another
+        // project places a call that acts on no one record.
+        let mut waited = false;
+        let mut placed =
+            runs_in::runs_in(&start, &command, false, scoped, self.hosting.paths(), || waited = true).await?;
+        // A failure once the call is placed says where it ran, as the CLI's does
+        // (`runs_in::RanIn::failure`).
+        let ran_in = placed.ran_in();
+        let ran = async {
+            let (project, graph) = match &placed.project {
+                Whose::Other(there) => self
+                    .hosting
+                    .open(there.uuid)
+                    .with_context(|| format!("the daemon does not have the project {} open", there.name))?,
+                Whose::This => (started_in, start),
+            };
+            let joining = crate::joins(&matches);
+            let writes = joining || crate::WRITES_TOO.contains(&spec.words);
+            let stamping = crate::stamps(joining, spec.words);
+            // As the CLI reads `--scope` (`crate::caller`): an id, or its first characters.
+            let scope = match scoped {
+                Some(s) => Some(runs_in::scope_named(&graph, &placed.typed, s).await?),
+                None => None,
+            };
+            refuse_split(&graph, caller).await?;
+            // An agent that names itself, or names itself as another's successor, is made by its own
+            // command with the name and role it gives, as the CLI makes it, and no principal is made
+            // for it first; `principal succeed` from a thread with none is refused as the CLI refuses
+            // it. Any other command that writes, or reads the caller's own inbox or tasks, acts as the
+            // thread's principal, made on the first such call.
+            let names_itself = matches!(
+                command,
+                Command::Principal { command: PrincipalCommand::Add { .. } | PrincipalCommand::Succeed { .. } }
+            );
+            let needs_actor = (writes && !names_itself) || crate::reads_about_caller(&command);
+            let bound = subject::principal_of(&graph, &caller.subject).await?;
+            // Two first `principal_add`s of one thread arriving together make one principal: the
+            // second runs once the first has bound it, and is refused as a second name.
+            let _naming = match (&bound, names_itself) {
+                (None, true) => Some(self.attaching.lock().await),
+                _ => None,
+            };
+            let acting = match bound {
+                Some(p) => Some(p.id()),
+                None if needs_actor => Some(self.attach(&graph, caller).await?),
+                None => subject::principal_of(&graph, &caller.subject).await?.map(|p| p.id()),
+            };
+            let me_handle = match acting {
+                Some(p) => ops::handle_of(&graph, p).await?,
+                None => String::new(),
+            };
+            let mut app = App {
+                paths: self.hosting.paths().clone(),
+                root: self.hosting.paths().storage_dir(&project),
+                project: project.clone(),
+                checkout: None,
+                graph: graph.clone(),
+                client: None,
+                daemon_port: self.hosting.port(),
+                out: Output::Captured(Default::default()),
+                // A call that acts as no principal (a read about the graph alone, by a thread that has
+                // not written yet) has no one to attribute anything to; the CLI would put the person
+                // here, and the endpoint never acts as the person, so it puts an id no principal has,
+                // which fails loudly wherever a command would read it. The CLI's refusals keep every
+                // command that would from running ([`crate::refuse_by_identity`]).
+                me: acting.unwrap_or_else(EntityId::random),
+                me_handle,
+                acting,
+                subject: Some(caller.subject.clone()),
+                typed_as: None,
+                scope,
+                scope_typed: scope.is_some(),
+                several: None,
+                format: Format::Json,
+                placed_in: None,
+                typed: placed.typed,
+                moving: placed.moving.take(),
+            };
+            if waited {
+                app.note(crate::MOVE_WAITS);
             }
-            None => None,
-        };
-        refuse_split(&ctx, caller).await?;
-        // An agent that names itself, or names itself as another's successor, is made by its own
-        // command with the name and role it gives, as the CLI makes it, and no principal is made
-        // for it first; `principal succeed` from a thread with none is refused as the CLI refuses
-        // it. Any other command that writes, or reads the caller's own inbox or tasks, acts as the
-        // thread's principal, made on the first such call.
-        let names_itself = matches!(
-            command,
-            Command::Principal { command: PrincipalCommand::Add { .. } | PrincipalCommand::Succeed { .. } }
-        );
-        let needs_actor = (writes && !names_itself) || crate::reads_about_caller(&command);
-        let bound = subject::principal_of(&ctx, &caller.subject).await?;
-        // Two first `principal_add`s of one thread arriving together make one principal: the
-        // second runs once the first has bound it, and is refused as a second name.
-        let _naming = match (&bound, names_itself) {
-            (None, true) => Some(self.attaching.lock().await),
-            _ => None,
-        };
-        let acting = match bound {
-            Some(p) => Some(p.id()),
-            None if needs_actor => Some(self.attach(&ctx, caller).await?),
-            None => subject::principal_of(&ctx, &caller.subject).await?.map(|p| p.id()),
-        };
-        let me_handle = match acting {
-            Some(p) => crate::handle_of(&ctx, p).await,
-            None => String::new(),
-        };
-        let app = App {
-            paths: self.hosting.paths().clone(),
-            root: self.hosting.paths().storage_dir(&project),
-            project: project.clone(),
-            checkout: None,
-            ctx: ctx.clone(),
-            client: None,
-            daemon_port: self.hosting.port(),
-            out: Output::Captured(Default::default()),
-            // A call that acts as no principal (a read about the graph alone, by a thread that has
-            // not written yet) has no one to attribute anything to; the CLI would put the person
-            // here, and the endpoint never acts as the person, so it puts an id no principal has,
-            // which fails loudly wherever a command would read it. The CLI's refusals keep every
-            // command that would from running ([`crate::refuse_by_identity`]).
-            me: acting.unwrap_or_else(EntityId::random),
-            me_handle,
-            acting,
-            subject: Some(caller.subject.clone()),
-            typed_as: None,
-            scope,
-            scope_typed: scope.is_some(),
-            several: None,
-            format: Format::Json,
-        };
-        crate::refuse_by_identity(&app, &command, writes).await?;
-        let stamped = crate::run_as_caller(&app, command, joining, stamping).await;
-        *out = match app.out {
-            Output::Captured(captured) => captured.into_inner().unwrap_or_else(|e| e.into_inner()),
-            Output::Stdout => unreachable!("captured above"),
-        };
-        // The principal the command acted as, or the one it named.
-        if let Some(principal) = match acting {
-            Some(p) => Some(p),
-            None => subject::principal_of(&ctx, &caller.subject).await.ok().flatten().map(|p| p.id()),
-        } {
-            self.seen.seen(project.id, principal, caller);
+            if let Whose::Other(there) = &placed.project {
+                app.place_in(&placed.because, &there.name);
+            }
+            crate::refuse_by_identity(&app, &command, writes).await?;
+            let stamped = crate::run_as_caller(&app, command, joining, stamping).await;
+            *out = match app.out {
+                Output::Captured(captured) => captured.into_inner().unwrap_or_else(|e| e.into_inner()),
+                Output::Stdout => unreachable!("captured above"),
+            };
+            // The principal the command acted as, or the one it named.
+            if let Some(principal) = match acting {
+                Some(p) => Some(p),
+                None => subject::principal_of(&graph, &caller.subject).await.ok().flatten().map(|p| p.id()),
+            } {
+                self.seen.seen(project.id, principal, caller);
+            }
+            stamped?.context(crate::STAMP_FAILED)
         }
-        stamped?.context(crate::STAMP_FAILED)
+        .await;
+        ran.map_err(|error| ran_in.failure(error))
     }
 
     /// The principal of the project bound to `caller`, made now when there is none: an agent with
@@ -333,22 +368,23 @@ impl Operations {
     /// ([`Caller::default_role`]), as `fwd principal add` makes one (`ops::add_principal`), bound
     /// to the caller's subject. Made under [`Operations::attaching`], so that one thread's first
     /// calls arriving together make one principal.
-    async fn attach(&self, ctx: &Context, caller: &Caller) -> Result<EntityId> {
+    async fn attach(&self, graph: &ProjectGraph, caller: &Caller) -> Result<EntityId> {
         let _attaching = self.attaching.lock().await;
-        if let Some(p) = subject::principal_of(ctx, &caller.subject).await? {
+        if let Some(p) = subject::principal_of(graph, &caller.subject).await? {
             return Ok(p.id());
         }
-        let handle = self.free_handle(ctx, caller).await?;
-        let id = ops::add_principal(ctx, &handle, Some(caller.default_role()), None, None, None, Some(&caller.subject))
-            .await?;
+        let handle = self.free_handle(graph, caller).await?;
+        let id =
+            ops::add_principal(graph, &handle, Some(caller.default_role()), None, None, None, Some(&caller.subject))
+                .await?;
         tracing::info!("attached {} as @{handle}", caller.subject);
         Ok(id)
     }
 
     /// The first of `caller`'s names no principal of the project has, or is named by.
-    async fn free_handle(&self, ctx: &Context, caller: &Caller) -> Result<String> {
+    async fn free_handle(&self, graph: &ProjectGraph, caller: &Caller) -> Result<String> {
         for handle in caller.handles() {
-            if fwd_core::naming::principal_named(ctx, &handle, None).await.ok().flatten().is_none() {
+            if fwd_core::naming::principal_named(graph, &handle, None).await.ok().flatten().is_none() {
                 return Ok(handle);
             }
         }
@@ -375,9 +411,9 @@ const CALLER_READS: &[&str] = &["inbox", "inbox pop", "prime", "task next", "tas
 /// inbox and its work split between two. A retired principal counts for nothing here, so a person
 /// who retires the old one lets the thread be made anew; no command moves a principal to another
 /// session.
-async fn refuse_split(ctx: &Context, caller: &Caller) -> Result<()> {
+async fn refuse_split(graph: &ProjectGraph, caller: &Caller) -> Result<()> {
     let thread = |s: &str| s.strip_prefix("codex:").and_then(|rest| rest.rsplit_once('/')).map(|(_, t)| t.to_string());
-    for p in ops::principals(ctx).await? {
+    for p in ops::principals(graph).await? {
         // A retired principal does not split the thread: the person retired it.
         if !p.active().unwrap_or(false) {
             continue;
@@ -597,7 +633,7 @@ mod tests {
         fn projects(&self) -> Vec<(Uuid, String, Option<String>)> {
             Vec::new()
         }
-        fn open(&self, _: Uuid) -> Option<(Project, Context)> {
+        fn open(&self, _: Uuid) -> Option<(NamedProject, ProjectGraph)> {
             None
         }
     }

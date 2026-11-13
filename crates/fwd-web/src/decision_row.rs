@@ -12,8 +12,7 @@
 use crate::fmt::CopyId;
 use crate::lozenges::{self, Target};
 use crate::referents::{Child, Listing, Mode, Models};
-use crate::route::{self, Route};
-use crate::session::{self, ctx};
+use crate::session::{self, graph};
 use crate::thread::{self, Actions, Editor, Link, Model, Query, RowAt, Sending, ThreadState};
 use crate::{empty, fmt, keys, modes, references, store};
 use ankurah::EntityId;
@@ -29,7 +28,7 @@ pub const FOLLOWS: &[Link] = &[Link::DecisionComments];
 
 /// The live query behind a decision's comments.
 pub fn open(parent: EntityId, link: Link) -> Option<Query> {
-    (link == Link::DecisionComments).then(|| thread::messages_where("decision = ?", parent))
+    (link == Link::DecisionComments).then(|| thread::messages_about("decision", parent))
 }
 
 /// The messages beneath the decision `parent` through `link`: its comments, each one that answers
@@ -54,7 +53,7 @@ pub fn listing(parent: EntityId, link: Link, query: Option<&Query>) -> Listing<E
 /// `D12` and the decision's title, to name it where it shows again.
 pub fn name(id: EntityId) -> Option<String> {
     let d = store::decision(id)?;
-    Some(format!("D{} {}", d.number().unwrap_or(0), d.title().unwrap_or_default()))
+    Some(store::named(format!("D{} {}", d.number().unwrap_or(0), d.title().unwrap_or_default()), &d))
 }
 
 /// The lozenge mode: `D12` and its title, a fallen ruling in the warning colour.
@@ -67,14 +66,14 @@ pub fn lozenge(id: EntityId) -> AnyView {
 pub fn list_item(id: EntityId) -> AnyView {
     (move || {
         let Some(d) = store::decision(id) else {
-            let absent = format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Decision)));
+            let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Decision)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
         view! {
             <span class="list-item decision-item">
                 <span class="decision-number">{format!("D{}", d.number().unwrap_or(0))}</span>
                 " "
-                <a href=link_to(id)>{d.title().unwrap_or_default()}</a>
+                <a href=move || lozenges::href(Target::Decision(id))>{store::named(d.title().unwrap_or_default(), &d)}</a>
                 " "
                 {d.status().ok().map(|s| view! { <span class=format!("pill decision-{s}")>{s.to_string()}</span> })}
             </span>
@@ -179,8 +178,10 @@ pub fn DecisionRow(state: ThreadState, at: RowAt) -> impl IntoView {
     // Changes only when the decision arrives or goes; each field below redraws on its own.
     let decision = Memo::new(move |_| store::decision(id));
     let number = move || decision.get().and_then(|d| d.number().ok()).map(|n| format!("D{n}")).unwrap_or_default();
-    let title =
-        move || decision.get().and_then(|d| d.title().ok()).unwrap_or_else(|| empty::absent(Some(Model::Decision)));
+    let title = move || match decision.get() {
+        Some(d) => store::named(d.title().unwrap_or_default(), &d),
+        None => empty::absent(id, Some(Model::Decision)),
+    };
     let status = move || decision.get().and_then(|d| d.status().ok());
     let area = move || decision.get().and_then(|d| d.area().ok().flatten());
     // The scope it governs, unless the panel the row heads shows it above with its picker.
@@ -219,9 +220,9 @@ pub fn DecisionRow(state: ThreadState, at: RowAt) -> impl IntoView {
         let new = successor.get_untracked();
         spawn_local(async move {
             let done = match (mv, new) {
-                (DecisionMove::Supersede, Some(new)) => ops::supersede_decision(&ctx(), me, id, new, &why).await,
+                (DecisionMove::Supersede, Some(new)) => ops::supersede_decision(&graph(), me, id, new, &why).await,
                 (DecisionMove::Supersede, None) => Err(anyhow::anyhow!("choose the ruling that replaces it")),
-                _ => ops::move_decision(&ctx(), me, id, mv, &why).await.map(|_| ()),
+                _ => ops::move_decision(&graph(), me, id, mv, &why).await.map(|_| ()),
             };
             match done {
                 Ok(()) => {
@@ -307,7 +308,7 @@ pub fn DecisionRow(state: ThreadState, at: RowAt) -> impl IntoView {
             " "
             <CopyId id=id/>
             " "
-            <a href=link_to(id)>{title}</a>
+            <a href=move || lozenges::href(Target::Decision(id))>{title}</a>
             " "
             {move || status().map(|s| view! { <span class=format!("pill decision-{s}")>{s.to_string()}</span> })}
             {move || area().map(|a| view! { <span class="pill area">{a}</span> })}
@@ -352,18 +353,13 @@ const COMMENT: Editor = Editor { placeholder: "comment on this decision", send: 
 fn send_comment(me: EntityId, decision: EntityId, text: String) -> Sending {
     Box::pin(async move {
         let mc = MessageContext { decision_id: Some(decision), ..Default::default() };
-        ops::post_message(&ctx(), me, &text, Priority::Next, mc).await.map_err(|e| e.to_string())
+        ops::post_message(&graph(), me, &text, Priority::Next, mc).await.map_err(|e| e.to_string())
     })
 }
 
+/// Opens the decision wherever it is: on its own project's page for a decision of another project.
 fn open_decision(id: EntityId) {
-    route::go(Route::decision(id));
-}
-
-/// Where the decision's title leads: its panel on the Decisions page, its list keeping the page's
-/// scope choice (`scope_filter::follow`).
-fn link_to(id: EntityId) -> String {
-    Route::decision(id).hash()
+    lozenges::follow(Target::Decision(id));
 }
 
 #[cfg(test)]

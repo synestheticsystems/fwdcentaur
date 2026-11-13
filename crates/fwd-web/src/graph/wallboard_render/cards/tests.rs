@@ -179,15 +179,17 @@ fn wallboard_draws_a_selected_task_only_once_it_is_due() {
     assert!(!wallboard_draws(&selection, None, None));
 }
 
-/// A task waiting for one the drawing leaves out still says it waits, through what `Dependencies`
-/// watches and `Availability` reads; only its arrow goes, having no card to point at.
+/// A task waiting for one the drawing leaves out still says it waits, through the dependency the
+/// store follows outside the selection (`store::dependencies`) and `Availability` reads; only its
+/// arrow goes, having no card to point at.
 #[test]
 fn wallboard_task_waiting_for_one_not_yet_due_reads_as_blocked_with_no_arrow() {
     let (waiting, not_yet_due) = (id(1), id(2));
     assert!(!wallboard_relation(&HashSet::from([waiting]), &waits(1, 2)));
     assert!(wallboard_relation(&HashSet::from([waiting, not_yet_due]), &waits(1, 2)), "drawn once both its tasks are");
     for status in [TaskStatus::Open, TaskStatus::Proposed] {
-        let availability = Availability::of(waiting, None, &[(not_yet_due, Some(status))]);
+        let availability =
+            Availability::of(waiting, None, &[fwd_core::rules::Dependency::Here(not_yet_due, Some(status))]);
         assert_eq!(availability.labels(), ["Blocked"]);
         assert!(availability.quiet(), "faded with every other blocked card");
     }

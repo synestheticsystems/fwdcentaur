@@ -1,13 +1,17 @@
 """The wallboard build's identity (wallboard_identity.py) changes whenever what Cargo builds the
-wallboard from changes. These checks run cargo and git, and need the wallboard's dependencies
+wallboard from changes, and the build records it in the bundle, whole or not at all, only for a dist
+that carries it. The checks of the digest run cargo and git, and need the wallboard's dependencies
 fetched, as any build of it does."""
+import errno
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import wallboard_identity
 
@@ -84,6 +88,51 @@ class BuildIdentity(unittest.TestCase):
             manifest.write_text(text)
             self.assertNotEqual(serde_json_features(), compiled, 'the edit changes what the build compiles')
             self.assertNotEqual(wallboard_identity.content_sha256(copy), before)
+
+
+class RecordedIdentity(unittest.TestCase):
+    IDENTITY = {'source_revision': 'a' * 40, 'content_sha256': 'b' * 64}
+
+    def bundle(self):
+        """A bundle whose dist holds the runtime in one snippet directory, as trunk leaves it, and the
+        path of the module the build copies in beside it."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        bundle = Path(directory.name)
+        modules = bundle / 'dist/snippets/fwd-web-0/src/wallboard'
+        modules.mkdir(parents=True)
+        (modules / 'wallboard-runtime.mjs').touch()
+        return bundle, modules / 'wallboard-build.mjs'
+
+    def test_an_identity_is_recorded_only_for_a_dist_that_carries_its_module(self):
+        bundle, module = self.bundle()
+        with self.assertRaisesRegex(ValueError, 'carries no wallboard-build.mjs'):
+            wallboard_identity.record(bundle, self.IDENTITY)
+        # The module another build's `identify` wrote: what the dist carries when a second build in the
+        # same checkout rewrites the module after this build's `identify` and before its copy.
+        module.write_text(wallboard_identity.module(dict(self.IDENTITY, content_sha256='c' * 64)))
+        with self.assertRaisesRegex(ValueError, r'fwd-web-0/src/wallboard/wallboard-build\.mjs is not the module of '
+                                                rf'the build with content_sha256 {"b" * 64}'):
+            wallboard_identity.record(bundle, self.IDENTITY)
+        self.assertFalse((bundle / 'build-info.json').exists(), 'a refused dist gets no identity')
+        module.write_text(wallboard_identity.module(self.IDENTITY))
+        wallboard_identity.record(bundle, self.IDENTITY)
+        self.assertEqual(json.loads((bundle / 'build-info.json').read_text()), self.IDENTITY)
+
+    def test_a_write_of_the_identity_that_fails_partway_leaves_no_build_info(self):
+        bundle, module = self.bundle()
+        module.write_text(wallboard_identity.module(self.IDENTITY))
+        write_text = Path.write_text
+
+        def disk_full(path, text, *arguments, **options):
+            # Half the text reaches the disk before it fills.
+            write_text(path, text[:len(text) // 2], *arguments, **options)
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(path))
+
+        with mock.patch.object(Path, 'write_text', disk_full):
+            with self.assertRaises(OSError):
+                wallboard_identity.record(bundle, self.IDENTITY)
+        self.assertEqual([path.name for path in bundle.iterdir()], ['dist'], 'neither build-info.json nor a part of it')
 
 
 if __name__ == '__main__':

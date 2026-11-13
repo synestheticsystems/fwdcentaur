@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use fwd_core::anchoring::git;
-use fwd_core::project::{self, InitOptions, Paths, Project};
+use fwd_core::project::{self, InitOptions, NamedProject, Paths};
 use std::path::Path;
 
 fn paths(dir: &Path) -> Paths {
@@ -257,7 +257,7 @@ fn a_marker_alone_names_a_project_outside_git_and_the_old_marker_name_still_read
     let id = uuid::Uuid::new_v4();
     std::fs::write(legacy.join(".fwd/workspace.toml"), format!("id = \"{id}\"\nname = \"old\"\n"))?;
     let found = project::resolve(&paths, &legacy, None)?;
-    assert_eq!(found.project, Project { id, name: "old".into() });
+    assert_eq!(found.project, NamedProject { id, name: "old".into() });
     assert!(project::Index::load(&paths)?.get("old")?.is_some(), "a marker teaches the index");
     Ok(())
 }
@@ -304,51 +304,37 @@ fn a_resolution_that_cannot_write_the_index_names_projects_toml_and_why() -> Res
     Ok(())
 }
 
+/// A store a project had of its own, from before the daemon kept every project in one, is found in
+/// either layout it had, or halfway from one to the other, so that the daemon hosts no such
+/// project; a project whose local files alone are in its folder has none.
 #[test]
-fn legacy_storage_moves_with_its_write_ahead_log_and_finishes_an_interrupted_move() -> Result<()> {
+fn a_store_a_project_had_of_its_own_is_found_in_any_layout_it_had() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let paths = paths(dir.path());
-    let project = Project { id: uuid::Uuid::new_v4(), name: "x".into() };
-    let old = paths.data_dir.join("workspaces").join(project.id.to_string());
-    std::fs::create_dir_all(&old)?;
-    std::fs::write(old.join("workspace.sqlite"), b"db")?;
-    std::fs::write(old.join("workspace.sqlite-wal"), b"wal")?;
-    std::fs::write(old.join("workspace.sqlite-shm"), b"shm")?;
-    std::fs::write(old.join("daemon.log"), b"old log")?;
-    // The launcher already created the new directory for its log.
-    let new = paths.storage_dir(&project);
-    std::fs::create_dir_all(&new)?;
-    std::fs::write(new.join("daemon.log"), b"new log")?;
-    paths.migrate_legacy(&project)?;
-    assert_eq!(std::fs::read(paths.db_path(&project))?, b"db");
-    assert_eq!(std::fs::read(new.join("project.sqlite-wal"))?, b"wal", "the WAL travels with its database");
-    assert_eq!(std::fs::read(new.join("project.sqlite-shm"))?, b"shm");
-    assert_eq!(std::fs::read(new.join("daemon.log"))?, b"new log");
-    assert_eq!(std::fs::read(new.join("daemon.log.legacy"))?, b"old log");
-    assert!(!old.exists());
-    paths.migrate_legacy(&project)?; // idempotent
-    assert_eq!(std::fs::read(paths.db_path(&project))?, b"db");
+    let moved = NamedProject { id: uuid::Uuid::new_v4(), name: "moved".into() };
+    std::fs::create_dir_all(paths.storage_dir(&moved))?;
+    std::fs::write(paths.checkouts_path(&moved), b"[]")?;
+    std::fs::write(paths.storage_dir(&moved).join("anchors.sqlite"), b"cache")?;
+    assert_eq!(paths.unmoved_store(&moved), None);
 
-    // An interrupted move: the directory moved but the database still has its old name.
-    let project = Project { id: uuid::Uuid::new_v4(), name: "y".into() };
-    let new = paths.storage_dir(&project);
-    std::fs::create_dir_all(&new)?;
-    std::fs::write(new.join("workspace.sqlite"), b"db")?;
-    std::fs::write(new.join("workspace.sqlite-wal"), b"wal")?;
-    paths.migrate_legacy(&project)?;
-    assert_eq!(std::fs::read(paths.db_path(&project))?, b"db");
-    assert_eq!(std::fs::read(new.join("project.sqlite-wal"))?, b"wal");
-    assert!(!new.join("workspace.sqlite").exists());
+    let kept = NamedProject { id: uuid::Uuid::new_v4(), name: "kept".into() };
+    std::fs::create_dir_all(paths.storage_dir(&kept))?;
+    std::fs::write(paths.storage_dir(&kept).join("project.sqlite"), b"db")?;
+    assert_eq!(paths.unmoved_store(&kept), Some(paths.storage_dir(&kept).join("project.sqlite")));
 
-    // A database on both sides is refused, never guessed about.
-    let project = Project { id: uuid::Uuid::new_v4(), name: "z".into() };
-    let old = paths.data_dir.join("workspaces").join(project.id.to_string());
-    std::fs::create_dir_all(&old)?;
-    std::fs::write(old.join("workspace.sqlite"), b"old")?;
-    std::fs::create_dir_all(paths.storage_dir(&project))?;
-    std::fs::write(paths.db_path(&project), b"new")?;
-    assert!(paths.migrate_legacy(&project).is_err());
-    assert_eq!(std::fs::read(paths.db_path(&project))?, b"new");
-    assert_eq!(std::fs::read(old.join("workspace.sqlite"))?, b"old");
+    let interrupted = NamedProject { id: uuid::Uuid::new_v4(), name: "interrupted".into() };
+    std::fs::create_dir_all(paths.storage_dir(&interrupted))?;
+    std::fs::write(paths.storage_dir(&interrupted).join("workspace.sqlite"), b"db")?;
+    assert_eq!(
+        paths.unmoved_store(&interrupted),
+        Some(paths.storage_dir(&interrupted).join("workspace.sqlite")),
+        "a move from the first layout to the second that stopped before the database took its new name"
+    );
+
+    let older = NamedProject { id: uuid::Uuid::new_v4(), name: "older".into() };
+    let workspace = paths.data_dir.join("workspaces").join(older.id.to_string());
+    std::fs::create_dir_all(&workspace)?;
+    std::fs::write(workspace.join("workspace.sqlite"), b"db")?;
+    assert_eq!(paths.unmoved_store(&older), Some(workspace));
     Ok(())
 }

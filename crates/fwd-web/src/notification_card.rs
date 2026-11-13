@@ -20,14 +20,14 @@
 //! ends the batch: what the author does next starts another.
 
 use crate::cards::{id_at, Item, Page};
+use crate::lozenges::{self, Target};
 use crate::referents::{Mode, Models};
-use crate::route::Route;
 use crate::thread::{self, Model};
 use crate::{fmt, modes, references, store, task_row, whose};
 use ankurah::EntityId;
 use fwd_core::model::{NotificationStatus, NotificationType, NotificationView};
 use fwd_core::ops;
-use fwd_core::reason::{self, BatchEntry, Held, MessageFacts, Named, Names, Part, RelationFacts};
+use fwd_core::reason::{self, BatchEntry, DecisionFacts, Held, MessageFacts, Named, Names, Part, RelationFacts};
 use fwd_core::routing::Batch;
 use leptos::prelude::*;
 use serde_json::Value;
@@ -153,22 +153,27 @@ pub fn cards(notifications: &[NotificationView], keep: impl Fn(&NotificationView
         .collect()
 }
 
-/// The names a sentence mentions, from the page's standing queries: read inside a closure, the
-/// sentence redraws as the names arrive or change.
+/// The names a sentence mentions, from the page's store, each record of another project with that
+/// project's name after it, as `fwd inbox` names it (`fwd_core::reason::fetch`): read inside a
+/// closure, the sentence redraws as the names arrive or change.
 pub struct StoreNames;
 
 impl Names for StoreNames {
     fn handle(&self, principal: EntityId) -> Option<String> {
-        store::principal(principal).and_then(|p| p.handle().ok())
+        store::principal(principal).map(|p| store::named(p.handle().unwrap_or_default(), &p))
     }
     fn task_title(&self, id: EntityId) -> Option<String> {
-        store::task(id).and_then(|t| t.title().ok())
+        store::task(id).map(|t| store::named(t.title().unwrap_or_default(), &t))
     }
-    fn decision(&self, id: EntityId) -> Option<(i64, String)> {
-        store::decision(id).map(|d| (d.number().unwrap_or(0), d.title().unwrap_or_default()))
+    fn decision(&self, id: EntityId) -> Option<DecisionFacts> {
+        store::decision(id).map(|d| DecisionFacts {
+            number: d.number().unwrap_or(0),
+            title: d.title().unwrap_or_default(),
+            elsewhere: store::elsewhere(&d).map(|project| project.name),
+        })
     }
     fn scope_name(&self, id: EntityId) -> Option<String> {
-        store::scope(id).and_then(|s| s.title().ok())
+        store::scope(id).map(|s| store::named(s.title().unwrap_or_default(), &s))
     }
     fn anchor(&self, id: EntityId) -> Option<(String, Option<(i64, i64)>)> {
         let a = store::anchor(id)?;
@@ -200,10 +205,10 @@ fn parts_view(parts: Vec<Part>) -> Vec<AnyView> {
         .map(|part| match part {
             Part::Text(text) => references::plain(&text).into_any(),
             Part::Name { kind: Named::Task, id, text } => {
-                view! { <a class="name" href=Route::task(id).hash()>{text}</a> }.into_any()
+                view! { <a class="name" href=move || lozenges::href(Target::Task(id))>{text}</a> }.into_any()
             }
             Part::Name { kind: Named::Decision, id, text } => {
-                view! { <a class="name" href=Route::decision(id).hash()>{text}</a> }.into_any()
+                view! { <a class="name" href=move || lozenges::href(Target::Decision(id))>{text}</a> }.into_any()
             }
             Part::Name { kind: Named::Anchor, text, .. } => view! { <span class="name mono">{text}</span> }.into_any(),
             Part::Name { text, .. } => view! { <span class="name">{text}</span> }.into_any(),

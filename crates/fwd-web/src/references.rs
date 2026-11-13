@@ -20,9 +20,11 @@
 
 use crate::lozenges::{FileVersion, Target};
 use crate::referents::Mode;
+use crate::thread::Model;
 use crate::{anchor_row, fmt, lozenges, modes, person, store, thread};
 use ankurah::EntityId;
 use fwd_core::file_mention::Version;
+use fwd_core::project_graph::Whose;
 use fwd_core::references::{find, Written};
 use leptos::prelude::*;
 
@@ -76,14 +78,15 @@ pub fn resolve<I>(text: &str, id: impl Fn(&str) -> Option<I>, handle: impl Fn(&s
 }
 
 /// What `text` draws as, from the page's standing queries: any id that reads as one is its
-/// entity's, held or not, and a handle is the principal's who has it, while no other principal of
-/// the project has it too (`fwd_core::naming::by_name`).
+/// entity's, held or not, an id an entity had before it was renumbered being that entity's
+/// (`store::current`), and a handle is the principal's who has it, while no other principal of the
+/// project has it too (`fwd_core::naming::by_name`).
 fn resolved(text: &str) -> Vec<Drawn<EntityId>> {
     let handle = |name: &str| match fwd_core::naming::by_name(&store::principals(), name, None).as_slice() {
         [one] => Some(one.id()),
         _ => None,
     };
-    resolve(text, |inner| inner.parse::<EntityId>().ok(), handle)
+    resolve(text, |inner| inner.parse::<EntityId>().ok().map(store::current), handle)
 }
 
 /// A message's text with each reference drawn as the lozenge of what it names. Each lozenge
@@ -110,11 +113,14 @@ pub fn content(text: &str) -> AnyView {
 /// the box shows names a person can read and the edit resolves them to what they named: a handle
 /// two principals share would be refused when the edit is saved.
 pub fn editable(text: &str) -> String {
-    fwd_core::references::editable(text, |id| {
-        if store::principal(id).is_some() {
-            return store::unique_handle(id).map(Written::Handle);
-        }
-        store::decision(id).and_then(|d| d.number().ok()).map(|n| Written::Bracketed(format!("D{n}")))
+    fwd_core::references::editable(text, |id| match store::kind_of(id)? {
+        Model::Principal => store::unique_handle(id).map(Written::Handle),
+        // A decision's number names the project's own decision: one of another project goes by its id.
+        Model::Decision => store::decision(id)
+            .filter(|d| store::whose(d) == Some(Whose::This))
+            .and_then(|d| d.number().ok())
+            .map(|n| Written::Bracketed(format!("D{n}"))),
+        _ => None,
     })
 }
 
@@ -135,7 +141,9 @@ pub fn plain(text: &str) -> String {
                     }
                     Target::Task(id) => format!(
                         "[{}]",
-                        store::task(id).and_then(|t| t.title().ok()).unwrap_or_else(|| thread::name(id, &models))
+                        store::task(id)
+                            .map(|t| store::named(t.title().unwrap_or_default(), &t))
+                            .unwrap_or_else(|| thread::name(id, &models))
                     ),
                     _ => format!("[{}]", thread::name(id, &models)),
                 }
