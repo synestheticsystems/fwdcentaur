@@ -32,6 +32,7 @@ mod dev_runner;
 mod mcp;
 mod mcp_stdio;
 mod moved;
+mod prime;
 mod runs_in;
 mod serve;
 mod services;
@@ -422,8 +423,36 @@ enum Command {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         count: Option<u64>,
     },
-    /// A bounded context block for an agent session: scope, tasks, unread.
-    Prime,
+    /// What the agent that runs it holds, in one read: for each principal bound to it, in every
+    /// project of the node, the questions that wait on it and those it asked, the tasks assigned to
+    /// it, its unread notifications and the ready tasks it could start.
+    ///
+    /// Without an agent (no stamp, no hook's JSON, no --session), it reads for the principal the
+    /// command acts as, in its project. The text, and the JSON a panel draws, list each record on
+    /// one line by its id, the most important first, and end, when something was left out, with a
+    /// line naming what and the command that prints it.
+    Prime {
+        /// A Claude Code session's id: read for the session's own thread, as the commands the fwd
+        /// plugin stamps there act, for a command nothing stamps, such as one a skill runs as it
+        /// loads. Only this command takes it, and it reads.
+        #[arg(long)]
+        session: Option<String>,
+        /// The most characters the output may take: past them the least important records are left
+        /// out, ready tasks first. 10000 with --format hook, the most Claude Code keeps of a
+        /// SessionStart hook's output; none otherwise.
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// The sections to print, commas between several: `questions` (those asked of the agent and
+        /// those it asked), `assigned`, `unread` and `ready`; all of them unless given. Who the agent
+        /// is is always printed, and `questions,assigned` changes only when what the agent holds does.
+        #[arg(long, value_delimiter = ',', value_enum)]
+        include: Vec<prime::Section>,
+        /// Seconds within which it ends with exit 0 whatever happens: when the daemon cannot be
+        /// reached, no principal is bound to the agent, or the time passes first, it prints one line
+        /// saying why there is nothing to show.
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
     /// The task graph in one call: tasks (with readiness) and their relations.
     Graph {
         /// Include done, cancelled and rejected tasks.
@@ -2203,6 +2232,9 @@ fn joins(matches: &ArgMatches) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Some(bound) = prime::bound() {
+        prime::within(bound, run_cli()).await
+    }
     match run_cli().await {
         // A command whose daemon went away while it ran ends at once, with the exit of a command
         // that finds no daemon (docs/design/cli.md, the exit codes), and not through the runtime's
@@ -2223,6 +2255,11 @@ fn fail(error: anyhow::Error, code: i32) -> ! {
     // A line that cannot be written has no reader left; the exit status still tells the end.
     let _ = writeln!(err, "Error: {error:?}").and_then(|()| err.flush());
     std::process::exit(code)
+}
+
+/// The format a command answers in: `--format`, else text for a terminal and JSON for anything else.
+fn format_of(cli: &Cli) -> Format {
+    cli.format.unwrap_or(if std::io::stdout().is_terminal() { Format::Text } else { Format::Json })
 }
 
 /// Parses the command line and runs the command it names.
@@ -2273,7 +2310,7 @@ async fn run_cli() -> Result<()> {
         .with_ansi(false)
         .init();
     let paths = Paths::from_env()?;
-    let format = cli.format.unwrap_or(if std::io::stdout().is_terminal() { Format::Text } else { Format::Json });
+    let format = format_of(&cli);
 
     match &cli.command {
         command if refuse_before_running(command).is_err() => return refuse_before_running(command),
@@ -2592,6 +2629,14 @@ async fn run_cli() -> Result<()> {
         Some(subject) => Some(subject.clone()),
         None => subject_here()?,
     };
+    // An agent's working set is read in every project, from any directory (`prime`).
+    if let Command::Prime { session, .. } = &cli.command {
+        let named = session.as_deref().map(|s| subject::claude_code(s, subject::MAIN)).transpose()?;
+        if let Some(agent) = named.as_ref().or(subject.as_ref()) {
+            return prime::for_agent(&cli, paths, format, agent, session.as_deref(), thread_hook && named.is_none())
+                .await;
+        }
+    }
     let resolved = resolve_project(&cli, &paths)?;
     let client = daemon::ensure_daemon(&paths, &resolved.project, autostart(&cli)?).await?;
     // The daemon learns of the checkout the command runs in as one of the project the command
@@ -2986,7 +3031,7 @@ fn reads_about_caller(command: &Command) -> bool {
     let own = |whose: &Option<String>| whose.as_deref().is_none_or(|w| w == "me");
     match command {
         Command::Inbox { for_handle, .. } | Command::Watch { for_handle, .. } => own(for_handle),
-        Command::Prime | Command::Session { command: SessionCommand::StopCheck } => true,
+        Command::Prime { .. } | Command::Session { command: SessionCommand::StopCheck } => true,
         Command::Task { command: TaskCommand::List { mine, .. } } => *mine,
         Command::Task { command: TaskCommand::Next { .. } } => true,
         _ => false,
@@ -3686,15 +3731,15 @@ async fn say_unbound(app: &App) -> Result<()> {
     if app.format == Format::Hook || app.acting.is_none() {
         return Ok(());
     }
-    if let Some(notice) = unbound_notice(app).await? {
+    if let Some(notice) = unbound_notice(app.graph(), app.me).await? {
         app.note(format!("fwd: {notice}"));
     }
     Ok(())
 }
 
-/// The notice for the principal `app` acts as, when it holds triage and serves nothing.
-async fn unbound_notice(app: &App) -> Result<Option<String>> {
-    let p: PrincipalView = app.graph().get(app.me).await?;
+/// The notice for `principal`, when it holds triage and serves nothing.
+async fn unbound_notice(graph: &ProjectGraph, principal: EntityId) -> Result<Option<String>> {
+    let p: PrincipalView = graph.get(principal).await?;
     Ok(ops::serves_nothing_yet(&p).then(|| fwd_core::guidance::unbound(&p.handle().unwrap_or_default())))
 }
 
@@ -4790,32 +4835,6 @@ async fn notification_with_message(
         None => None,
     };
     Ok((nj, message))
-}
-
-/// How many ready tasks `fwd prime` lists, so that what it puts into an agent's context stays
-/// short; a list it cut says so ([`primer_cut`]), and the hook's first line counts every one.
-const PRIMED_READY: usize = 10;
-/// How many unread notifications `fwd prime` lists, for the same reason.
-const PRIMED_UNREAD: usize = 20;
-
-/// What `fwd prime` says after its answer when it listed fewer of the `ready` tasks or the
-/// `unread` notifications than there are, as `fwd task list` says when its limit cut it, naming
-/// the commands that list them all; none when it listed every one. The task list is given a
-/// limit of every ready task, since its own default would cut a long one again; the inbox lists
-/// every unread notification as it is.
-fn primer_cut(ready: usize, unread: usize) -> Option<String> {
-    let mut shown = Vec::new();
-    let mut whole = Vec::new();
-    if ready > PRIMED_READY {
-        shown.push(format!("{PRIMED_READY} of {ready} ready tasks"));
-        whole.push(format!("`fwd task list --ready --limit {ready}`"));
-    }
-    if unread > PRIMED_UNREAD {
-        shown.push(format!("{PRIMED_UNREAD} of {unread} unread notifications"));
-        whole.push("`fwd inbox --unread`".to_string());
-    }
-    let verb = if whole.len() == 1 { "lists" } else { "list" };
-    (!shown.is_empty()).then(|| format!("fwd: {} shown; {} {verb} the rest", shown.join(" and "), whole.join(" and ")))
 }
 
 async fn run(app: &App, command: Command) -> Result<()> {
@@ -5942,58 +5961,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 "me": app.acting.map(|me| me.to_base64()),
             }))
         }
-        Command::Prime => {
-            let mut v = json!({"principal": app.me_handle, "project": app.project.name});
-            if let Some(scope) = app.scope {
-                if let Followed::Held { found, .. } = graph.follow::<ScopeView>(scope).await? {
-                    v["scope"] = ops::json_of_scope(&found)?;
-                }
-            }
-            let ready_tasks = ops::ready_tasks(graph, Some(app.me)).await?;
-            let ready: Vec<Value> =
-                ready_tasks.iter().take(PRIMED_READY).map(|t| ops::json_of_task(t, None)).collect::<Result<_>>()?;
-            v["ready_tasks"] = Value::Array(ready);
-            let unread = ops::inbox(graph, app.me, true).await?;
-            let mut lines = Vec::new();
-            for n in unread.iter().take(PRIMED_UNREAD) {
-                let (nj, m) = notification_with_message(graph, n, app.acting).await?;
-                lines.push(render_notification(&nj, m.as_ref(), true));
-            }
-            v["unread"] = json!(lines);
-            let guidance = lead_guidance(graph, app.me, app.scope).await?;
-            if app.format == Format::Hook {
-                let mut text = format!(
-                    "fwdcentaur context for {}: {} ready task(s), {} unread notification(s).\nReady: {}\nUnread:\n{}\nUse `fwd task next --claim` to take work, `fwd inbox pop` to read notifications.",
-                    app.me_handle,
-                    // Every ready task, as the unread count is every unread notification, though
-                    // `Ready:` lists only the first [`PRIMED_READY`].
-                    ready_tasks.len(),
-                    unread.len(),
-                    v["ready_tasks"].as_array().map(|a| a.iter().map(|t| format!("{} {}", t["id"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("; ")).unwrap_or_default(),
-                    lines.join("\n")
-                );
-                if let Some(guidance) = guidance {
-                    text.push_str(&format!("\n{guidance}"));
-                }
-                // A triage agent that serves nothing reads why in its context at the start of its
-                // session and after each compaction, as its every other command says it on
-                // standard error (`say_unbound`).
-                if let Some(notice) = unbound_notice(app).await? {
-                    text.push_str(&format!("\n{notice}"));
-                }
-                println!("{text}");
-                Ok(())
-            } else {
-                if let Some(guidance) = guidance {
-                    app.note(format!("fwd: {guidance}"));
-                }
-                app.print(v)?;
-                if let Some(cut) = primer_cut(ready_tasks.len(), unread.len()) {
-                    app.note(cut);
-                }
-                Ok(())
-            }
-        }
+        Command::Prime { max_chars, include, .. } => prime::for_app(app, max_chars, &include).await,
         Command::Session { command } => match command {
             SessionCommand::StopCheck => {
                 let unread = ops::inbox(graph, app.me, true).await?;
@@ -6721,30 +6689,6 @@ mod tests {
         let refusal = include(&["--include", "relations,everything"]).unwrap_err();
         let expected = "invalid value 'everything' for '--include <INCLUDE>': --include takes relations and messages";
         assert!(refusal.contains(expected), "{refusal}");
-    }
-
-    /// `fwd prime` says which of its lists it cut, of how many, and which commands list the rest;
-    /// lists it gave whole, however near their caps, it does not mention.
-    #[test]
-    fn the_primer_names_each_list_it_cut_and_where_the_rest_is() {
-        assert_eq!(primer_cut(PRIMED_READY, PRIMED_UNREAD), None);
-        assert_eq!(
-            primer_cut(12, 3).as_deref(),
-            Some("fwd: 10 of 12 ready tasks shown; `fwd task list --ready --limit 12` lists the rest")
-        );
-        // More than `fwd task list`'s default limit of 50: the command it names lists them all.
-        assert_eq!(
-            primer_cut(60, 3).as_deref(),
-            Some("fwd: 10 of 60 ready tasks shown; `fwd task list --ready --limit 60` lists the rest")
-        );
-        assert_eq!(
-            primer_cut(4, 31).as_deref(),
-            Some("fwd: 20 of 31 unread notifications shown; `fwd inbox --unread` lists the rest")
-        );
-        assert_eq!(
-            primer_cut(12, 31).as_deref(),
-            Some("fwd: 10 of 12 ready tasks and 20 of 31 unread notifications shown; `fwd task list --ready --limit 12` and `fwd inbox --unread` list the rest")
-        );
     }
 
     /// The words of every command that runs (`task create`, `inbox` and `inbox pop`), for the

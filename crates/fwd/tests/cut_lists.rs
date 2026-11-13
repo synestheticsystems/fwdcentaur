@@ -1,12 +1,12 @@
 //! What the CLI says when it lists fewer tasks than there are, so that a reader can tell a cut
 //! list from a whole one: `fwd task list` names how many it showed of how many on standard error
 //! when `--limit` cut the list, its JSON staying a plain array, and `fwd prime`, which lists the
-//! first ten ready tasks, counts every one in its hook's text and says on standard error otherwise
-//! that it cut the list. Each test runs the CLI against a scratch daemon of its own.
+//! first ten ready tasks, counts every one and says in its text's last line, or beside its JSON on
+//! standard error, that it cut the list. Each test runs the CLI against a scratch daemon of its own.
 
 use anyhow::{anyhow, Result};
 use fwd_core::anchoring::git;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -135,31 +135,31 @@ fn a_list_the_limit_cut_says_how_many_it_shows_of_how_many() -> Result<()> {
     Ok(())
 }
 
-/// `fwd prime --format hook`, which puts its text into an agent's context, counts every ready task,
-/// as it counts every unread notification, while it lists the first ten after `Ready:`; without
-/// the hook's format it lists ten and says after them on standard error that it cut the list, and
-/// where the rest is. Given no hook's JSON, the command acts for the person, for whom every task
-/// here is ready.
+/// `fwd prime` counts every ready task, while it lists the first ten, and says that it cut the
+/// list and where the rest is: in its text's last line, which a hook puts into an agent's context,
+/// and with JSON on standard error, its JSON saying it of the section. Given no hook's JSON, the
+/// command acts for the person, for whom every task here is ready.
 #[test]
 fn prime_counts_every_ready_task_and_lists_ten() -> Result<()> {
     let s = Scratch::new()?;
     for n in 1..=12 {
         s.file(&format!("Task {n}"), &[])?;
     }
+    let cut = "fwd: 10 of 12 ready tasks shown; `fwd task list --ready --limit 12` lists the rest";
     let (primed, said) = s.json_saying(&["prime"])?;
-    assert_eq!(primed["ready_tasks"].as_array().map(Vec::len), Some(10), "{primed}");
-    assert_eq!(said, "fwd: 10 of 12 ready tasks shown; `fwd task list --ready --limit 12` lists the rest\n");
-
-    let (primed, said) = s.saying(&["prime", "--format", "hook"])?;
-    assert_eq!(said, "", "the hook's text counts them instead");
-    assert!(
-        primed.starts_with("fwdcentaur context for tester: 12 ready task(s), 0 unread notification(s).\n"),
+    let ready = &primed["principals"][0]["sections"][4];
+    assert_eq!(
+        (&ready["section"], &ready["shown"], &ready["of"], &ready["rest"]),
+        (&json!("ready"), &json!(10), &json!(12), &json!("fwd task list --ready --limit 12")),
         "{primed}"
     );
-    let listed = primed
-        .lines()
-        .find_map(|line| line.strip_prefix("Ready: "))
-        .ok_or_else(|| anyhow!("no Ready line in {primed}"))?;
-    assert_eq!(listed.split("; ").count(), 10, "{listed}");
+    assert_eq!(said, format!("{cut}\n"));
+
+    let (primed, said) = s.saying(&["prime", "--format", "hook"])?;
+    assert_eq!(said, "", "the hook's text says it instead");
+    let lines: Vec<&str> = primed.lines().collect();
+    let at = lines.iter().position(|line| *line == "Ready to start (12):").ok_or_else(|| anyhow!("{primed}"))?;
+    assert_eq!(lines[at + 1..lines.len() - 2].len(), 10, "{primed}");
+    assert_eq!(lines.last(), Some(&cut), "{primed}");
     Ok(())
 }
