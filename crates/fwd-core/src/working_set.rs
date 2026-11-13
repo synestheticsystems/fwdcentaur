@@ -11,7 +11,7 @@
 use crate::model::*;
 use crate::ops::{self, MessageContext, ASKS_KEY, ASKS_PROJECT};
 use crate::project_graph::{InProjectView, ProjectGraph, ProjectRecord};
-use crate::query::{literal, with_id};
+use crate::query::with_strings;
 use crate::route::Route;
 use crate::{reason, routing, subject};
 use ankurah::EntityId;
@@ -220,9 +220,10 @@ impl Read<'_> {
     /// The open questions asked of `p` and those it asked, each list by the priority it wants its
     /// answer at, then newest first, as the Questions page lists them, then by id. Only messages
     /// that ask someone are read: those that ask `p` by its id, wherever they are; in its project,
-    /// those that ask it by its handle and, for a triage agent, those asked of no one in particular,
-    /// which routing's rule weighs (`routing::asked_of`), since only a triage agent answers first
-    /// for them; and those `p` wrote that ask someone, wherever they are.
+    /// those that ask it by its handle, with or without the at-sign routing reads it with, and, for
+    /// a triage agent, those asked of no one in particular, which routing's rule weighs
+    /// (`routing::asked_of`), since only a triage agent answers first for them; and those `p` wrote
+    /// that ask someone, wherever they are. A question two of these find is listed once.
     async fn questions(
         &mut self,
         graph: &ProjectGraph,
@@ -230,16 +231,18 @@ impl Read<'_> {
         principals: &[PrincipalView],
     ) -> Result<(Listed, Listed)> {
         let me = p.id();
-        let open = format!("status = '{}'", MessageStatus::Active);
-        let asks_project = format!("context.{ASKS_KEY} = '{ASKS_PROJECT}'");
-        let by_id = format!("{open} AND context.to = '{}'", literal(&me.to_base64())?);
-        let mut asked: Vec<MessageView> = graph.fetch_in_every_project(by_id.as_str()).await?;
-        let mut by_rule = format!("context.to = '{}'", literal(&p.handle()?)?);
+        let mut asked: Vec<MessageView> = graph.open_questions_to(me).await?;
+        let mut by_rule = format!("status = '{}' AND (context.to = ? OR context.to = ?", MessageStatus::Active);
         if ops::holds(p, AgentRole::Triage) {
-            by_rule = format!("{by_rule} OR {asks_project}");
+            by_rule.push_str(&format!(" OR context.{ASKS_KEY} = '{ASKS_PROJECT}'"));
         }
+        by_rule.push(')');
+        let handle = p.handle()?;
+        let mut candidates: Vec<MessageView> =
+            graph.fetch(with_strings(&by_rule, &[&handle, &format!("@{handle}")])?).await?;
+        candidates.retain(|m| asked.iter().all(|a| a.id() != m.id()));
         let mut asked_of_you = Listed::default();
-        for m in graph.fetch::<MessageView>(format!("{open} AND ({by_rule})").as_str()).await? {
+        for m in candidates {
             match MessageContext::from_view(&m) {
                 Ok(mc) => {
                     if routing::asked_of(graph, principals, &mc).await?.is_some_and(|a| a.recipient() == me) {
@@ -249,8 +252,7 @@ impl Read<'_> {
                 Err(_) => asked_of_you.unreadable.push(m.id()),
             }
         }
-        let mine = format!("author = ? AND {open} AND (context.to IS NOT NULL OR {asks_project})");
-        let wrote: Vec<MessageView> = graph.fetch_in_every_project(with_id(&mine, me)?).await?;
+        let wrote = graph.open_questions_by(me).await?;
         let mut you_asked = Listed::default();
         self.questions_as_records(graph, asked, true, &mut asked_of_you).await?;
         self.questions_as_records(graph, wrote, false, &mut you_asked).await?;
@@ -302,8 +304,7 @@ impl Read<'_> {
     /// the started ones first, then those to start, those in review and those proposed, each by
     /// priority, a task with none last, then oldest first, then by id.
     async fn assigned(&mut self, graph: &ProjectGraph, me: EntityId) -> Result<Listed> {
-        let held = "assignee = ? AND status != 'done' AND status != 'cancelled' AND status != 'rejected'";
-        let tasks: Vec<TaskView> = graph.fetch_in_every_project(with_id(held, me)?).await?;
+        let tasks = graph.unfinished_tasks_assigned_to(me).await?;
         let mut listed = Listed::default();
         let mut keyed = Vec::new();
         for t in tasks {
