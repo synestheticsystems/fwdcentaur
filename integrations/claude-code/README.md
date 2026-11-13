@@ -94,7 +94,7 @@ Each hook is one `fwd` call:
 
 | Hook event | Command | What happens |
 |---|---|---|
-| `SessionStart` | `fwd prime --format hook` | The scope, the ready tasks and the unread notifications go into the agent's context at startup, on resume, after `/clear` and after compaction (the entry has no matcher, so it runs for each). |
+| `SessionStart` | `fwd prime --format hook` | What the agent holds in each project, its open questions, the tasks assigned to it and its unread notifications, then the ready tasks, goes into its context at startup, on resume, after `/clear` and after compaction (the entry has no matcher, so it runs for each), within the 10,000 characters Claude Code keeps of it. |
 | `UserPromptSubmit` | `fwd inbox pop --format hook --hook-event UserPromptSubmit` | Notifications that arrived since the agent's last step go into its context and are marked read. It prints nothing when none arrived. |
 | `PostToolBatch` | `fwd inbox pop --format hook --hook-event PostToolBatch` | The same after each batch of tool calls. Until 2026-09-29 it passed `--heartbeat` and recorded the scope's heartbeat, which went with the scope's owner (D108, "A scope has no owner"); the build after that took the flag and ignored it, and fwd refuses it now, saying to take it out, so a hook written before fails until `--heartbeat` is taken out of its command in `.claude/settings.local.json` (or `.claude/settings.json`). |
 | `Stop` | `fwd session stop-check --format hook` | While unread notifications remain, the agent is kept working (`{"decision":"block",...}`); otherwise it may stop (`{}`). Claude Code lets it stop anyway after eight blocks in a row, and runs it for the session's own thread alone. |
