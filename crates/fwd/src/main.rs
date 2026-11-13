@@ -17,9 +17,10 @@ use fwd_core::naming;
 use fwd_core::not_before;
 use fwd_core::ops::{self, Amend, CreateDecision, CreateScope, CreateTask, EditScope, Kind, MessageContext};
 use fwd_core::project::{self, Checkout, InitOptions, NamedProject, Paths, Resolved};
-use fwd_core::project_graph::ProjectGraph;
+use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
 use fwd_core::rules::{self, DecisionMove, Verb};
 use fwd_core::subject;
+use fwd_core::task_move;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::IsTerminal;
@@ -30,6 +31,8 @@ mod claude_code;
 mod dev_runner;
 mod mcp;
 mod mcp_stdio;
+mod moved;
+mod runs_in;
 mod serve;
 mod services;
 mod watch;
@@ -84,7 +87,9 @@ macro_rules! naming_in_text {
 )]
 struct Cli {
     /// The project: a name, an id, or a directory inside one of its checkouts (default: found from
-    /// the current directory through its git upstream, or a `.fwd/project.toml` marker).
+    /// the current directory through its git upstream, or a `.fwd/project.toml` marker). A command
+    /// that acts on a record of another project runs in that project instead, and says so; so does
+    /// one that works in another project's scope, unless --project is typed on its command line.
     #[arg(long, global = true, env = "FWD_PROJECT")]
     project: Option<String>,
     /// Fail instead of starting the daemon when none is running.
@@ -109,8 +114,10 @@ struct Cli {
     /// own inbox and tasks.
     #[arg(long = "as", global = true, env = "FWD_AS", allow_hyphen_values = true)]
     act_as: Option<String>,
-    /// The scope this session works in: any scope, whoever made it. Without it, the scope the
-    /// checkout is bound to (`fwd scope attach-dir`), else the one active scope naming its branch.
+    /// The scope this session works in: any scope, whoever made it, by its id or its first six
+    /// characters or more, of any project; a command that acts on no one record, given a scope of
+    /// another project, runs in that project, unless --project is typed on its command line. Without it, the scope the checkout is bound to (`fwd scope
+    /// attach-dir`), else the one active scope naming its branch.
     #[arg(long, global = true, env = "FWD_SCOPE", allow_hyphen_values = true)]
     scope: Option<String>,
     #[command(subcommand)]
@@ -306,11 +313,15 @@ enum Command {
     },
     /// Reply in a message's thread. Accepts a message id or a notification id.
     ///
-    /// Given a notification's id, it replies to the message behind the notification, and the
-    /// transaction that posts the reply marks the notification read, so that a watch armed next
-    /// does not print it again; the answer names the notification beside `record` as `settled`.
-    /// Only the notification's recipient replies through it: another principal's is refused,
-    /// naming whose it is and the message's id. Given a message's id, it changes no notification.
+    /// Given a notification's id, it replies to the message behind the notification and marks the
+    /// notification read, so that a watch armed next does not print it again; the answer names
+    /// the notification beside `record` as `settled`. When the message is in the notification's
+    /// project, the transaction that posts the reply marks it, and the two land together or not
+    /// at all. When the message is another project's, the reply is made there and the notification
+    /// is marked read after it: should that fail, the reply stands, without `settled`, and a note
+    /// beside it says so. Only the notification's recipient replies through it: another
+    /// principal's is refused, naming whose it is and the message's id. Given a message's id, it
+    /// changes no notification.
     #[command(after_long_help = naming_in_text!(
         "fwd reply NlBXRW2Z \"done in [[8z_sQwsR]], as [[D35]] says; @triage-bot, it is ready for review\""
     ))]
@@ -324,8 +335,8 @@ enum Command {
     /// The forward is a reply in the same thread, addressed to them, quoting the original. Its
     /// note is message text.
     ///
-    /// Given a notification's id, the transaction that posts the forward marks the notification
-    /// read, as `fwd reply` does, and the answer names it beside `record` as `settled`; only the
+    /// Given a notification's id, it marks the notification read as `fwd reply` does, with the
+    /// forward or after it, and the answer names it beside `record` as `settled`; only the
     /// notification's recipient forwards it, as for `fwd reply`. Given a message's id, it changes no
     /// notification.
     #[command(after_long_help = naming_in_text!(
@@ -959,6 +970,56 @@ enum TaskCommand {
         #[arg(allow_hyphen_values = true)]
         id: String,
     },
+    /// Move tasks to another project, each with everything that belongs to it: its messages and
+    /// their replies, the relations from it and from its messages, and the former ids of all of
+    /// these. A relation stays with its `from` end, so a task or a highlight that is one of its
+    /// steps keeps its step where it is, and the checklist still shows it. No connection is cut,
+    /// copied or rewritten: what points at a task, what it depends on, the decisions it cites and
+    /// every person or agent it names go on naming what they named, a person or an agent of the
+    /// project it left shown with that project's name. Its scopes of the project it leaves are
+    /// taken off it, and it is worked in the scope --to-scope names there, or in none without it.
+    /// Each moved task gets a comment by you saying where it came from and went, with --note, which
+    /// tells the task's people as a comment does. The command runs in the tasks' project, as you
+    /// are there, and anyone who may amend a task there may move it. One move runs at a time on the
+    /// daemon's node, so a second waits for the first and sees what it did. Run it again to finish
+    /// a move that stopped partway; a task already wholly there is reported so, and keeps its
+    /// scopes. The tasks come last, after the flags.
+    ///
+    /// Example:
+    ///   fwd task move --to beta --to-scope Replication --note "replication work" Ab3dEf12 Xy7pQr2W
+    #[command(override_usage = "fwd task move --to <project> [--to-scope <scope>] [--note <text>] <id>...")]
+    Move {
+        /// The tasks, by id, the start of one or a former id: all of one project, or in the
+        /// destination already. They come last, after the flags: an id may start with `-`, so every
+        /// word after the first id is read as another id.
+        #[arg(allow_hyphen_values = true, required = true, value_parser = task_after_the_flags)]
+        ids: Vec<String>,
+        /// The project they move to: its name, as `fwd project list` gives it, or its id.
+        #[arg(long)]
+        to: String,
+        /// The scope of that project the tasks are worked in there: its title, its id or the start
+        /// of it. Without it they arrive in no scope.
+        #[arg(long)]
+        to_scope: Option<String>,
+        /// Why they move, kept in the comment that records the move; `@handle` and `[[<id>]]` name
+        /// what they name in a comment.
+        #[arg(long)]
+        note: Option<String>,
+    },
+}
+
+/// A task `fwd task move` takes, which comes after its flags: a flag of the command given after the
+/// first task, read as a task since an id may start with `-`, is refused with a sentence that says
+/// so, where the parser would say that `--to` was not given. An id has six characters at least,
+/// so only one that starts with `--note` could read as a flag here, and it is named by more of it.
+fn task_after_the_flags(typed: &str) -> std::result::Result<String, String> {
+    let flag = typed.split('=').next().unwrap_or(typed);
+    if ["--to", "--to-scope", "--note"].contains(&flag) {
+        return Err(format!(
+            "`{flag}` comes before the tasks, which come last: an id may start with `-`, so every word after the first task is read as another task; give `fwd task move --to <project> [--to-scope <scope>] [--note <text>] <id>...`"
+        ));
+    }
+    Ok(typed.to_string())
 }
 
 #[derive(Args, Debug)]
@@ -1548,9 +1609,28 @@ struct App {
     /// ([`App::needed_scope`]).
     several: Option<(Option<String>, Vec<EntityId>)>,
     format: Format,
+    /// The name of the project the command was placed in because the record it acts on, or the
+    /// scope it works in, is a record of that project (docs/DECISIONS.md, D181; [`App::place_in`]),
+    /// which its answer names; none for a command that runs in the project it started in.
+    placed_in: Option<String>,
+    /// The ids typed on the command that placing it resolved before it ran ([`runs_in::runs_in`]),
+    /// which [`App::id`] gives without reading every project's ids again.
+    typed: Vec<runs_in::Typed>,
+    /// For `task move`, the move as placing the command read it, holding the node's move lock
+    /// until the command ends, which `task move` then makes ([`runs_in::RunsIn::moving`]).
+    moving: Option<task_move::Move>,
 }
 
 impl App {
+    /// Records that the command runs in `project` rather than the one it started in, as if it had
+    /// been run there, because `because` (the record it acts on, as [`runs_in::RunsIn`] names it)
+    /// is a record of that project, and says so beside its answer; a JSON answer names the project
+    /// as `from_project` ([`App::print`]).
+    fn place_in(&mut self, because: &str, project: &str) {
+        self.note(format!("NOTE: {because} is from project `{project}`, so this command ran there"));
+        self.placed_in = Some(project.to_string());
+    }
+
     /// Anchors are made from files, so this needs a checkout of one of the project's repositories:
     /// its upstream claimed by the project in the index, or its root marker naming the project.
     fn checkout_root(&self) -> Result<&Path> {
@@ -1612,10 +1692,14 @@ impl App {
         self.scope.map(|scope| if self.scope_typed { ops::Serves::Scope(scope) } else { ops::Serves::Found(scope) })
     }
 
-    /// An entity named on the command line among `kinds`: its id, `D<number>` for a decision, or
-    /// the first six or more characters of its id (`ops::resolve_id`).
+    /// An entity named on the command line among `kinds`, in any project: its id, `D<number>` for
+    /// a decision of this project, or the first six or more characters of its id
+    /// (`ops::resolve_id`); an id placing the command resolved as it was found then.
     async fn id(&self, s: &str, kinds: &[Kind]) -> Result<EntityId> {
-        ops::resolve_id(self.graph(), s, kinds).await
+        match runs_in::typed_record(&self.typed, s, kinds) {
+            Some(record) => Ok(record),
+            None => ops::resolve_id(self.graph(), s, kinds).await,
+        }
     }
 
     async fn opt_id(&self, s: Option<&str>, kinds: &[Kind]) -> Result<Option<EntityId>> {
@@ -1644,7 +1728,15 @@ impl App {
         }
     }
 
-    fn print(&self, value: Value) -> Result<()> {
+    /// Prints `value`, the command's answer: as JSON, an object names the project the command was
+    /// placed in as `from_project` when the record it acts on is another project's
+    /// ([`App::place_in`]).
+    fn print(&self, mut value: Value) -> Result<()> {
+        if let (Some(project), Some(answer), false) =
+            (&self.placed_in, value.as_object_mut(), self.format == Format::Text)
+        {
+            answer.insert("from_project".into(), json!(project));
+        }
         if let Output::Captured(captured) = &self.out {
             captured.lock().expect("captured output").values.push(value);
             return Ok(());
@@ -1731,13 +1823,15 @@ fn summary_line(map: &serde_json::Map<String, Value>) -> Option<String> {
         .iter()
         .find_map(|k| map.get(*k).and_then(Value::as_str))?;
     let status = map.get("status").and_then(Value::as_str).map(|s| format!(" [{s}]")).unwrap_or_default();
+    // An entity of another project names it, as its JSON does.
+    let project = map.get("project").and_then(Value::as_str).map(|p| format!(" in {p}")).unwrap_or_default();
     let readiness = map
         .get("readiness")
         .and_then(|r| r.get("state"))
         .and_then(Value::as_str)
         .map(|s| format!(" ({s})"))
         .unwrap_or_default();
-    Some(format!("{id} {head}{status}{readiness}"))
+    Some(format!("{id} {head}{status}{readiness}{project}"))
 }
 
 fn render_object(map: &serde_json::Map<String, Value>, indent: usize) -> String {
@@ -1787,11 +1881,11 @@ async fn roles_changed(app: &App, principal: EntityId, before: Option<ops::Servi
     if let Some(before) = before {
         let principals = ops::principals(graph).await?;
         for &scope in before.scopes.iter().filter(|s| !after.serves_scope(**s)) {
-            let named = scope_words(graph, scope).await;
+            let named = scope_words(graph, scope).await?;
             match ops::front_line(&principals, Some(scope)) {
                 Some(f) => app.note(format!(
                     "fwd: @{}, which serves the whole project, answers first for the scope {named} now",
-                    handle_of(graph, f.agent).await
+                    ops::handle_of(graph, f.agent).await?
                 )),
                 None => app.note(format!(
                     "fwd: the scope {named} has no triage agent now: the questions asked of it wait on the Questions page and reach the next agent that serves it{unread}; its comments, proposals and reviews reach no triage agent meanwhile"
@@ -1830,7 +1924,7 @@ async fn principal_json(graph: &ProjectGraph, p: &PrincipalView) -> Result<Value
         let mut named = Vec::with_capacity(scopes.len());
         for id in scopes.iter().filter_map(Value::as_str) {
             let title = match id.parse::<EntityId>() {
-                Ok(scope) => scope_title(graph, Some(scope)).await,
+                Ok(scope) => scope_title(graph, Some(scope)).await?,
                 Err(_) => None,
             };
             named.push(json!({"id": id, "title": title}));
@@ -2023,6 +2117,7 @@ const JOINING: &[(&str, Writes)] = &[
     ("task hold", Writes::Yes),
     ("task release", Writes::Yes),
     ("task explain", Writes::No),
+    ("task move", Writes::Yes),
     ("step add", Writes::Yes),
     ("step list", Writes::No),
     ("step check", Writes::Yes),
@@ -2155,6 +2250,10 @@ async fn run_cli() -> Result<()> {
     // the checkout finds: a question names the scope it asks only so (`fwd ask --scope`), and a
     // triage agent that serves scopes already takes another as it names itself only so.
     let scope_typed = matches.value_source("scope") == Some(ValueSource::CommandLine);
+    // Whether `--project` was typed on the command line, told apart from FWD_PROJECT: a scope never
+    // overrides a project the command line names, while it places a command FWD_PROJECT or the
+    // directory would otherwise place (`runs_in::runs_in`).
+    let project_typed = matches.value_source("project") == Some(ValueSource::CommandLine);
     let serving = matches!(cli.command, Command::Daemon { command: DaemonCommand::Serve { .. } });
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -2493,56 +2592,95 @@ async fn run_cli() -> Result<()> {
         Some(subject) => Some(subject.clone()),
         None => subject_here()?,
     };
-    let app = connect(&cli, paths, format, subject, typed_as, thread_hook, scope_typed).await?;
-    // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
-    // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
-    // after it, as a question a retired triage agent never heard of reaches the next one (task
-    // Wbkkwpyq; docs/design/agents-and-inbox.md, rule 5 of the routing rules).
-    if hooked.is_some() {
-        let active = match app.acting {
-            Some(me) => app.graph().get::<PrincipalView>(me).await?.active()?,
-            None => false,
+    let resolved = resolve_project(&cli, &paths)?;
+    let client = daemon::ensure_daemon(&paths, &resolved.project, autostart(&cli)?).await?;
+    // The daemon learns of the checkout the command runs in as one of the project the command
+    // resolved to, whose repository it is, whichever project the command then runs in.
+    if let Some(c) = &resolved.checkout {
+        report_checkout(&client, c).await;
+    }
+    // A command that acts on a record of another project, or that works in a scope of another
+    // project and was given no `--project`, runs in that project, as if `--project` had named it,
+    // and says so (docs/DECISIONS.md, D181): it is placed before whom it acts as is found, so that
+    // its caller is found, or made, there, and nothing is read for the caller or written where it
+    // started.
+    let placing = runs_in::runs_in(&client.graph, &cli.command, project_typed, cli.scope.as_deref(), &paths, || {
+        eprintln!("{MOVE_WAITS}")
+    });
+    let mut placed = client.while_connected(placing).await?;
+    // A failure once the command is placed says where it ran, and what it suggests runs there
+    // (`runs_in::RanIn::failure`).
+    let ran_in = placed.ran_in();
+    let ran = async move {
+        let (resolved, client) = match &placed.project {
+            Whose::Other(there) => {
+                let project = NamedProject { id: there.uuid, name: there.name.clone() };
+                let client = daemon::ensure_daemon(&paths, &project, autostart(&cli)?).await?;
+                (Resolved { project, ..resolved }, client)
+            }
+            Whose::This => (resolved, client),
         };
-        if !active {
-            return Ok(());
+        let calling = Calling { subject, typed_as, thread_hook, scope_typed };
+        let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
+        app.moving = placed.moving.take();
+        if let Whose::Other(there) = &placed.project {
+            app.place_in(&placed.because, &there.name);
         }
-    }
-    let words = command_words(&matches).0;
-    let writes = joining || WRITES_TOO.contains(&words.as_str());
-    let stamping = stamps(joining, &words);
-    refuse_by_identity(&app, &cli.command, writes).await?;
-    // The watch takes the connection for itself, to open it again when the daemon restarts; it
-    // writes nothing, so it makes no one belong.
-    if let Command::Watch { for_handle, timeout, count } = cli.command {
-        let who = principal_for(&app, for_handle.as_deref()).await?;
-        if let Some(guidance) = lead_guidance(app.graph(), who, app.scope).await? {
-            eprintln!("{guidance}");
+        // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
+        // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
+        // after it, as a question a retired triage agent never heard of reaches the next one (task
+        // Wbkkwpyq; docs/design/agents-and-inbox.md, rule 5 of the routing rules).
+        if hooked.is_some() {
+            let active = match app.acting {
+                Some(me) => app.graph().get::<PrincipalView>(me).await?.active()?,
+                None => false,
+            };
+            if !active {
+                return Ok(());
+            }
         }
-        say_unbound(&app).await?;
-        // The watch ends the process itself, after its last line or an error (`watch::run`).
-        match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
+        let words = command_words(&matches).0;
+        let writes = joining || WRITES_TOO.contains(&words.as_str());
+        let stamping = stamps(joining, &words);
+        refuse_by_identity(&app, &cli.command, writes).await?;
+        // The watch takes the connection for itself, to open it again when the daemon restarts; it
+        // writes nothing, so it makes no one belong.
+        if let Command::Watch { for_handle, timeout, count } = cli.command {
+            let who = principal_for(&app, for_handle.as_deref()).await?;
+            if let Some(guidance) = lead_guidance(app.graph(), who, app.scope).await? {
+                eprintln!("{guidance}");
+            }
+            say_unbound(&app).await?;
+            // The watch ends the process itself, after its last line or an error (`watch::run`).
+            match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
+        }
+        let command = cli.command;
+        let body = run_as_caller(&app, command, joining, stamping);
+        // A command whose daemon goes away while it runs ends within a bound and says so, rather than
+        // with Ankurah's words for a read that found no daemon (`Client::while_connected`). One that
+        // writes also ends so whenever its socket closed while it ran, even when it succeeded, since
+        // a commit its node made meanwhile reached no daemon (`Client::while_writing`). `inbox pop`
+        // writes, marking what it prints as read, but runs as a read: a mark that reached no daemon
+        // only brings the same notifications back at the next pop, while Claude Code drops what a
+        // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
+        // would reach no one.
+        // A move run again finishes what it began, so its loss says to run it again.
+        let client = app.client.as_ref().expect("the CLI connected through its client");
+        let stamped = if words == "task move" {
+            client.while_finishing(body).await
+        } else if writes && words != "inbox pop" {
+            client.while_writing(body).await
+        } else {
+            client.while_connected(body).await
+        }?;
+        // A stamp the daemon never got ended the command above as a lost write does. One that failed
+        // with the socket open failed after the command's work was made, and a bare error would invite
+        // running the command again, which would make the work twice: the error says that the work
+        // is recorded.
+        stamped.context(STAMP_FAILED)
     }
-    let command = cli.command;
-    let body = run_as_caller(&app, command, joining, stamping);
-    // A command whose daemon goes away while it runs ends within a bound and says so, rather than
-    // with Ankurah's words for a read that found no daemon (`Client::while_connected`). One that
-    // writes also ends so whenever its socket closed while it ran, even when it succeeded, since
-    // a commit its node made meanwhile reached no daemon (`Client::while_writing`). `inbox pop`
-    // writes, marking what it prints as read, but runs as a read: a mark that reached no daemon
-    // only brings the same notifications back at the next pop, while Claude Code drops what a
-    // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
-    // would reach no one.
-    let client = app.client.as_ref().expect("the CLI connected through its client");
-    let stamped = if writes && words != "inbox pop" {
-        client.while_writing(body).await
-    } else {
-        client.while_connected(body).await
-    }?;
-    // A stamp the daemon never got ended the command above as a lost write does. One that failed
-    // with the socket open failed after the command's work was made, and a bare error would invite
-    // running the command again, which would make the work twice: the error says that the work
-    // is recorded.
-    stamped.context(STAMP_FAILED)
+    .await;
+    ran.map_err(|error| ran_in.failure(error))
 }
 
 /// Refuses, before anything is read or written, a command the CLI refuses for its arguments alone:
@@ -2554,6 +2692,11 @@ pub(crate) fn refuse_before_running(command: &Command) -> Result<()> {
         _ => Ok(()),
     }
 }
+
+/// What `fwd task move` says on standard error, and its MCP tool among its notes, while another move
+/// holds the node's move lock (`task_move::MoveLock`).
+pub(crate) const MOVE_WAITS: &str =
+    "fwd: another task move is running on this node; this one waits for it to end, and then sees what it did";
 
 /// What a command whose work was made, but whose stamp of when its principal last wrote failed,
 /// ends with, so that no one runs it again and makes the work twice.
@@ -2573,7 +2716,9 @@ pub(crate) async fn run_as_caller(app: &App, command: Command, joining: bool, st
     if joining {
         refuse_without_role(app.graph(), app.me).await?;
     }
-    let ran = fwd_core::file_mention::reading_files_in(files_in, run(app, command)).await;
+    // On the heap: the dispatcher's future holds every command's state, which in a debug build
+    // outgrows the 2 MiB stack of the tokio worker the daemon runs an MCP call on.
+    let ran = fwd_core::file_mention::reading_files_in(files_in, Box::pin(run(app, command))).await;
     // A triage agent that serves nothing is told so after each of its commands, the command
     // that binds it among them, which is why this reads the graph once the command has run.
     say_unbound(app).await?;
@@ -2638,23 +2783,35 @@ async fn person(graph: &ProjectGraph, paths: &Paths) -> Result<(EntityId, String
     Ok((me, identity.handle))
 }
 
-/// Connects to the project's daemon and finds whom the command acts as, and the scope it works in
-/// ([`caller`]), reading them from the daemon while it stays connected
-/// (`Client::while_connected`).
+/// What a command line says of who calls it, read before the command connects.
+struct Calling {
+    /// The Claude Code agent the fwd plugin stamped the command with, or whose hook runs it.
+    subject: Option<String>,
+    /// The `--as` typed on the command line, told apart from FWD_AS ([`App::typed_as`]).
+    typed_as: Option<String>,
+    /// Whether the command is the hook of a Claude Code session's own thread.
+    thread_hook: bool,
+    /// Whether `--scope` was typed on the command line ([`App::scope_typed`]).
+    scope_typed: bool,
+}
+
+/// The command's [`App`], over `client`, the daemon's connection for the project `resolved` names,
+/// which is where the command runs ([`runs_in::runs_in`]): whom the command acts as there and the
+/// scope it works in ([`caller`]), read from the daemon while it stays connected
+/// (`Client::while_connected`). `typed` holds the ids typed on the command that placing it
+/// resolved.
 async fn connect(
     cli: &Cli,
     paths: Paths,
+    resolved: Resolved,
+    client: Client,
     format: Format,
-    subject: Option<String>,
-    typed_as: Option<String>,
-    thread_hook: bool,
-    scope_typed: bool,
+    calling: Calling,
+    typed: Vec<runs_in::Typed>,
 ) -> Result<App> {
-    let resolved = resolve_project(cli, &paths)?;
-    let client = daemon::ensure_daemon(&paths, &resolved.project, autostart(cli)?).await?;
-    let Caller { me, me_handle, acting, scope, several } = client
-        .while_connected(caller(cli, &paths, &client, &resolved, subject.as_deref(), typed_as.as_deref(), thread_hook))
-        .await?;
+    let Caller { me, me_handle, acting, scope, several } =
+        client.while_connected(caller(cli, &paths, &client, &resolved, &calling, &typed)).await?;
+    let Calling { subject, typed_as, scope_typed, .. } = calling;
     let Resolved { project, checkout, root } = resolved;
     Ok(App {
         paths,
@@ -2674,6 +2831,9 @@ async fn connect(
         scope_typed,
         several,
         format,
+        placed_in: None,
+        typed,
+        moving: None,
     })
 }
 
@@ -2686,24 +2846,22 @@ struct Caller {
     several: Option<(Option<String>, Vec<EntityId>)>,
 }
 
-/// Finds whom the command acts as: the principal bound to `subject`, where the command carries
-/// one, or `--as` or FWD_AS, or without either the person, except in a Claude Code session one of
-/// whose agents is bound, where it acts as no one ([`bound_session`]). `thread_hook` says the
-/// command is the hook of a Claude Code session's own thread, which falls back to `--as` or FWD_AS
-/// while no principal is bound to its subject. Then the scope it works in: `--scope`, else the one
-/// its checkout finds.
+/// Finds whom the command acts as: the principal bound to the Claude Code agent `calling` names,
+/// where the command carries one, or `--as` or FWD_AS, or without either the person, except in a
+/// Claude Code session one of whose agents is bound, where it acts as no one ([`bound_session`]).
+/// The hook of a Claude Code session's own thread falls back to `--as` or FWD_AS while no
+/// principal is bound to its agent. Then the scope it works in: `--scope`, else the one
+/// its checkout finds; a scope `typed` holds, as placing the command found it, is not read again.
 async fn caller(
     cli: &Cli,
     paths: &Paths,
     client: &Client,
     resolved: &Resolved,
-    subject: Option<&str>,
-    typed_as: Option<&str>,
-    thread_hook: bool,
+    calling: &Calling,
+    typed: &[runs_in::Typed],
 ) -> Result<Caller> {
-    if let Some(c) = &resolved.checkout {
-        report_checkout(client, c).await;
-    }
+    let (subject, typed_as, thread_hook) =
+        (calling.subject.as_deref(), calling.typed_as.as_deref(), calling.thread_hook);
     let graph = &client.graph;
     let (me, me_handle, acting) = match subject {
         // A command the fwd plugin stamped, and a hook's command, acts as the principal bound to its
@@ -2729,7 +2887,7 @@ async fn caller(
                 subject::caller(graph, subject, typed_as).await?
             };
             match bound {
-                Some(p) => (p, handle_of(graph, p).await, Some(p)),
+                Some(p) => (p, ops::handle_of(graph, p).await?, Some(p)),
                 None => {
                     let (person, handle) = person(graph, paths).await?;
                     (person, handle, None)
@@ -2753,7 +2911,7 @@ async fn caller(
             let (me, me_handle) = match cli.act_as.as_deref().filter(|_| !names_itself) {
                 Some(handle) => {
                     let me = act_as(graph, handle).await?;
-                    (me, handle_of(graph, me).await)
+                    (me, ops::handle_of(graph, me).await?)
                 }
                 None => person(graph, paths).await?,
             };
@@ -2771,7 +2929,7 @@ async fn caller(
         }
     };
     let (scope, several) = match &cli.scope {
-        Some(s) => (Some(ops::resolve_id(&client.graph, s, &[Kind::Scope]).await?), None),
+        Some(s) => (Some(runs_in::scope_named(graph, typed, s).await?), None),
         None => match scope_for_checkout(client, resolved).await? {
             rules::ScopeHere::One(scope) => (Some(scope), None),
             rules::ScopeHere::None => (None, None),
@@ -3174,9 +3332,11 @@ async fn checkout_for(app: &App, upstreams: &[String], basis: Option<&str>, agai
     Ok(best.map(|(_, root)| root))
 }
 
-/// `id` may name a message or a notification. Returns the message to act on and, when `id` was a
-/// notification, that notification, which `reply` and `forward` settle in the transaction that
-/// posts their message (`ops::post_settling`) and `message edit` leaves as it is. A notification
+/// `id` may name a message or a notification. Returns the message to act on, wherever in the node
+/// it is, and, when `id` was a notification, that notification, which `reply` and `forward` settle
+/// as they post their message (`ops::post_settling`) and `message edit` leaves as it is. A
+/// notification is its recipient's, in the recipient's project, where the command runs, and the
+/// message behind it may be another project's. A notification
 /// that names no message behind it is refused, and so is one that lists several messages and names
 /// none of them, as a step added with several threads on its lines does
 /// (`routing::Batch::message_behind`): acting on one of them through it would settle the
@@ -3185,15 +3345,11 @@ async fn checkout_for(app: &App, upstreams: &[String], basis: Option<&str>, agai
 /// recipient, is told to dismiss the notification once it has acted on them, since given a
 /// message's id it settles nothing; `message edit` settles nothing either way, and another
 /// principal's dismiss is refused, so neither is told to.
-async fn message_behind(
-    graph: &ProjectGraph,
-    id: &str,
-    caller: EntityId,
-    settles: bool,
-) -> Result<(EntityId, Option<EntityId>)> {
-    let id = ops::resolve_id(graph, id, &[Kind::Message, Kind::Notification]).await?;
-    match graph.get::<NotificationView>(id).await {
-        Ok(n) => {
+async fn message_behind(app: &App, id: &str, settles: bool) -> Result<(EntityId, Option<EntityId>)> {
+    let (graph, caller) = (app.graph(), app.me);
+    let id = app.id(id, &[Kind::Message, Kind::Notification]).await?;
+    match graph.follow::<NotificationView>(id).await? {
+        Followed::Held { found: n, .. } => {
             let originator: Value = n.originator()?.into();
             if let Some(mid) = originator["message_id"].as_str().and_then(|s| s.parse::<EntityId>().ok()) {
                 return Ok((mid, Some(id)));
@@ -3216,20 +3372,97 @@ async fn message_behind(
             }
             bail!("that notification has no message behind it")
         }
-        Err(_) => Ok((id, None)),
+        Followed::NotHeld => Ok((id, None)),
     }
 }
 
-/// Prints what `reply` and `forward` posted, `mid`, under `record` ([`made_json`]), and beside it as
-/// `settled` the notification they were given and settled, so that an agent that meant to act on a
-/// notification sees whether it did: given a message's id, the answer has no `settled`.
-async fn print_reply(app: &App, mid: EntityId, settled: Option<EntityId>) -> Result<()> {
-    let graph = app.graph();
-    let mut made = made_json(message_json(graph, &graph.get::<MessageView>(mid).await?).await?);
-    if let Some(n) = settled {
-        made["settled"] = json!(n.to_base64());
+/// The message `id`, wherever in the node it is: a reply or a forward through a notification is
+/// made in the project of the message it answers.
+async fn message_anywhere(graph: &ProjectGraph, id: EntityId) -> Result<MessageView> {
+    match graph.follow::<MessageView>(id).await? {
+        Followed::Held { found, .. } => Ok(found),
+        Followed::NotHeld => bail!("the node holds no message {}", id.to_base64()),
     }
-    app.print_made(made, to_text)
+}
+
+/// Prints the message `reply` or `forward` made, `posted`, as made, whatever fails after it was: a
+/// caller that took the command for a failure and ran it again would make the message twice. The
+/// message is read back where it was made, for the answer, which names it by its id alone when that
+/// fails ([`reply_answer`]); what became of the notification it was posted through is said first,
+/// from what posting returned; and once the answer is printed, a forward asked of no one says
+/// whether it waits for a triage agent ([`say_waiting`]). `what` names the message: "reply" or
+/// "forward".
+async fn print_reply(app: &App, what: &str, posted: ops::Posted) -> Result<()> {
+    let graph = app.graph();
+    let read = async {
+        let message = message_anywhere(graph, posted.message).await?;
+        let printed = message_json(graph, &message).await?;
+        Ok::<_, anyhow::Error>((message, printed))
+    };
+    let (printed, message) = match read.await {
+        Ok((message, printed)) => (Ok(printed), Some(message)),
+        Err(why) => (Err(why), None),
+    };
+    let (answer, notes) = reply_answer(what, posted, printed);
+    for note in notes {
+        app.note(note);
+    }
+    app.print_made(answer, to_text)?;
+    if let Some(message) = &message {
+        say_waiting(app, message).await;
+    }
+    Ok(())
+}
+
+/// What `reply` and `forward` answer for `posted`, the message they made and what became of the
+/// notification they were given, with `read`, the message as every command prints it, read back
+/// once it was made; and the notes they say beside it, in order. The notification comes first,
+/// from `posted` alone: settled, the answer names it beside `record` as `settled`, so that an agent
+/// that meant to act on a notification sees whether it did; left unread, a note says why
+/// ([`unsettled_note`]); given a message's id, the answer has no `settled`. A message that could
+/// not be read back is answered by its id alone, under `record` as every made record is
+/// ([`made_json`]), and a note says why ([`unread_back_note`]).
+fn reply_answer(what: &str, posted: ops::Posted, read: Result<Value>) -> (Value, Vec<String>) {
+    let ops::Posted { message, settling } = posted;
+    let mut notes = Vec::new();
+    let settled = match settling {
+        ops::Settling::NoNotification => None,
+        ops::Settling::Settled(notification) => Some(notification),
+        ops::Settling::Unread { notification, why } => {
+            notes.push(unsettled_note(what, notification, &why));
+            None
+        }
+    };
+    let record = read.unwrap_or_else(|why| {
+        notes.push(unread_back_note(what, message, &why));
+        json!({"id": message.to_base64()})
+    });
+    let mut answer = made_json(record);
+    if let Some(notification) = settled {
+        answer["settled"] = json!(notification.to_base64());
+    }
+    (answer, notes)
+}
+
+/// What `reply` and `forward` say beside the message they made, `what` ("reply", "forward"), when
+/// the notification they were given stays unread, for `why`: that the message was made all the
+/// same, so that no one runs the command again and posts it twice, and how to mark the
+/// notification read.
+fn unsettled_note(what: &str, notification: EntityId, why: &anyhow::Error) -> String {
+    let short = short_id(&notification.to_base64());
+    format!(
+        "NOTE: the {what} was made, but its notification {short} could not be marked read ({why:#}); `fwd read {short}` marks it read, and running this command again would make the {what} twice"
+    )
+}
+
+/// What `reply` and `forward` say beside the id of the message they made, `message`, `what`
+/// ("reply", "forward"), when reading it back failed, for `why`: that it was made all the same, so
+/// that no one runs the command again and posts it twice, and how to read it.
+fn unread_back_note(what: &str, message: EntityId, why: &anyhow::Error) -> String {
+    let short = short_id(&message.to_base64());
+    format!(
+        "NOTE: the {what} {short} was made, but it could not be read back ({why:#}); `fwd message show {short}` shows it, and running this command again would make the {what} twice"
+    )
 }
 
 /// `supervisor`, the supervisor role's word until 2026-09-29 (docs/DECISIONS.md, D113, "An agent's
@@ -3316,7 +3549,9 @@ async fn refuse_retired(graph: &ProjectGraph, principal: EntityId, typed_as: boo
         }
     };
     let succeeded = match p.succeeded_by()?.map(EntityId::from) {
-        Some(successor) => format!(", succeeded by @{}, which carries on its job", handle_of(graph, successor).await),
+        Some(successor) => {
+            format!(", succeeded by @{}, which carries on its job", ops::handle_of(graph, successor).await?)
+        }
         None => String::new(),
     };
     let as_it = if typed_as { format!("--as {handle} ") } else { String::new() };
@@ -3344,40 +3579,102 @@ async fn triage_guidance(graph: &ProjectGraph, scope: Option<EntityId>) -> Resul
     if ops::triage_for(graph, scope).await?.is_some() {
         return Ok(None);
     }
+    Ok(Some(triage_subagent_guidance(graph, scope).await?))
+}
+
+/// The guidance on creating a triage subagent for `scope`, or for what concerns no scope when it is
+/// none (`fwd_core::guidance::triage_subagent`), the scope named as `graph`'s project names it.
+async fn triage_subagent_guidance(graph: &ProjectGraph, scope: Option<EntityId>) -> Result<String> {
     let named = match scope {
-        Some(scope) => Some((scope_title(graph, Some(scope)).await.unwrap_or_default(), short_id(&scope.to_base64()))),
+        Some(scope) => Some((scope_title(graph, Some(scope)).await?.unwrap_or_default(), short_id(&scope.to_base64()))),
         None => None,
     };
-    Ok(Some(fwd_core::guidance::triage_subagent(named.as_ref().map(|(t, id)| (t.as_str(), id.as_str())))))
+    Ok(fwd_core::guidance::triage_subagent(named.as_ref().map(|(t, id)| (t.as_str(), id.as_str()))))
 }
 
 /// A scope as the sentences on standard error name it: its title in quotes and the first eight
 /// characters of its id, `"Replication" (Ab3dEf12)`.
-async fn scope_words(graph: &ProjectGraph, scope: EntityId) -> String {
-    format!("\"{}\" ({})", scope_title(graph, Some(scope)).await.unwrap_or_default(), short_id(&scope.to_base64()))
+async fn scope_words(graph: &ProjectGraph, scope: EntityId) -> Result<String> {
+    Ok(format!("\"{}\" ({})", scope_title(graph, Some(scope)).await?.unwrap_or_default(), short_id(&scope.to_base64())))
 }
 
-/// What `fwd ask` and `fwd forward` say on standard error once they have asked no one in
-/// particular (the message `message`), while no triage agent answers first for the scope it asks:
-/// that it waits, listed under that scope on the Questions page, until an agent serves the scope
-/// or the whole project, and reaches that agent then (docs/design/agents-and-inbox.md, rule 5),
-/// with the guidance on creating one.
-async fn say_waiting(app: &App, message: EntityId) -> Result<()> {
-    let graph = app.graph();
-    let mc = MessageContext::from_view(&graph.get::<MessageView>(message).await?)?;
-    if !mc.asks_project {
-        return Ok(());
+/// Says on standard error, once `fwd ask` or `fwd forward` has made `message`, whether it waits for
+/// a triage agent ([`waiting_notice`]). Failing to tell is said in its place and is not the
+/// command's failure: the message stands, and running the command again would make it twice.
+async fn say_waiting(app: &App, message: &MessageView) {
+    match waiting_notice(app.graph(), &app.project.name, message).await {
+        Ok(Some(notice)) => app.note(notice),
+        Ok(None) => {}
+        Err(why) => app.note(format!(
+            "fwd: the question was asked, but whether a triage agent answers it could not be read ({why:#})"
+        )),
     }
-    let scope = fwd_core::routing::asked_scope(graph, &mc).await?;
-    let Some(guidance) = triage_guidance(graph, scope).await? else { return Ok(()) };
+}
+
+/// What `fwd ask` and `fwd forward` say once they have asked no one in particular in `message`,
+/// while no triage agent answers first for the scope it asks: that it waits, listed under that
+/// scope on the Questions page, until an agent serves the scope or the whole project, and reaches
+/// that agent then (docs/design/agents-and-inbox.md, rule 5), with the guidance on creating one.
+/// None for a message that asks someone, or whose scope a triage agent answers for. The question
+/// is read as routing reads it, by the rules of its own project, which for a forward through a
+/// notification is the project of the message it forwards, whichever project `graph`, the one the
+/// command ran in and `here` names, is ([`ops::triage_for`]): asking a scope, it is answered by
+/// that scope's triage agent, else by the one that serves that scope's project whole, both read in
+/// the scope's own project; asking none, or a scope the node does not hold, by the one that serves
+/// the message's project whole. The guidance's commands are run in that project, and it and the
+/// message's project are each named when they are not the command's.
+async fn waiting_notice(graph: &ProjectGraph, here: &str, message: &MessageView) -> Result<Option<String>> {
+    let mc = MessageContext::from_view(message)?;
+    if !mc.asks_project {
+        return Ok(None);
+    }
+    let made_in = graph.graph_of(message)?;
+    let scope = fwd_core::routing::asked_scope(&made_in, &mc).await?;
+    if ops::triage_for(&made_in, scope).await?.is_some() {
+        return Ok(None);
+    }
+    let guidance = triage_subagent_guidance(graph, scope).await?;
     let whom = match scope {
-        Some(scope) => format!("of the scope {}", scope_words(graph, scope).await),
+        Some(scope) => format!("of the scope {}", scope_words(graph, scope).await?),
         None => "of the project".to_string(),
     };
-    app.note(format!(
-        "fwd: this question waits, asked {whom}, until an agent serves it or the whole project, and reaches that agent then. {guidance}"
-    ));
-    Ok(())
+    let message_in = if graph.owns(message) {
+        Whose::This
+    } else {
+        project_of::<MessageView>(graph, message.id()).await?.unwrap_or(Whose::This)
+    };
+    let answered_in = match scope {
+        Some(scope) => project_of::<ScopeView>(graph, scope).await?.unwrap_or_else(|| message_in.clone()),
+        None => message_in.clone(),
+    };
+    let made = match &message_in {
+        Whose::Other(p) => format!(" was made in project `{}`, where the message it forwards is, and", p.name),
+        Whose::This => String::new(),
+    };
+    let (whole, run_there) = match (&message_in, &answered_in) {
+        (_, Whose::Other(p)) => (
+            format!("the whole project `{}`", p.name),
+            format!(
+                " The commands this names are for project `{}`: run them there with `{}`, or from one of its checkouts.",
+                p.name,
+                runs_in::project_flag(&p.name)
+            ),
+        ),
+        (Whose::Other(_), Whose::This) => (format!("the whole project `{here}`"), String::new()),
+        (Whose::This, Whose::This) => ("the whole project".to_string(), String::new()),
+    };
+    Ok(Some(format!(
+        "fwd: this question{made} waits, asked {whom}, until an agent serves it or {whole}, and reaches that agent then. {guidance}{run_there}"
+    )))
+}
+
+/// The project of the record `id`, read as `V`, as the project of `graph` names it; none when the
+/// node holds no such record.
+async fn project_of<V: InProjectView>(graph: &ProjectGraph, id: EntityId) -> Result<Option<Whose>> {
+    Ok(match graph.follow::<V>(id).await? {
+        Followed::Held { project, .. } => Some(project),
+        Followed::NotHeld => None,
+    })
 }
 
 /// Says on standard error, after a command of the triage agent it acts as that serves nothing, why
@@ -3432,7 +3729,14 @@ async fn asked_of(app: &App, to: Option<&str>) -> Result<Option<String>> {
 /// thing it names inline: id, kind and name), so a reader need not look them up.
 async fn message_json(graph: &ProjectGraph, m: &MessageView) -> Result<Value> {
     let mut v = ops::json_of_message(m)?;
-    v["references"] = Value::Array(ops::references_json(graph, v["content"].as_str().unwrap_or("")).await);
+    v["references"] = Value::Array(ops::references_json(graph, v["content"].as_str().unwrap_or("")).await?);
+    // A message of another project, as the messages about a record are wherever they were written
+    // and a reply through a notification is where its thread is, is named with that project.
+    if !graph.owns(m) {
+        if let Followed::Held { project: Whose::Other(p), .. } = graph.follow::<MessageView>(m.id()).await? {
+            v["project"] = json!(p.name);
+        }
+    }
     Ok(v)
 }
 
@@ -3446,10 +3750,10 @@ async fn show_message(app: &App, id: EntityId) -> Result<()> {
     match app.format {
         Format::Text => {
             let author_id: EntityId = m.author()?.into();
-            let author = handle_of(graph, author_id).await;
+            let author = ops::handle_of(graph, author_id).await?;
             let status = v["status"].as_str().unwrap_or("");
             let by = match m.edited_by()?.map(EntityId::from).filter(|by| *by != author_id) {
-                Some(by) => format!(" by @{}", handle_of(graph, by).await),
+                Some(by) => format!(" by @{}", ops::handle_of(graph, by).await?),
                 None => String::new(),
             };
             let edited = m.edited()?.map(|t| format!(", edited {}{by}", fwd_core::reason::ago(t))).unwrap_or_default();
@@ -3499,42 +3803,25 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Adds `author_handle` to message JSON so UIs can show who wrote it without a second lookup, and
-/// the `references` its text makes ([`message_json`]).
-async fn with_authors(graph: &ProjectGraph, messages: Vec<Value>) -> Vec<Value> {
+/// Adds `author_handle` to message JSON so UIs can show who wrote it without a second lookup, the
+/// author followed wherever in the node it is (`ops::handle_of`), and the `references` its text makes
+/// ([`message_json`]).
+async fn with_authors(graph: &ProjectGraph, messages: Vec<Value>) -> Result<Vec<Value>> {
     let mut cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(messages.len());
     for mut m in messages {
         if let Some(author) = m["author"].as_str().map(str::to_string) {
             if !cache.contains_key(&author) {
-                let handle = match author.parse::<EntityId>() {
-                    Ok(id) => graph
-                        .get::<PrincipalView>(id)
-                        .await
-                        .ok()
-                        .and_then(|p| p.handle().ok())
-                        .unwrap_or_else(|| short(&author)),
-                    Err(_) => short(&author),
-                };
-                cache.insert(author.clone(), handle);
+                cache.insert(author.clone(), ops::handle_of(graph, ops::parse_id(&author)?).await?);
             }
             m["author_handle"] = json!(cache[&author]);
         }
         if m.get("references").is_none() {
-            m["references"] = Value::Array(ops::references_json(graph, m["content"].as_str().unwrap_or("")).await);
+            m["references"] = Value::Array(ops::references_json(graph, m["content"].as_str().unwrap_or("")).await?);
         }
         out.push(m);
     }
-    out
-}
-
-fn short(id: &str) -> String {
-    id.chars().take(6).collect()
-}
-
-/// A principal's handle, or the start of its id when it cannot be found.
-async fn handle_of(graph: &ProjectGraph, id: EntityId) -> String {
-    graph.get::<PrincipalView>(id).await.ok().and_then(|p| p.handle().ok()).unwrap_or_else(|| short(&id.to_base64()))
+    Ok(out)
 }
 
 /// A few words of prose on one line, for naming a message where it is listed.
@@ -3556,23 +3843,29 @@ async fn decision_json(app: &App, id: EntityId) -> Result<Value> {
     let mut v = ops::json_of_decision(&d)?;
     for key in ["author", "decided_by", "closed_by"] {
         if let Some(principal) = v[key].as_str().and_then(|s| s.parse::<EntityId>().ok()) {
-            v[format!("{key}_handle")] = json!(handle_of(app.graph(), principal).await);
+            v[format!("{key}_handle")] = json!(ops::handle_of(app.graph(), principal).await?);
         }
     }
-    v["scope_title"] = json!(scope_title(app.graph(), ops::governs(&d)?).await);
+    v["scope_title"] = json!(scope_title(app.graph(), ops::governs(&d)?).await?);
     v["closing_note"] = json!(decision_log::why_closed(app.graph(), &d).await?);
     Ok(v)
 }
 
-/// The title of the scope a decision governs, when it governs one and the scope can be read.
-async fn scope_title(graph: &ProjectGraph, scope: Option<EntityId>) -> Option<String> {
-    graph.get::<ScopeView>(scope?).await.ok()?.title().ok()
+/// The title of `scope`, when there is one and the node holds it, followed wherever in the node it
+/// is, with its project's name after it when that is another (`Replication in beta`).
+async fn scope_title(graph: &ProjectGraph, scope: Option<EntityId>) -> Result<Option<String>> {
+    let Some(scope) = scope else { return Ok(None) };
+    Ok(match graph.follow::<ScopeView>(scope).await? {
+        Followed::Held { project, found, .. } => Some(ops::in_project(found.title()?, &project)),
+        Followed::NotHeld => None,
+    })
 }
 
 /// Puts in `v`, a task `task` as a command prints it, the scopes the task is worked in, any number
 /// since D136 ("A task may be worked in several scopes", 2026-10-03), in the order it came to be
-/// worked in them (`ops::worked_in`): `scopes`, each its id, and with `named` its `title` too (null
-/// for a scope that cannot be read) as `fwd task show` prints them, else its id alone. `worked_in`,
+/// worked in them (`ops::worked_in`): `scopes`, each its id, and with `named` its `title` too, a
+/// scope of another project with that project's name after its title and as `project` (null for a
+/// scope the node does not hold), as `fwd task show` prints them, else its id alone. `worked_in`,
 /// the first of them or null, which was the task's one scope until then, is kept for one release
 /// for readers that read one, beside `worked_in_title` when `named` (docs/design/cli.md, "Tasks").
 async fn with_scopes(graph: &ProjectGraph, v: &mut Value, task: EntityId, named: bool) -> Result<()> {
@@ -3580,7 +3873,14 @@ async fn with_scopes(graph: &ProjectGraph, v: &mut Value, task: EntityId, named:
     let mut listed = Vec::with_capacity(scopes.len());
     for scope in &scopes {
         listed.push(if named {
-            json!({"id": scope.to_base64(), "title": scope_title(graph, Some(*scope)).await})
+            let mut v = json!({"id": scope.to_base64(), "title": null});
+            if let Followed::Held { project, found, .. } = graph.follow::<ScopeView>(*scope).await? {
+                if let Whose::Other(p) = &project {
+                    v["project"] = json!(p.name);
+                }
+                v["title"] = json!(ops::in_project(found.title()?, &project));
+            }
+            v
         } else {
             json!(scope.to_base64())
         });
@@ -3589,26 +3889,39 @@ async fn with_scopes(graph: &ProjectGraph, v: &mut Value, task: EntityId, named:
     let first = scopes.first().copied();
     v["worked_in"] = json!(first.map(|s| s.to_base64()));
     if named && first.is_some() {
-        v["worked_in_title"] = json!(scope_title(graph, first).await);
+        v["worked_in_title"] = json!(scope_title(graph, first).await?);
     }
     Ok(())
 }
 
-/// The far end of a `cites` or `supersedes` relation, named: what it is and a few words of it.
+/// The other end of a `cites` or `supersedes` relation, followed wherever in the node it is and
+/// named: what it is and a few words of it, with `project`, the name of its project, when that is
+/// another, after its name too, since a decision's number names another decision there; an end the
+/// node does not hold is named as one that cannot be followed here.
 async fn end_json(graph: &ProjectGraph, relation: &RelationView, other: EntityId) -> Result<Value> {
-    let (kind, name, status) = if let Ok(d) = graph.get::<DecisionView>(other).await {
-        ("decision", format!("D{} {}", d.number()?, d.title()?), Some(d.status()?.to_string()))
-    } else if let Ok(t) = graph.get::<TaskView>(other).await {
-        ("task", t.title()?, Some(t.status()?.to_string()))
-    } else if let Ok(m) = graph.get::<MessageView>(other).await {
-        let author = handle_of(graph, m.author()?.into()).await;
-        ("message", format!("{author}: {}", snippet(&ops::text(m.content())?, 80)), Some(m.status()?.to_string()))
-    } else {
-        ("unknown", short(&other.to_base64()), None)
-    };
-    Ok(
-        json!({"relation": relation.id().to_base64(), "id": other.to_base64(), "kind": kind, "name": name, "status": status}),
-    )
+    let (kind, named, status) =
+        if let Followed::Held { project, found: d, .. } = graph.follow::<DecisionView>(other).await? {
+            ("decision", Some((format!("D{} {}", d.number()?, d.title()?), project)), Some(d.status()?.to_string()))
+        } else if let Followed::Held { project, found: t, .. } = graph.follow::<TaskView>(other).await? {
+            ("task", Some((t.title()?, project)), Some(t.status()?.to_string()))
+        } else if let Followed::Held { project, found: m, .. } = graph.follow::<MessageView>(other).await? {
+            let author = ops::handle_of(graph, m.author()?.into()).await?;
+            let words = format!("{author}: {}", snippet(&ops::text(m.content())?, 80));
+            ("message", Some((words, project)), Some(m.status()?.to_string()))
+        } else {
+            ("unknown", None, None)
+        };
+    let mut v = json!({"relation": relation.id().to_base64(), "id": other.to_base64(), "kind": kind, "status": status});
+    match named {
+        Some((name, project)) => {
+            if let Whose::Other(p) = &project {
+                v["project"] = json!(p.name);
+            }
+            v["name"] = json!(ops::in_project(name, &project));
+        }
+        None => v["name"] = json!(ops::not_followed(&other.to_base64())),
+    }
+    Ok(v)
 }
 
 /// Everything `fwd decision show` prints: the record, what cites it and what it cites (the
@@ -3640,7 +3953,7 @@ async fn decision_details(app: &App, id: EntityId) -> Result<Value> {
     ends("superseded_by", superseded_by);
     let comments: Vec<Value> =
         ops::messages_about(graph, "decision", id).await?.iter().map(ops::json_of_message).collect::<Result<_>>()?;
-    v["comments"] = Value::Array(with_authors(graph, comments).await);
+    v["comments"] = Value::Array(with_authors(graph, comments).await?);
     Ok(v)
 }
 
@@ -3660,11 +3973,12 @@ fn decision_head(d: &Value) -> String {
     format!("{:<5} {:<10} {:<12} {}", field("ref"), field("status"), area, field("title"))
 }
 
-/// The scope a decision's JSON says it governs, by title, or by the start of its id when its
-/// title could not be read; none for a project-wide ruling.
+/// The scope a decision's JSON says it governs, by title, or, when the node does not hold it, by
+/// the start of its id, said to be one that cannot be followed here; none for a project-wide
+/// ruling.
 fn governed(d: &Value) -> Option<String> {
     let id = d["scope"].as_str()?;
-    Some(d["scope_title"].as_str().map(str::to_string).unwrap_or_else(|| short(id)))
+    Some(d["scope_title"].as_str().map(str::to_string).unwrap_or_else(|| ops::not_followed(id)))
 }
 
 /// A decision for people: its line, who ruled and when, its prose, where why it closed is
@@ -3767,7 +4081,7 @@ async fn task_details(app: &App, id: EntityId) -> Result<Value> {
     let graph = app.graph();
     let mut v = task_json(app, id).await?;
     if let Some(a) = v["assignee"].as_str().and_then(|s| s.parse::<EntityId>().ok()) {
-        v["assignee_handle"] = json!(handle_of(graph, a).await);
+        v["assignee_handle"] = json!(ops::handle_of(graph, a).await?);
     }
     with_scopes(graph, &mut v, id, true).await?;
     let steps = steps_json(graph, id).await?;
@@ -3777,16 +4091,17 @@ async fn task_details(app: &App, id: EntityId) -> Result<Value> {
     Ok(v)
 }
 
-/// Each of `relations`, oldest first, as `fwd relations` prints it, with `other`, the thing at the
-/// end that is not the task (its `to` for a relation `out` of the task, else its `from`), named as
-/// a message's references name things (`ops::reference_json`: its id, kind and name), as `fwd task
-/// show --include relations` gives them.
+/// Each of `relations`, oldest first, with `other`, the thing at the end that is not the record
+/// they touch (its `to` for a relation `out` of it, else its `from`), followed wherever in the node
+/// it is and named as a message's references name things (`ops::reference_json`: its id, kind and
+/// name, and `project` for a record of another project), as `fwd relations`, `fwd task explain` and
+/// `fwd task show --include relations` give them.
 async fn relations_named(graph: &ProjectGraph, mut relations: Vec<RelationView>, out: bool) -> Result<Vec<Value>> {
     relations.sort_by_key(|r| r.created().unwrap_or(0));
     let mut named = Vec::with_capacity(relations.len());
     for r in &relations {
         let mut v = ops::json_of_relation(r)?;
-        v["other"] = ops::reference_json(graph, if out { r.to_id()? } else { r.from_id()? }).await;
+        v["other"] = ops::reference_json(graph, if out { r.to_id()? } else { r.from_id()? }).await?;
         named.push(v);
     }
     Ok(named)
@@ -3799,13 +4114,13 @@ async fn relations_named(graph: &ProjectGraph, mut relations: Vec<RelationView>,
 async fn task_messages(graph: &ProjectGraph, task: EntityId) -> Result<Vec<Value>> {
     let messages: Vec<Value> =
         ops::messages_about(graph, "task", task).await?.iter().map(ops::json_of_message).collect::<Result<_>>()?;
-    let mut messages = with_authors(graph, messages).await;
+    let mut messages = with_authors(graph, messages).await?;
     for m in &mut messages {
         // `to` holds the id of the principal it asks, or a handle, which routing reads too
         // (`ops::MessageContext`).
         if let Some(to) = m["context"]["to"].as_str().map(str::to_string) {
             m["to_handle"] = json!(match to.parse::<EntityId>() {
-                Ok(id) => handle_of(graph, id).await,
+                Ok(id) => ops::handle_of(graph, id).await?,
                 Err(_) => to,
             });
         }
@@ -3823,25 +4138,23 @@ async fn steps_json(graph: &ProjectGraph, task: EntityId) -> Result<Vec<Value>> 
 }
 
 /// One step as JSON: its number in the checklist (`n`), its relation (`edge`), what the step is
-/// (`id`, `kind`, `name`), whether it is checked and by whom, and, for a highlight, its file, its
-/// lines (1-based, inclusive), the version it was made on, its first characters (`excerpt`), the
-/// first line its name shows (`first_line`, fwd-core's `anchor_name`) and the first thread on it
-/// (`thread`: its first message's `id` and `status`, or null while it has none), which moves with
-/// the step; for a task or a decision, its status.
+/// (`id`, `kind`, `name`, followed wherever in the node it is as a reference is: `ops::reference_json`,
+/// with `project` for a record of another project), whether it is checked and by whom, and, for a
+/// highlight, its file, its lines (1-based, inclusive), the version it was made on, its first
+/// characters (`excerpt`), the first line its name shows (`first_line`, fwd-core's `anchor_name`)
+/// and the first thread on it (`thread`: its first message's `id` and `status`, or null while it has
+/// none), which moves with the step; for a task or a decision, its status.
 async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Result<Value> {
     let step: EntityId = edge.from_id()?;
     let checked = edge.status()? == RelationStatus::Resolved;
-    let (kind, name) = match ops::describe(graph, step).await {
-        Some((kind, name)) => (kind.name(), name),
-        None => ("unknown", step.to_base64()),
-    };
+    let what = ops::reference_json(graph, step).await?;
     let checked_by = edge.closed_by()?.map(EntityId::from).filter(|_| checked);
     let mut v = json!({
         "n": n,
         "edge": edge.id().to_base64(),
         "id": step.to_base64(),
-        "kind": kind,
-        "name": name,
+        "kind": what["kind"],
+        "name": what["name"],
         "checked": checked,
         "checked_by": checked_by.map(|p| p.to_base64()),
         "checked_at": edge.closed()?.filter(|_| checked),
@@ -3849,10 +4162,13 @@ async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Resul
         "created_by": EntityId::from(edge.created_by()?).to_base64(),
         "created": edge.created()?,
     });
-    if let Some(p) = checked_by {
-        v["checked_by_handle"] = json!(handle_of(graph, p).await);
+    if let Some(project) = what.get("project") {
+        v["project"] = project.clone();
     }
-    if let Ok(a) = graph.get::<CodeAnchorView>(step).await {
+    if let Some(p) = checked_by {
+        v["checked_by_handle"] = json!(ops::handle_of(graph, p).await?);
+    }
+    if let Followed::Held { found: a, .. } = graph.follow::<CodeAnchorView>(step).await? {
         // The version the highlight was made on: its basis blob, or on an anchor of the first
         // cut the HEAD blob it was mapped onto; one of the first cut made on a dirty file recorded
         // none (`worktree`). A whole-file highlight has no lines.
@@ -3869,9 +4185,9 @@ async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Resul
             Some(m) => json!({"id": m.id().to_base64(), "status": m.status()?.to_string()}),
             None => Value::Null,
         };
-    } else if let Ok(t) = graph.get::<TaskView>(step).await {
+    } else if let Followed::Held { found: t, .. } = graph.follow::<TaskView>(step).await? {
         v["status"] = json!(t.status()?.to_string());
-    } else if let Ok(d) = graph.get::<DecisionView>(step).await {
+    } else if let Followed::Held { found: d, .. } = graph.follow::<DecisionView>(step).await? {
         v["status"] = json!(d.status()?.to_string());
     }
     Ok(v)
@@ -3927,12 +4243,13 @@ fn task_text(t: &Value) -> String {
         Some(handle) => about.push(format!("assigned to @{handle}")),
         None => about.push("unassigned".into()),
     }
-    // Each scope by its name, or the start of its id when it cannot be read.
+    // Each scope by its name, or, when the node does not hold it, the start of its id, said to be
+    // one that cannot be followed here.
     let scopes: Vec<String> = t["scopes"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|s| s["title"].as_str().map_or_else(|| short_id(s["id"].as_str().unwrap_or("")), str::to_string))
+        .map(|s| s["title"].as_str().map_or_else(|| ops::not_followed(s["id"].as_str().unwrap_or("")), str::to_string))
         .collect();
     match scopes.as_slice() {
         [] => {}
@@ -4041,61 +4358,13 @@ fn message_lines(m: &Value, indent: usize) -> Vec<String> {
     lines
 }
 
-/// A step named on the command line among a task's `steps`: its number in the checklist (from 1),
-/// or the id of its relation or of what it is (a highlight, a message, a task), whole or its first
-/// six characters or more, an id either had before it was renumbered (`former`) counting as its
-/// id, looked for among this checklist's steps alone. Returns its number and its relation. A name
-/// that fits no step of the checklist is refused, saying so, and so is a start of an id that fits
-/// several.
-fn step_at(steps: &[RelationView], s: &str, former: &FormerIds) -> Result<(usize, EntityId)> {
-    if let Ok(n) = s.parse::<usize>() {
-        if (1..=steps.len()).contains(&n) {
-            return Ok((n, steps[n - 1].id()));
-        }
-        if s.len() < ops::MIN_PREFIX {
-            bail!("the task has {} step(s), so there is no step {n}", steps.len());
-        }
-    }
-    let whole = s.parse::<EntityId>().ok();
-    if whole.is_none() && s.len() < ops::MIN_PREFIX {
-        bail!(
-            "`{s}` names no step: give its number in the checklist, or the id of its relation or of what it is, whole or its first {} characters or more",
-            ops::MIN_PREFIX
-        );
-    }
-    let renumbered: Vec<EntityId> = match whole {
-        Some(_) => former.named(s).into_iter().collect(),
-        None => former.starting(s).map(|(_, record)| record).collect(),
-    };
-    let fits =
-        |id: EntityId| renumbered.contains(&id) || whole.map_or_else(|| id.to_base64().starts_with(s), |w| w == id);
-    let found: Vec<usize> =
-        steps.iter().enumerate().filter(|(_, r)| fits(r.id()) || r.from_id().is_ok_and(fits)).map(|(i, _)| i).collect();
-    match found.as_slice() {
-        [i] => Ok((i + 1, steps[*i].id())),
-        [] => bail!(
-            "`{s}` names no step on this task's checklist; `fwd step list` lists its steps with their numbers and ids"
-        ),
-        several => bail!(
-            "`{s}` starts the ids of steps {} of this task's checklist; give more of the id",
-            several.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(" and ")
-        ),
-    }
-}
-
-/// The project's former ids, read when `s` may be an id; none for a step's number or a name too
-/// short to start an id, which no former id can stand for.
-async fn former_ids_for(graph: &ProjectGraph, s: &str) -> Result<FormerIds> {
-    Ok(if ops::may_start_an_id(s) { FormerIds::of(graph).await? } else { FormerIds::default() })
-}
-
 /// Checks or unchecks a step of a task and prints it, with the first thread on its highlight,
 /// which moves with it; and the highlight's steps on other checklists that moved with it, as JSON
 /// under `checked_steps` or `unchecked_steps`, for people a line each.
 async fn check_step(app: &App, task: &str, step: &str, check: bool) -> Result<()> {
     let graph = app.graph();
     let task = app.id(task, &[Kind::Task]).await?;
-    let (n, edge) = step_at(&ops::steps(graph, task).await?, step, &former_ids_for(graph, step).await?)?;
+    let (n, edge) = runs_in::step_named(graph, task, step).await?;
     let moved = ops::check_step(graph, app.me, edge, check).await?;
     let r: RelationView = graph.get(edge).await?;
     let mut v = step_json(graph, &r, n).await?;
@@ -4128,8 +4397,8 @@ async fn check_step(app: &App, task: &str, step: &str, check: bool) -> Result<()
 async fn remove_step(app: &App, task: &str, step: &str, reason: &str, retire: bool) -> Result<()> {
     let graph = app.graph();
     let task = app.id(task, &[Kind::Task]).await?;
-    let (n, edge) = step_at(&ops::steps(graph, task).await?, step, &former_ids_for(graph, step).await?)?;
-    let mut removed = step_json(graph, &graph.get::<RelationView>(edge).await?, n).await?;
+    let (n, edge) = runs_in::step_named(graph, task, step).await?;
+    let mut removed = step_json(graph, &graph.relation(edge).await?, n).await?;
     let retired = ops::remove_step(graph, app.me, task, edge, reason, retire).await?;
     removed["reason"] = json!(reason.trim());
     let mut resolved = Vec::with_capacity(retired.messages.len());
@@ -4175,7 +4444,10 @@ async fn moved_steps_json(graph: &ProjectGraph, moved: &[(EntityId, RelationStat
         let n = ops::steps(graph, task).await?.iter().position(|s| s.id() == *edge).map_or(0, |i| i + 1);
         let mut v = step_json(graph, &r, n).await?;
         v["task"] = json!(task.to_base64());
-        v["task_title"] = json!(graph.get::<TaskView>(task).await.ok().and_then(|t| t.title().ok()));
+        v["task_title"] = match graph.follow::<TaskView>(task).await? {
+            Followed::Held { project, found, .. } => json!(ops::in_project(found.title()?, &project)),
+            Followed::NotHeld => Value::Null,
+        };
         out.push(v);
     }
     Ok(out)
@@ -4460,8 +4732,8 @@ async fn listed_json(graph: &ProjectGraph, batch: &fwd_core::routing::Batch) -> 
     use fwd_core::reason::{self, BatchEntry, Held};
     let mut said = std::collections::HashMap::new();
     for message in batch.messages() {
-        if let Ok(m) = graph.get::<MessageView>(message).await {
-            said.insert(message, m);
+        if let Followed::Held { found, .. } = graph.follow::<MessageView>(message).await? {
+            said.insert(message, found);
         }
     }
     let on = |message: EntityId| {
@@ -4476,15 +4748,15 @@ async fn listed_json(graph: &ProjectGraph, batch: &fwd_core::routing::Batch) -> 
                 for m in comments.iter().filter_map(|c| said.get(c)) {
                     texts.push(message_json(graph, m).await?);
                 }
-                let texts = with_authors(graph, texts).await;
-                out.push(json!({"step": ops::reference_json(graph, step).await, "comments": texts}));
+                let texts = with_authors(graph, texts).await?;
+                out.push(json!({"step": ops::reference_json(graph, step).await?, "comments": texts}));
             }
             BatchEntry::Comment { message, on } => {
                 let Some(m) = said.get(&message) else { continue };
-                let comment = with_authors(graph, vec![message_json(graph, m).await?]).await;
+                let comment = with_authors(graph, vec![message_json(graph, m).await?]).await?;
                 let mut listed = json!({"comment": comment.into_iter().next()});
                 if let Some(highlight) = on {
-                    listed["on"] = ops::reference_json(graph, highlight).await;
+                    listed["on"] = ops::reference_json(graph, highlight).await?;
                 }
                 out.push(listed);
             }
@@ -4509,10 +4781,11 @@ async fn notification_with_message(
     if let Some(batch) = fwd_core::reason::listed(&nj["originator"]) {
         nj["listed"] = listed_json(graph, &batch).await?;
     }
+    // The message behind it, followed wherever in the node it is.
     let message = match nj["originator"]["message_id"].as_str().and_then(|s| s.parse::<EntityId>().ok()) {
-        Some(mid) => match graph.get::<MessageView>(mid).await {
-            Ok(m) => Some(message_json(graph, &m).await?),
-            Err(_) => None,
+        Some(mid) => match graph.follow::<MessageView>(mid).await? {
+            Followed::Held { found, .. } => Some(message_json(graph, &found).await?),
+            Followed::NotHeld => None,
         },
         None => None,
     };
@@ -4640,9 +4913,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 let caller = app.acting.context(
                     "a principal renames itself, and this command acts as none: name yourself, `fwd principal add <name> --role <role>`",
                 )?;
-                let old = handle_of(graph, caller).await;
+                let old = ops::handle_of(graph, caller).await?;
                 ops::rename_principal(graph, caller, &name).await?;
-                let new = handle_of(graph, caller).await;
+                let new = ops::handle_of(graph, caller).await?;
                 if new != old {
                     app.note(format!(
                         "fwd: @{old} is @{new} now, with the same id: a --as, FWD_AS or fwd.as setting that gives `{old}` names no principal now, so give it `{new}`"
@@ -4806,7 +5079,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     .iter()
                     .map(ops::json_of_message)
                     .collect::<Result<_>>()?;
-                v["messages"] = Value::Array(with_authors(graph, messages).await);
+                v["messages"] = Value::Array(with_authors(graph, messages).await?);
                 v["claimed"] = json!(claim);
                 app.print(v)
             }
@@ -4870,16 +5143,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
             TaskCommand::Explain { id } => {
                 let id = app.id(&id, &[Kind::Task]).await?;
                 let mut v = task_json(app, id).await?;
-                let out: Vec<Value> = ops::relations_from(graph, id, None)
-                    .await?
-                    .iter()
-                    .map(ops::json_of_relation)
-                    .collect::<Result<_>>()?;
-                let inc: Vec<Value> = ops::relations_to(graph, id, None)
-                    .await?
-                    .iter()
-                    .map(ops::json_of_relation)
-                    .collect::<Result<_>>()?;
+                let out = relations_named(graph, ops::relations_from(graph, id, None).await?, true).await?;
+                let inc = relations_named(graph, ops::relations_to(graph, id, None).await?, false).await?;
                 let messages: Vec<Value> = ops::messages_about(graph, "task", id)
                     .await?
                     .iter()
@@ -4887,9 +5152,15 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     .collect::<Result<_>>()?;
                 v["relations_out"] = Value::Array(out);
                 v["relations_in"] = Value::Array(inc);
-                v["messages"] = Value::Array(with_authors(graph, messages).await);
+                v["messages"] = Value::Array(with_authors(graph, messages).await?);
                 with_scopes(graph, &mut v, id, false).await?;
                 app.print(v)
+            }
+            TaskCommand::Move { note, .. } => {
+                let placed =
+                    app.moving.as_ref().context("a task move is placed before it runs (`runs_in::runs_in`)")?;
+                let moved = placed.make(graph, app.me, note.as_deref()).await?;
+                moved::print(app, placed.destination(), &moved).await
             }
         },
         Command::Step { command } => match command {
@@ -4953,7 +5224,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     "task": task.to_base64(),
                     "title": graph.get::<TaskView>(*task).await.ok().and_then(|t| t.title().ok()),
                     "assignee": who.to_base64(),
-                    "assignee_handle": handle_of(graph, *who).await,
+                    "assignee_handle": ops::handle_of(graph, *who).await?,
                     "scope": scope.to_base64(),
                     "scope_title": graph.get::<ScopeView>(*scope).await.ok().and_then(|s| s.title().ok()),
                 }));
@@ -4961,26 +5232,27 @@ async fn run(app: &App, command: Command) -> Result<()> {
             let ids = |list: &[EntityId]| list.iter().map(|id| json!(id.to_base64())).collect::<Vec<_>>();
             let roles = ops::migrate_roles(graph).await?;
             // A principal by its id, with its handle to read it by.
-            let named =
-                |id: EntityId| async move { json!({"id": id.to_base64(), "handle": handle_of(graph, id).await}) };
+            let named = |id: EntityId| async move {
+                anyhow::Ok(json!({"id": id.to_base64(), "handle": ops::handle_of(graph, id).await?}))
+            };
             let mut principals = serde_json::Map::new();
             for (key, list) in
                 [("roles_cleared", &roles.roles_cleared), ("members", &roles.members), ("readers", &roles.readers)]
             {
                 let mut out = Vec::new();
                 for id in list {
-                    out.push(named(*id).await);
+                    out.push(named(*id).await?);
                 }
                 principals.insert(key.to_string(), Value::Array(out));
             }
             let mut visitors = Vec::new();
             for (id, written) in &roles.visitors {
-                let mut v = named(*id).await;
+                let mut v = named(*id).await?;
                 v["messages"] = json!(written);
                 visitors.push(v);
             }
             let triage = match roles.triage {
-                Some(id) => named(id).await,
+                Some(id) => named(id).await?,
                 None => Value::Null,
             };
             let scopes = ops::migrate_scopes(graph).await?;
@@ -4995,7 +5267,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     "task": task.to_base64(),
                     "title": graph.get::<TaskView>(task).await.ok().and_then(|t| t.title().ok()),
                     "scope": scope.to_base64(),
-                    "scope_title": scope_title(graph, Some(scope)).await,
+                    "scope_title": scope_title(graph, Some(scope)).await?,
                 }));
             }
             let mut v = json!({
@@ -5041,9 +5313,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
         }
         Command::Relations { id, kind } => {
             let id = app.id(&id, ops::ANY).await?;
-            let mut all = ops::relations_from(graph, id, kind).await?;
-            all.extend(ops::relations_to(graph, id, kind).await?);
-            app.print(Value::Array(all.iter().map(ops::json_of_relation).collect::<Result<_>>()?))
+            let mut all = relations_named(graph, ops::relations_from(graph, id, kind).await?, true).await?;
+            all.extend(relations_named(graph, ops::relations_to(graph, id, kind).await?, false).await?);
+            app.print(Value::Array(all))
         }
         Command::Relation { command } => {
             let (id, approve, reason) = match command {
@@ -5120,13 +5392,23 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 let id = app.id(&id, &[Kind::Scope]).await?;
                 let s: ScopeView = graph.get(id).await?;
                 let mut v = ops::json_of_scope(&s)?;
+                // The tasks worked in it, whichever project each is in: a task of another project with
+                // that project's name as `project`.
                 let assigned: Vec<Value> = {
                     let rels = ops::relations_to(graph, id, Some(RelationKind::WorkedIn)).await?;
                     let mut out = Vec::new();
-                    for r in rels {
-                        if r.status()? == RelationStatus::Accepted {
-                            out.push(task_json(app, r.from_id()?).await?);
-                        }
+                    for r in rels.iter().filter(|r| r.status().ok() == Some(RelationStatus::Accepted)) {
+                        let task = r.from_id()?;
+                        out.push(match graph.follow::<TaskView>(task).await? {
+                            Followed::Held { project, found, .. } => {
+                                let mut v = ops::json_of_task(&found, Some(&ops::readiness(graph, &found).await?))?;
+                                if let Whose::Other(p) = project {
+                                    v["project"] = json!(p.name);
+                                }
+                                v
+                            }
+                            Followed::NotHeld => ops::reference_json(graph, task).await?,
+                        });
                     }
                     out
                 };
@@ -5217,7 +5499,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     .iter()
                     .map(ops::json_of_message)
                     .collect::<Result<_>>()?;
-                v["messages"] = Value::Array(with_authors(graph, messages).await);
+                v["messages"] = Value::Array(with_authors(graph, messages).await?);
                 app.print(v)
             }
             AnchorCommand::List { path, against } => {
@@ -5245,7 +5527,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         .iter()
                         .map(ops::json_of_message)
                         .collect::<Result<_>>()?;
-                    v["messages"] = Value::Array(with_authors(graph, messages).await);
+                    v["messages"] = Value::Array(with_authors(graph, messages).await?);
                     out.push(v);
                 }
                 app.print(Value::Array(out))
@@ -5280,13 +5562,14 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 }
                 None => ops::post_message(graph, app.me, &text, priority.of_message(), mc).await?,
             };
-            say_waiting(app, mid).await?;
             let m: MessageView = graph.get(mid).await?;
-            app.print_made(made_json(message_json(graph, &m).await?), to_text)
+            app.print_made(made_json(message_json(graph, &m).await?), to_text)?;
+            say_waiting(app, &m).await;
+            Ok(())
         }
         Command::Reply { id, text } => {
-            let (reply_to, notification) = message_behind(graph, &id, app.me, true).await?;
-            let mid = ops::post_settling(
+            let (reply_to, notification) = message_behind(app, &id, true).await?;
+            let posted = ops::post_settling(
                 graph,
                 app.me,
                 &text,
@@ -5295,10 +5578,10 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 notification,
             )
             .await?;
-            print_reply(app, mid, notification).await
+            print_reply(app, "reply", posted).await
         }
         Command::Forward { id, to, note } => {
-            let (original, notification) = message_behind(graph, &id, app.me, true).await?;
+            let (original, notification) = message_behind(app, &id, true).await?;
             // A scope has no owner to forward to (docs/DECISIONS.md, D108, "A scope has no owner:
             // scopes are not assigned to principals"); until 2026-09-29 `scope:<id>` reached it.
             if to.as_deref().is_some_and(|t| t.starts_with("scope:")) {
@@ -5307,7 +5590,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 );
             }
             let to = asked_of(app, to.as_deref()).await?;
-            let original_view: MessageView = graph.get(original).await?;
+            let original_view = message_anywhere(graph, original).await?;
             let quoted =
                 ops::text(original_view.content())?.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
             let body = format!("{note}\n\n{quoted}");
@@ -5323,9 +5606,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
             if mc.asks_project && app.scope_typed {
                 mc.asks_scope = app.scope;
             }
-            let mid = ops::post_settling(graph, app.me, &body, original_view.priority()?, mc, notification).await?;
-            say_waiting(app, mid).await?;
-            print_reply(app, mid, notification).await
+            let posted = ops::post_settling(graph, app.me, &body, original_view.priority()?, mc, notification).await?;
+            print_reply(app, "forward", posted).await
         }
         Command::Cite { entity, decision, note } => {
             let from = app.id(&entity, &[Kind::Task, Kind::Message, Kind::Decision]).await?;
@@ -5387,7 +5669,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         continue;
                     }
                     let mut v = ops::json_of_decision(&d)?;
-                    v["scope_title"] = json!(scope_title(graph, governs).await);
+                    v["scope_title"] = json!(scope_title(graph, governs).await?);
                     out.push(v);
                 }
                 if app.format == Format::Text {
@@ -5472,7 +5754,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 print_message_moved(app, id, &moved, false).await
             }
             MessageCommand::Edit { id, text } => {
-                let (message, _) = message_behind(graph, &id, app.me, false).await?;
+                let (message, _) = message_behind(app, &id, false).await?;
                 ops::edit_message(graph, app.me, message, &text).await?;
                 show_message(app, message).await
             }
@@ -5512,7 +5794,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         let named = for_handle.as_deref().unwrap_or_default();
                         bail!(
                             "`--for {named}` names @{}'s inbox, not @{}'s, and `fwd inbox pop` marks what it prints read, which a principal does only to its own notifications, as the page marks no card of another's read: nothing was printed or marked; `fwd inbox --for {named}` lists that inbox and marks nothing",
-                            handle_of(graph, who).await,
+                            ops::handle_of(graph, who).await?,
                             app.me_handle,
                         );
                     }
@@ -5596,15 +5878,23 @@ async fn run(app: &App, command: Command) -> Result<()> {
             let relations: Vec<RelationView> = graph.fetch("status = 'accepted' OR status = 'proposed'").await?;
             let ids: std::collections::HashSet<String> =
                 nodes.iter().filter_map(|n| n["id"].as_str().map(str::to_string)).collect();
-            let edges: Vec<Value> = relations
-                .iter()
-                .map(ops::json_of_relation)
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|e| {
-                    ids.contains(e["from"].as_str().unwrap_or("")) || ids.contains(e["to"].as_str().unwrap_or(""))
-                })
-                .collect();
+            // The project's relations that touch a task listed, each end that is not one of them
+            // named as `other`, followed wherever in the node it is (`ops::reference_json`).
+            let mut edges: Vec<Value> = Vec::new();
+            for r in &relations {
+                let mut e = ops::json_of_relation(r)?;
+                let listed = |end: &str| ids.contains(e[end].as_str().unwrap_or(""));
+                let other = match (listed("from"), listed("to")) {
+                    (false, false) => continue,
+                    (true, true) => None,
+                    (true, false) => Some(r.to_id()?),
+                    (false, true) => Some(r.from_id()?),
+                };
+                if let Some(other) = other {
+                    e["other"] = ops::reference_json(graph, other).await?;
+                }
+                edges.push(e);
+            }
             let scopes: Vec<ScopeView> = graph.fetch("status = 'active'").await?;
             app.print(json!({
                 "tasks": nodes,
@@ -5617,8 +5907,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
         Command::Prime => {
             let mut v = json!({"principal": app.me_handle, "project": app.project.name});
             if let Some(scope) = app.scope {
-                if let Ok(s) = graph.get::<ScopeView>(scope).await {
-                    v["scope"] = ops::json_of_scope(&s)?;
+                if let Followed::Held { found, .. } = graph.follow::<ScopeView>(scope).await? {
+                    v["scope"] = ops::json_of_scope(&found)?;
                 }
             }
             let ready: Vec<Value> = ops::ready_tasks(graph, Some(app.me))
@@ -5766,6 +6056,11 @@ mod tests {
                 vec![("ids", format!("[{A:?}, {B:?}]")), ("format", "Some(Json)".into())],
             ),
             ("dismiss".into(), vec![A, B], vec![("ids", format!("[{A:?}, {B:?}]"))]),
+            (
+                "task move".into(),
+                vec!["--to", "beta", "--to-scope", B, A, B],
+                vec![("ids", format!("[{A:?}, {B:?}]")), ("to_scope", some(B))],
+            ),
             (
                 "task create".into(),
                 vec!["t", "--after", A, "--under", B, "--from", A, "--motivated-by", B],
@@ -6314,6 +6609,49 @@ mod tests {
         assert_eq!(made_json(task.clone()), beside);
         let principal = json!({"id": "P", "handle": "impl-alice"});
         assert_eq!(made_json(principal.clone()), json!({"record": principal, "id": "P", "handle": "impl-alice"}));
+    }
+
+    /// A reply made whose notification could not be marked read after it says that the reply was
+    /// made, why the notification stays unread, how to mark it read, and that running the command
+    /// again would make the reply twice. Rendered alone: no test makes the node refuse the second
+    /// of the two transactions honestly (`ops::post_settling`), which would take a policy agent
+    /// that refuses the write.
+    #[test]
+    fn a_reply_made_whose_notification_stayed_unread_says_it_was_made_and_why_it_stayed() {
+        let notification = EntityId::from_bytes([7; 32]);
+        let short = short_id(&notification.to_base64());
+        let why = anyhow!("the daemon refused the write").context("marking the notification read");
+        assert_eq!(
+            unsettled_note("reply", notification, &why),
+            format!(
+                "NOTE: the reply was made, but its notification {short} could not be marked read (marking the notification read: the daemon refused the write); `fwd read {short}` marks it read, and running this command again would make the reply twice"
+            )
+        );
+    }
+
+    /// A reply made is answered as made whatever fails after it: one whose notification stayed
+    /// unread and that could not be read back is answered by its id alone under `record`, without
+    /// `settled`, with the note on the notification first and the note on the read after it, each
+    /// saying that running the command again would make the reply twice. A forward read back is
+    /// answered as every command prints a message, with the notification it settled as `settled`.
+    #[test]
+    fn a_reply_made_is_answered_as_made_whatever_fails_after_it() {
+        let (message, notification) = (EntityId::from_bytes([3; 32]), EntityId::from_bytes([7; 32]));
+        let (short, why) = (short_id(&message.to_base64()), || anyhow!("the daemon refused the write"));
+        let unread = ops::Posted { message, settling: ops::Settling::Unread { notification, why: why() } };
+        let (answer, notes) = reply_answer("reply", unread, Err(anyhow!("the node holds no message")));
+        assert_eq!(answer, made_json(json!({"id": message.to_base64()})));
+        let read_back = format!(
+            "NOTE: the reply {short} was made, but it could not be read back (the node holds no message); `fwd message show {short}` shows it, and running this command again would make the reply twice"
+        );
+        assert_eq!(notes, vec![unsettled_note("reply", notification, &why()), read_back]);
+
+        let settled = ops::Posted { message, settling: ops::Settling::Settled(notification) };
+        let printed = json!({"id": message.to_base64(), "content": "yours, I think"});
+        let (answer, notes) = reply_answer("forward", settled, Ok(printed.clone()));
+        let mut expected = made_json(printed);
+        expected["settled"] = json!(notification.to_base64());
+        assert_eq!((answer, notes), (expected, Vec::<String>::new()));
     }
 
     /// `fwd task show --include` takes `relations` and `messages`, several with commas or the flag

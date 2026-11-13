@@ -34,7 +34,7 @@ pub fn role(p: &PrincipalView) -> &'static str {
 
 /// The handle, to name a principal where it shows again.
 pub fn name(id: EntityId) -> Option<String> {
-    store::principal(id).and_then(|p| p.handle().ok())
+    store::principal(id).map(|p| store::named(p.handle().unwrap_or_default(), &p))
 }
 
 /// The lozenge mode: the handle, the role beside an agent's.
@@ -46,7 +46,7 @@ pub fn lozenge(id: EntityId) -> AnyView {
 pub fn list_item(id: EntityId) -> AnyView {
     (move || {
         let Some(p) = store::principal(id) else {
-            let absent = format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Principal)));
+            let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Principal)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
         view! {

@@ -1064,12 +1064,12 @@ async fn what_concerns_a_task_in_two_scopes_reaches_the_triage_agent_of_each() -
     assert_eq!(told(planned), expected);
 
     // One agent that triages two of a task's scopes answers first for both as one, told once, as
-    // the scope first among them (`ops::front_lines`): Storage's agent comes to serve Releases too.
+    // the scope first among them (`ops::triage_for_scopes`): Storage's agent comes to serve
+    // Releases too.
     let releases = ops::create_scope(&graph, daniel, named_scope("Releases")).await?;
     ops::serve(&graph, "triage-b", ops::Serves::Scope(releases)).await?;
-    let principals = ops::principals(&graph).await?;
     assert_eq!(
-        ops::front_lines(&principals, &[b, releases]),
+        ops::triage_for_scopes(&graph, &[b, releases]).await?,
         vec![ops::FrontLine { agent: of_b, scope: Some(b) }],
         "one front line for the agent of both scopes"
     );
@@ -1481,7 +1481,7 @@ async fn a_whole_file_steps_first_comment_reaches_the_tasks_creator_and_assignee
     let retry = anchor(&graph, c.implementer, repo, "src/retry.rs", None).await?;
     let on = |anchor: EntityId| MessageContext { anchor_id: Some(anchor), ..Default::default() };
     // Named as a step and in an inbox's list by its path alone, since it names no line.
-    assert_eq!(ops::describe(&graph, net).await, Some((ops::Kind::Anchor, "src/net.rs".to_string())));
+    assert_eq!(ops::describe(&graph, net).await?, Some((ops::Kind::Anchor, "src/net.rs".to_string())));
 
     // The step first, then its first comment: the review's creator and assignee hear of it.
     ops::add_step(&graph, c.implementer, review, net).await?;
@@ -1547,11 +1547,11 @@ async fn an_inline_reference_is_stored_as_an_id_and_shadowed_by_a_mention() -> R
     );
     // Rendered back for a terminal, and listed for JSON.
     assert_eq!(
-        ops::render_references(&graph, &stored).await,
+        ops::render_references(&graph, &stored).await?,
         "see [Retry on disconnect] under [D1 (Retries back off exponentially)], @impl-alice; not `@nobody` in code"
     );
     let listed: Vec<(String, String)> = ops::references_json(&graph, &stored)
-        .await
+        .await?
         .iter()
         .map(|r| (r["kind"].as_str().unwrap().to_string(), r["name"].as_str().unwrap().to_string()))
         .collect();
@@ -1593,6 +1593,43 @@ async fn an_inline_reference_is_stored_as_an_id_and_shadowed_by_a_mention() -> R
     )
     .await?;
     assert!(ops::relations_from(&graph, plain, Some(RelationKind::Mention)).await?.is_empty());
+    Ok(())
+}
+
+/// An at-sign that names no one by handle names a record by the start of its id, as the brackets
+/// do, and says why it names nothing only when nothing matches: a start two records share is
+/// refused listing both, and a handle too short to start an id, or a start no id has, is a handle
+/// no one has.
+#[tokio::test]
+async fn an_at_sign_that_names_no_handle_keeps_why_its_id_names_nothing() -> Result<()> {
+    let graph = project().await?;
+    let c = cast(&graph).await?;
+    let (one, two) = (
+        ops::create_task(&graph, c.daniel, task("Retry")).await?,
+        ops::create_task(&graph, c.daniel, task("Cap")).await?,
+    );
+    // Two former ids that start alike, one of each task's, so that the start names both.
+    let shared = "Zq9xYwVu";
+    let trx = graph.begin();
+    for (n, record) in [one, two].into_iter().enumerate() {
+        let former = format!("{shared}{n}{}", &EntityId::random().to_base64()[9..]);
+        trx.create(&FormerId { project: graph.project(), former, record }).await?;
+    }
+    trx.commit().await?;
+    let refused = |text: String| {
+        let graph = graph.clone();
+        async move {
+            let posted = ops::post_message(&graph, c.daniel, &text, Priority::Next, MessageContext::default()).await;
+            posted.map(|_| ()).unwrap_err().to_string()
+        }
+    };
+
+    let shared_start = refused(format!("see @{shared}")).await;
+    assert!(shared_start.contains(&format!("`{shared}` starts the ids of 2 entities")), "{shared_start}");
+    let nobody = refused("ask @nobod".into()).await;
+    assert!(nobody.contains("(no one has the handle `nobod`, and no id starts with it)"), "{nobody}");
+    let unmatched = refused("ask @Qq0Qq0Qq".into()).await;
+    assert!(unmatched.contains("(no one has the handle `Qq0Qq0Qq`, and no id starts with it)"), "{unmatched}");
     Ok(())
 }
 
@@ -3105,7 +3142,7 @@ fn a_scope_is_named_by_its_title_or_its_id_among_scopes_in_hand() {
     assert!(ops::scope_by_name(&gone.to_base64(), &scopes, &FormerIds::default())
         .unwrap_err()
         .to_string()
-        .starts_with("no scope of this project"));
+        .starts_with("no scope has the id"));
 }
 
 /// A start never moves a task out of the scope someone chose for it (docs/DECISIONS.md, D87,
@@ -3960,14 +3997,14 @@ async fn a_decision_is_attached_to_the_scope_it_governs_and_detached_to_govern_t
     // A scope that does not exist, or that is something else, is refused, and nothing is written.
     let nowhere = EntityId::random();
     let err = ops::attach_decision(&graph, c.daniel, billed, nowhere).await.unwrap_err().to_string();
-    assert_eq!(err, format!("no scope of this project has the id {nowhere}, so no ruling can be attached to it"));
+    assert_eq!(err, format!("no scope has the id {nowhere}, so no ruling can be attached to it"));
     let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
     assert!(ops::attach_decision(&graph, c.daniel, billed, t).await.is_err(), "a task is not a scope");
     assert_eq!(governs(&graph, billed).await?, Some(hosting), "the refusals change nothing");
     let filed = ops::decisions(&graph).await?.len();
     let astray = ops::CreateDecision { scope: Some(nowhere), ..ruling("Nowhere to govern") };
     let err = ops::create_decision(&graph, c.daniel, astray).await.unwrap_err().to_string();
-    assert!(err.contains("no scope of this project has the id"), "{err}");
+    assert!(err.contains("no scope has the id"), "{err}");
     assert_eq!(ops::decisions(&graph).await?.len(), filed, "no decision is filed");
     Ok(())
 }
@@ -3989,14 +4026,74 @@ async fn a_scope_is_named_by_its_title_or_its_id() -> Result<()> {
     // A whole id is refused too when it names no scope, or names something else.
     let nowhere = EntityId::random();
     let err = ops::resolve_scope(&graph, &nowhere.to_base64()).await.unwrap_err().to_string();
-    assert_eq!(err, format!("no scope of this project has the id {nowhere}"));
+    assert_eq!(err, format!("no scope has the id {nowhere}"));
     let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
-    assert!(ops::resolve_scope(&graph, &t.to_base64()).await.is_err(), "a task is not a scope");
+    let err = ops::resolve_scope(&graph, &t.to_base64()).await.expect_err("a task is not a scope").to_string();
+    assert_eq!(err, format!("no scope has the id {t}"));
+    let d = ops::create_decision(&graph, c.daniel, ruling("Bill per seat")).await?;
+    let err = ops::resolve_scope(&graph, &d.to_base64()).await.expect_err("a decision is not a scope").to_string();
+    assert_eq!(err, format!("no scope has the id {d}"));
     let twin = ops::create_scope(&graph, c.implementer, named_scope("cloud hosting")).await?;
     let err = ops::resolve_scope(&graph, "Cloud Hosting").await.unwrap_err().to_string();
     assert!(err.starts_with("2 scopes have the title `Cloud Hosting` ("), "{err}");
     assert!(err.contains(&hosting.to_base64()[..8]) && err.contains(&twin.to_base64()[..8]), "{err}");
     assert_eq!(ops::resolve_scope(&graph, &twin.to_base64()[..8]).await?, twin, "its id still names it");
+    Ok(())
+}
+
+/// The scope a command line names by its id, as `--scope` names the scope a command works in, is a
+/// scope: named by its whole id or the start of it, it is found with its project; a whole id that
+/// names a task, a decision or nothing the node holds is refused, where an id typed for a task is
+/// taken as it is.
+#[tokio::test]
+async fn a_scope_named_by_its_id_must_be_a_scope() -> Result<()> {
+    let graph = project().await?;
+    let c = cast(&graph).await?;
+    let here = ops::Located { id: c.scope, project: fwd_core::project_graph::Whose::This };
+    assert_eq!(ops::locate_scope(&graph, &c.scope.to_base64()).await?, here);
+    assert_eq!(ops::locate_scope(&graph, &c.scope.to_base64()[..8]).await?, here);
+    let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
+    let d = ops::create_decision(&graph, c.daniel, ruling("Bill per seat")).await?;
+    for not_a_scope in [t, d, EntityId::random()] {
+        let err = ops::locate_scope(&graph, &not_a_scope.to_base64()).await.expect_err("no scope").to_string();
+        assert_eq!(err, format!("no scope has the id {not_a_scope}"));
+    }
+    Ok(())
+}
+
+/// A start given as the scope it is made in a record that is no scope, another task, the task
+/// itself or an id the node holds nothing by, is refused before anything is written, as `link`
+/// refuses a `worked_in` to it: the task stays open, unassigned and worked in no scope, where a
+/// `worked_in` to it would be read as a scope. Given a scope, it starts there.
+#[tokio::test]
+async fn a_start_in_something_that_is_no_scope_is_refused_and_writes_nothing() -> Result<()> {
+    let graph = project().await?;
+    let c = cast(&graph).await?;
+    let t = ops::create_task(&graph, c.daniel, task("Cap the retry delay")).await?;
+    let other = ops::create_task(&graph, c.daniel, task("Retry on disconnect")).await?;
+    let short = |id: EntityId| id.to_base64().chars().take(8).collect::<String>();
+    let nowhere = EntityId::random();
+    let refusals = [
+        (other, "refused: `worked_in` joins a task to a scope, not a task to a task".to_string()),
+        (t, "refused: `worked_in` joins a task to a scope, not a task to a task".to_string()),
+        (
+            nowhere,
+            format!(
+                "refused: `worked_in` joins a task to a scope, and `{}` names nothing the node holds",
+                short(nowhere)
+            ),
+        ),
+    ];
+    for (not_a_scope, refusal) in refusals {
+        let err = ops::start(&graph, c.implementer, t, Some(not_a_scope)).await.expect_err("no scope").to_string();
+        assert_eq!(err, refusal);
+    }
+    let view: TaskView = graph.get(t).await?;
+    assert_eq!((view.status()?, ops::assignee_of(&view)?), (TaskStatus::Open, None), "the task did not start");
+    let worked_in = ops::relations_from(&graph, t, Some(RelationKind::WorkedIn)).await?;
+    assert!(worked_in.is_empty(), "and came to be worked in nothing: {} relations", worked_in.len());
+    ops::start(&graph, c.implementer, t, Some(c.scope)).await?;
+    assert_eq!(ops::worked_in(&graph, t).await?, vec![c.scope], "given a scope, it starts there");
     Ok(())
 }
 
@@ -4325,12 +4422,12 @@ async fn worked_in_joins_a_task_to_a_scope() -> Result<()> {
     let link = |from, to| ops::link(&graph, e.by, RelationKind::WorkedIn, from, to, None, false, serde_json::json!({}));
     assert_eq!(
         link(e.other_task, gone).await.unwrap_err().to_string(),
-        format!("refused: `worked_in` joins a task to a scope, and `{}` names nothing in this project", short(gone))
+        format!("refused: `worked_in` joins a task to a scope, and `{}` names nothing the node holds", short(gone))
     );
     assert_eq!(
         link(lost, gone).await.unwrap_err().to_string(),
         format!(
-            "refused: `worked_in` joins a task to a scope, and `{}` and `{}` name nothing in this project",
+            "refused: `worked_in` joins a task to a scope, and `{}` and `{}` name nothing the node holds",
             short(lost),
             short(gone)
         )
@@ -4401,7 +4498,7 @@ async fn creates_only(
     let gone = EntityId::random();
     let refused = ops::create_task(graph, e.by, made(gone)).await.expect_err("a target that is nothing").to_string();
     let short: String = gone.to_base64().chars().take(8).collect();
-    assert_eq!(refused, format!("refused: `{kind}` joins {joins}, and `{short}` names nothing in this project"));
+    assert_eq!(refused, format!("refused: `{kind}` joins {joins}, and `{short}` names nothing the node holds"));
     assert_eq!(tasks().await?, before, "a refused task is not made");
     for to in right {
         let task = ops::create_task(graph, e.by, made(*to)).await?;

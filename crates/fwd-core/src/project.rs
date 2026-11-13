@@ -144,6 +144,11 @@ impl Paths {
     pub fn bootstrap_lock(&self) -> PathBuf {
         self.runtime_dir.join("daemon.bootstrap.lock")
     }
+    /// Held by a task's move to another project from before it is placed until its last write, so
+    /// that one move at a time runs on the daemon's node (`task_move::MoveLock`).
+    pub fn move_lock(&self) -> PathBuf {
+        self.runtime_dir.join("task-move.lock")
+    }
 
     /// The store `project` had of its own, when one is still in the data directory: until the
     /// daemon kept every project in one store, each project's records were in its own database,

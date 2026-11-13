@@ -270,7 +270,7 @@ fn focus_step(edge: EntityId) {
 /// The title of the task whose checklist the step `edge` is on, from the page's relations.
 fn task_of_step(edge: EntityId) -> Option<String> {
     let task = store::relation(edge)?.to_id().ok()?;
-    store::task(task)?.title().ok()
+    store::task(task).map(|t| store::named(t.title().unwrap_or_default(), &t))
 }
 
 /// Goes where a click on the step's lozenge would.

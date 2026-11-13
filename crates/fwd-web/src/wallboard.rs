@@ -5,10 +5,10 @@
 
 use crate::{graph, session, store};
 use ankurah::signals::Get as AnkurahGet;
-use ankurah::{EntityId, LiveQuery};
-use fwd_core::model::{RelationView, TaskStatus, TaskView};
+use ankurah::EntityId;
+use fwd_core::model::TaskStatus;
+use fwd_core::rules::{self, NotReadyReason, Readiness, TaskSnapshot};
 use leptos::prelude::*;
-use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
@@ -20,64 +20,6 @@ pub use settings::{Presentation, Settings, TaskSelection};
 const READS: [store::Collection; 3] =
     [store::Collection::Scopes, store::Collection::Principals, store::Collection::Messages];
 
-/// Watches only prerequisites of visible tasks, never the completed-task backlog.
-/// Keeping a query until its last dependent leaves also follows a completed task being reopened.
-#[derive(Default)]
-pub struct Dependencies {
-    queries: HashMap<EntityId, Option<LiveQuery<TaskView>>>,
-}
-
-impl Dependencies {
-    pub fn statuses(&mut self, visible: &[TaskView], relations: &[RelationView]) -> HashMap<EntityId, TaskStatus> {
-        let ids: HashSet<_> = visible.iter().map(|task| task.id()).collect();
-        let edges: Vec<_> = relations
-            .iter()
-            .filter_map(|r| {
-                Some(fwd_core::rules::Edge {
-                    id: r.id(),
-                    from: r.from_id().ok()?,
-                    to: r.to_id().ok()?,
-                    kind: r.kind().ok()?,
-                    status: r.status().ok()?,
-                })
-            })
-            .collect();
-        let wanted = prerequisite_ids(&ids, &edges);
-        self.queries.retain(|id, _| wanted.contains(id));
-        for id in wanted {
-            self.queries.entry(id).or_insert_with(|| {
-                session::graph()
-                    .query::<TaskView>(format!("id = '{}'", id.to_base64()).as_str())
-                    .map_err(|error| tracing::warn!("Prerequisite query refused: {error}"))
-                    .ok()
-            });
-        }
-        let mut statuses: HashMap<_, _> = self
-            .queries
-            .values()
-            .flatten()
-            .flat_map(|query| query.get())
-            .filter_map(|task| Some((task.id(), task.status().ok()?)))
-            .collect();
-        // Both sources hold the same entities; visible tasks need not wait for a second query.
-        statuses.extend(visible.iter().filter_map(|task| Some((task.id(), task.status().ok()?))));
-        statuses
-    }
-}
-
-fn prerequisite_ids(visible: &HashSet<EntityId>, edges: &[fwd_core::rules::Edge]) -> HashSet<EntityId> {
-    use fwd_core::model::{RelationKind, RelationStatus};
-    edges
-        .iter()
-        .filter(|edge| {
-            visible.contains(&edge.from)
-                && edge.kind == RelationKind::DependsOn
-                && edge.status == RelationStatus::Accepted
-        })
-        .map(|edge| edge.to)
-        .collect()
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Availability {
     pub held: bool,
@@ -87,8 +29,10 @@ pub struct Availability {
 }
 
 impl Availability {
-    pub fn of(id: EntityId, hold: Option<String>, dependencies: &[(EntityId, Option<TaskStatus>)]) -> Self {
-        use fwd_core::rules::{self, NotReadyReason, Readiness, TaskSnapshot};
+    /// What holds back the task `id`, given its hold and its prerequisites as readiness weighs them
+    /// (`store::dependencies`), wherever each leads: one of another project blocks until it is done
+    /// there, and one that cannot be followed here is a prerequisite to check.
+    pub fn of(id: EntityId, hold: Option<String>, dependencies: &[rules::Dependency]) -> Self {
         let mut availability = Self::default();
         // Workflow status is displayed separately, and a task's own date decides whether it is drawn
         // at all. Here only holds and prerequisites matter, so no date is given to judge, and the
@@ -101,8 +45,12 @@ impl Availability {
                 for reason in reasons {
                     match reason {
                         NotReadyReason::Held(_) => availability.held = true,
-                        NotReadyReason::BlockedBy(_) => availability.blocked = true,
-                        NotReadyReason::DependencyClosed(_, _) => availability.dependency_issue = true,
+                        NotReadyReason::BlockedBy(_) | NotReadyReason::BlockedByTaskIn { .. } => {
+                            availability.blocked = true
+                        }
+                        NotReadyReason::DependencyClosed(_, _)
+                        | NotReadyReason::DependencyClosedIn { .. }
+                        | NotReadyReason::DependencyNotHeld(_) => availability.dependency_issue = true,
                         NotReadyReason::Status(_) | NotReadyReason::NotYetDue(_) => {}
                     }
                 }
@@ -223,49 +171,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prerequisite_watch_set_is_only_accepted_dependencies_of_visible_cards() {
-        use fwd_core::model::{RelationKind, RelationStatus};
-        use fwd_core::rules::Edge;
-        let id = |n| EntityId::from_bytes([n; 32]);
-        let dependency = Edge {
-            id: id(10),
-            from: id(1),
-            to: id(2),
-            kind: RelationKind::DependsOn,
-            status: RelationStatus::Accepted,
-        };
-        let edges = [
-            dependency.clone(),
-            Edge { from: id(3), to: id(4), ..dependency.clone() },
-            Edge { to: id(5), status: RelationStatus::Proposed, ..dependency.clone() },
-            Edge { to: id(6), status: RelationStatus::Retracted, ..dependency.clone() },
-            Edge { to: id(7), kind: RelationKind::SubtaskOf, ..dependency },
-        ];
-        // Its prerequisite need not be drawn itself: a task not yet due is not, and still blocks.
-        assert_eq!(prerequisite_ids(&[id(1)].into(), &edges), [id(2)].into());
-        assert_eq!(prerequisite_ids(&[id(3)].into(), &edges), [id(4)].into());
-        assert!(prerequisite_ids(&Default::default(), &edges).is_empty());
-    }
-
-    #[test]
-    fn availability_distinguishes_holds_blockers_closed_and_missing_prerequisites() {
+    fn availability_distinguishes_holds_blockers_closed_and_missing_prerequisites_wherever_they_are() {
+        use rules::Dependency::{Elsewhere, Here, NotHeld};
         let id = EntityId::from_bytes([1; 32]);
         let prerequisite = EntityId::from_bytes([2; 32]);
+        let elsewhere = |status| Elsewhere { task: prerequisite, project: "beta".into(), status };
         assert_eq!(Availability::of(id, None, &[]), Availability::default());
-        assert_eq!(Availability::of(id, None, &[(prerequisite, Some(TaskStatus::Done))]), Availability::default());
+        assert_eq!(Availability::of(id, None, &[Here(prerequisite, Some(TaskStatus::Done))]), Availability::default());
+        assert_eq!(Availability::of(id, None, &[elsewhere(TaskStatus::Done)]), Availability::default(), "done there");
         for status in [TaskStatus::Proposed, TaskStatus::Open, TaskStatus::InProgress, TaskStatus::InReview] {
-            assert_eq!(Availability::of(id, None, &[(prerequisite, Some(status))]).labels(), ["Blocked"]);
+            assert_eq!(Availability::of(id, None, &[Here(prerequisite, Some(status))]).labels(), ["Blocked"]);
+            assert_eq!(Availability::of(id, None, &[elsewhere(status)]).labels(), ["Blocked"], "{status:?} there");
         }
         let both =
-            Availability::of(id, Some("Waiting for a decision".into()), &[(prerequisite, Some(TaskStatus::Open))]);
+            Availability::of(id, Some("Waiting for a decision".into()), &[Here(prerequisite, Some(TaskStatus::Open))]);
         assert_eq!(both.labels(), ["On hold", "Blocked"]);
         assert!(both.quiet());
         for status in [TaskStatus::Cancelled, TaskStatus::Rejected] {
-            let issue = Availability::of(id, None, &[(prerequisite, Some(status))]);
-            assert_eq!(issue.labels(), ["Check dependency"]);
-            assert!(!issue.quiet());
+            for issue in [
+                Availability::of(id, None, &[Here(prerequisite, Some(status))]),
+                Availability::of(id, None, &[elsewhere(status)]),
+            ] {
+                assert_eq!(issue.labels(), ["Check dependency"]);
+                assert!(!issue.quiet());
+            }
         }
-        let unknown = Availability::of(id, None, &[(prerequisite, None)]);
+        let unfollowed = Availability::of(id, None, &[NotHeld(prerequisite)]);
+        assert_eq!(unfollowed.labels(), ["Check dependency"], "one the node does not hold blocks as one to check");
+        let unknown = Availability::of(id, None, &[Here(prerequisite, None)]);
         assert_eq!(unknown.labels(), ["Dependency unknown"]);
         assert!(!unknown.quiet());
     }

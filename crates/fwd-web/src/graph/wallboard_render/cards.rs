@@ -3,10 +3,10 @@
 // The Graph page's private items the cards are read with. A rename in graph.rs fails here.
 use super::super::{also_part_of, implied, Edge};
 use super::columns;
-use crate::wallboard::{Availability, Dependencies, Presentation, TaskSelection};
+use crate::wallboard::{Availability, Presentation, TaskSelection};
 use crate::{clock, fmt, store};
 use ankurah::EntityId;
-use fwd_core::model::{RelationKind, RelationStatus, TaskStatus, TaskView};
+use fwd_core::model::{RelationKind, TaskStatus, TaskView};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
@@ -74,37 +74,20 @@ struct DrawnTask {
 }
 
 /// Reads the frame's cards from the store: the tasks `selection` keeps that are due, their relations
-/// to each other, and their prerequisites' statuses through `prerequisites`, which watches them.
-pub(super) fn read(selection: &TaskSelection, presentation: &Presentation, prerequisites: &mut Dependencies) -> Cards {
+/// to each other, and their prerequisites wherever they are, which the store reads while a card
+/// names them, those the selection leaves out and those of other projects alike
+/// (`store::dependencies`).
+pub(super) fn read(selection: &TaskSelection, presentation: &Presentation) -> Cards {
     let tasks = wallboard_tasks(selection);
     let all_relations = store::relations();
-    let statuses = prerequisites.statuses(&tasks, &all_relations);
     let availability: Vec<_> = tasks
         .iter()
-        .map(|task| {
-            let dependencies: Vec<_> = all_relations
-                .iter()
-                .filter(|r| {
-                    r.from_id().ok() == Some(task.id())
-                        && r.kind().ok() == Some(RelationKind::DependsOn)
-                        && r.status().ok() == Some(RelationStatus::Accepted)
-                })
-                .filter_map(|r| r.to_id().ok())
-                .map(|id| (id, statuses.get(&id).copied()))
-                .collect();
-            Availability::of(task.id(), task.hold().ok().flatten(), &dependencies)
-        })
+        .map(|task| Availability::of(task.id(), task.hold().ok().flatten(), &store::dependencies(task.id())))
         .collect();
-    let scopes = store::scopes();
     let content_width = presentation.node_width as f64;
     let mut drawn = Vec::with_capacity(tasks.len());
     for (task, availability) in tasks.iter().zip(&availability) {
-        let names: Vec<_> = store::scopes_of_task(task.id())
-            .iter()
-            .map(|id| {
-                scopes.iter().find(|s| s.id() == *id).and_then(|s| s.title().ok()).unwrap_or_else(|| fmt::short(*id))
-            })
-            .collect();
+        let names: Vec<_> = store::scopes_of_task(task.id()).into_iter().map(store::scope_label).collect();
         let status = task.status().unwrap_or(TaskStatus::Proposed);
         let mut metadata = fmt::status_label(status).to_string();
         if let Some(assignee) = fwd_core::ops::assignee_of(task).ok().flatten() {

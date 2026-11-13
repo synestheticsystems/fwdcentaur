@@ -29,7 +29,7 @@ how to build, configure, connect and run it, and what to do when something is wr
   Origin to the daemon's own (`daemon.md`, the Host and Origin checks). Everything else answers 404.
   The page reaches the daemon only through it, on loopback, directly or through an SSH tunnel.
 - **Rust** draws: `wallboard.rs` fetches the configuration and mounts the display, and works out each
-  card's availability from the prerequisites it watches; its child `wallboard/settings.rs` holds the
+  card's availability from its prerequisites, which the store follows wherever they are; its child `wallboard/settings.rs` holds the
   typed settings; the renderer, `graph/wallboard_render.rs`, and the packing,
   `layout/wallboard_layout.rs`, are child modules of `graph.rs` and `layout.rs`, so that they draw
   with the Graph page's own code. The renderer gives the runtime each frame as SVG markup, with the
@@ -161,10 +161,13 @@ capitals can, never shows outside it.
 
 A card faded to half its opacity is blocked by an unfinished accepted prerequisite or held, and says
 which, Blocked or On hold, with its status and priority unchanged. A cancelled or rejected
-prerequisite reads Check dependency, and one that cannot be read Dependency unknown. Availability
-comes from exact-ID queries of the prerequisites of the cards shown, which close when no card needs
-them, so the only finished tasks the display loads are those prerequisites; a proposed dependency
-blocks nothing.
+prerequisite reads Check dependency, as does one the node does not hold, and one the daemon has not
+answered for yet Dependency unknown. A prerequisite of another project counts as finished once it is
+done there and blocks until then, as the command line judges it. Availability comes from the store's
+lookups of the prerequisites of the cards shown (`store::dependencies`), which read a task outside
+the selection, or of another project, by its id for as long as a card names it (`followed.rs`), so
+the only finished tasks the display loads are those prerequisites; a proposed dependency blocks
+nothing.
 
 Beside its tasks the display reads the project's relations, scopes, principals and messages whole,
 for its arrows, scope chips, assignees and counts, and caches them for the page's life. It opens no

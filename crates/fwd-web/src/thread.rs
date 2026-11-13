@@ -33,7 +33,6 @@ use ankurah::signals::Get as AnkurahGet;
 use ankurah::{EntityId, LiveQuery};
 use futures::future::{FutureExt, RemoteHandle};
 use fwd_core::model::MessageView;
-use fwd_core::query::with_id;
 use leptos::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -184,12 +183,11 @@ pub fn OpenQueries() -> impl IntoView {
     })
 }
 
-/// A live query for the messages that match `predicate`, its one `?` bound to `id`.
-pub fn messages_where(predicate: &'static str, id: EntityId) -> Query {
-    let opened = with_id(predicate, id)
-        .map_err(|e| e.to_string())
-        .and_then(|selection| graph().query::<MessageView>(selection).map_err(|e| e.to_string()));
-    match opened {
+/// A live query for the messages whose `field` holds `id`, whichever project wrote them
+/// (`fwd_core::project_graph::ProjectGraph::query_messages_about`): the conversation about a record
+/// is read by its id, so that a record of another project shows with its own.
+pub fn messages_about(field: &'static str, id: EntityId) -> Query {
+    match graph().query_messages_about(field, id) {
         Ok(query) => Query::Live(Live::new(query)),
         Err(e) => Query::Refused(format!("the thread's query was refused: {e}")),
     }

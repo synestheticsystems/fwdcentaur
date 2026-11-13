@@ -17,6 +17,7 @@
 //! again, and offers to load the new page when the daemon now runs another build
 //! (`follow_restarts`).
 
+use crate::route::Route;
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_signals::{CurrentObserver, ReactiveGraphObserver};
@@ -155,15 +156,39 @@ pub fn wrote(me: EntityId) {
 /// `?as=` is left behind: a principal is someone's part in one project, so the new page acts as
 /// that project's person until the header's picker says otherwise.
 pub fn switch_project(id: &str) {
-    let Some(w) = window() else { return };
-    let Ok(params) = web_sys::UrlSearchParams::new_with_str(&w.location().search().unwrap_or_default()) else {
-        return;
-    };
+    if let Some(url) = address(id, &Route::inbox().hash()) {
+        load(&url);
+    }
+}
+
+/// The address of the page showing the project `id` names, at `hash`: this page's own, with the new
+/// `?p=` and without `?as=`.
+fn address(id: &str, hash: &str) -> Option<String> {
+    let w = window()?;
+    let params = web_sys::UrlSearchParams::new_with_str(&w.location().search().unwrap_or_default()).ok()?;
     params.set("p", id);
     params.delete("as");
     let path = w.location().pathname().unwrap_or_else(|_| "/".into());
     let query: String = params.to_string().into();
-    let _ = w.location().set_href(&format!("{path}?{query}#/inbox"));
+    Some(format!("{path}?{query}{hash}"))
+}
+
+/// The address of `route` on the page of the project `id` names: where a link to a record of
+/// another project leads, so that the record shows in its own project, as choosing that project in
+/// the header and then the record would show it. None on a page pinned to its project (`?lock=1`,
+/// the VS Code webview), which shows no other.
+pub fn url_in(id: &str, route: &Route) -> Option<String> {
+    if locked() {
+        return None;
+    }
+    address(id, &route.hash())
+}
+
+/// Loads `url` in place of the page.
+pub fn load(url: &str) {
+    if let Some(w) = window() {
+        let _ = w.location().set_href(url);
+    }
 }
 
 pub async fn boot() -> Result<(), String> {

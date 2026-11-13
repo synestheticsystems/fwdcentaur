@@ -51,7 +51,7 @@ ENTRY_ID=$(python3 -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].enco
 check "the dev-runner registry holds the daemon's meta file and one status file, for the unit daemon, none per project" "$(ls "$FWD_DEV_RUNNER_DIR" | tr '\n' ' ')" "$ENTRY_ID $ENTRY_ID.daemon.status "
 check "the meta file names the data directory, the daemon's pid, when it started and its port, nothing else" "$(sed -E 's/^STARTED=[0-9]+$/STARTED=<seconds>/' "$FWD_DEV_RUNNER_DIR/$ENTRY_ID" | tr '\n' ' ')" "DIR=$FWD_DATA_DIR PID=$(j "d['pid']" < "$FWD_RUNTIME_DIR/daemon.ws") STARTED=<seconds> DAEMON_PORT=$PORT "
 check "the daemon unit's status file reads ready, with its one project" "$(cat "$FWD_DEV_RUNNER_DIR/$ENTRY_ID.daemon.status")" "ready: 1 project"
-check "the daemon serves the built web UI" "$(curl -s "$U/" | grep -q 'fwd-web_bg.wasm' && echo served)" "served"
+check "the daemon serves the built web UI" "$(curl -s "$U/" | grep 'fwd-web_bg.wasm' >/dev/null && echo served)" "served"
 check "the wasm is served with its type" "$(curl -fsS -o /dev/null -w '%{http_code} %{content_type}' "$U/fwd-web_bg.wasm")" "200 application/wasm"
 check "the script is served with its type" "$(curl -fsS -o /dev/null -w '%{http_code} %{content_type}' "$U/fwd-web.js")" "200 text/javascript"
 check "the project's mark, the page's favicon, is served with its type" "$(curl -fsS -o /dev/null -w '%{http_code} %{content_type}' "$U/mark.png")" "200 image/png"
@@ -446,7 +446,7 @@ check "list names the scope a ruling governs" "$("$F" decision list --format tex
 check "show says what a ruling governs" "$("$F" decision show "D$NA" --format text | grep -c ' · governs the whole project · ')" "1"
 check "an unknown scope is refused, saying so" "$("$F" decision attach "D$NS" "Retry wrok" 2>&1 | grep -c 'no scope has the title `Retry wrok` or an id starting with it')" "1"
 NS_ID=$("$F" decision show "D$NS" --format json | j "d['id']")
-check "so is a whole id that names no scope, which list would otherwise answer with nothing" "$("$F" decision list --attached "$NS_ID" 2>&1 | grep -c "no scope of this project has the id $NS_ID")" "1"
+check "so is a whole id that names no scope, which list would otherwise answer with nothing" "$("$F" decision list --attached "$NS_ID" 2>&1 | grep -c "^Error: no scope has the id $NS_ID$")" "1"
 check "export lists a scope's rulings under its name, after the project-wide ones" "$("$F" decision export | python3 -c "import sys; t = sys.stdin.read(); print(0 <= t.find('\n## Project-wide\n') < t.find('\n## Retry work\n') < t.find('- **D$NS: Reconnects log each attempt** (process, governs Retry work, '))")" "True"
 "$F" decision detach "D$NS" >/dev/null
 check "detach makes a ruling project-wide again" "$("$F" decision show "D$NS" --format json | j "d['scope']")" "None"
@@ -789,7 +789,7 @@ if [ "${FWD_SMOKE_LAN:-}" = "1" ]; then
     check "fwd ui --lan names a LAN address and the project" "$(echo "$LANURL" | sed -E 's#^http://[0-9.]+:[0-9]+/#http://LAN/#')" "http://LAN/?p=$PROJECT"
     check "health answers on the LAN address" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$LANHOST/health")" "200"
     check "the project list answers on the LAN address" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$LANHOST/projects")" "200"
-    check "the page is served on the LAN address" "$(curl -s --max-time 5 "http://$LANHOST/" | grep -q 'fwd-web_bg.wasm' && echo served)" "served"
+    check "the page is served on the LAN address" "$(curl -s --max-time 5 "http://$LANHOST/" | grep 'fwd-web_bg.wasm' >/dev/null && echo served)" "served"
     check "the project's socket upgrades on the LAN address" "$(upgrade "/p/$PROJECT/one-store/ws" "$LANIP")" "101"
     check "stop from another address is refused" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://$LANHOST/stop")" "403"
     check "opening a project from another address is refused" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'Content-Type: application/json' -d "{\"id\":\"$PROJECT\"}" "http://$LANHOST/projects")" "403"

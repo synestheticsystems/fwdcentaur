@@ -174,10 +174,10 @@ async fn an_existing_whole_file_highlight_is_the_one_a_mention_names() -> Result
     let text = ops::text(stored.content())?;
     let short: String = head.chars().take(7).collect();
     assert_eq!(
-        ops::render_references(&graph, &text).await,
+        ops::render_references(&graph, &text).await?,
         format!("[docs/using-fwd.md on disk] is [docs/using-fwd.md {short}]")
     );
-    let listed = ops::references_json(&graph, &text).await;
+    let listed = ops::references_json(&graph, &text).await?;
     assert_eq!(listed[1]["kind"], "anchor");
     assert_eq!(listed[1]["name"], format!("docs/using-fwd.md {short}"));
     assert_eq!(listed[1]["version"], head);

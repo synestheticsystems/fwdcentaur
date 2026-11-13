@@ -5,10 +5,11 @@
 //!
 //! A daemon keeps every project it hosts in one node and one store (docs/DECISIONS.md, D135), so
 //! every record of the nine models a project's work is made of names its [`Project`] in a
-//! `project` field, set when the record is made; only moving the record to another project, which
-//! nothing does yet, changes it. That field, not the store a record sits in, is what keeps one
-//! project's records apart from another's (D38), and the project's graph (`crate::project_graph`)
-//! adds it to every read and every creation.
+//! `project` field, set when the record is made; only a task's move to another project
+//! (`crate::task_move`) changes it, for the task and what belongs to it. That field groups a
+//! project's records: the project's graph
+//! (`crate::project_graph`) adds it to every list, every live query and every creation, while the
+//! ids one record holds of another are followed whichever project that other is in (D176).
 //!
 //! Enumerations (`string_enum_property!`) are stored as their snake_case names (`"in_progress"`), so predicates read
 //! `status = 'in_progress'` and unknown values survive as strings. Identity is the Ankurah

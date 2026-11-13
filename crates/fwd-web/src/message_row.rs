@@ -28,7 +28,7 @@ pub const FOLLOWS: &[Link] = &[Link::Replies];
 
 /// The live query behind a message's replies.
 pub fn open(parent: EntityId, link: Link) -> Option<Query> {
-    (link == Link::Replies).then(|| thread::messages_where("reply_to = ?", parent))
+    (link == Link::Replies).then(|| thread::messages_about("reply_to", parent))
 }
 
 /// The messages beneath the message `parent` through `link`.
@@ -67,12 +67,14 @@ pub fn addressee(m: &MessageView) -> Option<String> {
     Some(to.parse::<EntityId>().map(store::handle_of).unwrap_or_else(|_| to.to_string()))
 }
 
-/// Who wrote the message and how it begins, to name it where it shows again.
+/// Who wrote the message and how it begins, to name it where it shows again, with its project's
+/// name after it when it is another project's, which its author's does not tell, and the author's
+/// own only when it is another still (`store::handle_beside`).
 pub fn name(id: EntityId) -> Option<String> {
     let m = store::message(id)?;
-    let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+    let author = m.author().ok().map(|a| store::handle_beside(EntityId::from(a), &m)).unwrap_or_default();
     let text = references::plain(&ops::text(m.content()).unwrap_or_default());
-    Some(format!("{author} “{}”", fmt::truncate(&text, 60)))
+    Some(store::named(format!("{author} “{}”", fmt::truncate(&text, 60)), &m))
 }
 
 /// The lozenge mode: its author and its first words.
@@ -85,7 +87,7 @@ pub fn lozenge(id: EntityId) -> AnyView {
 pub fn list_item(id: EntityId) -> AnyView {
     (move || {
         let Some(m) = store::message(id) else {
-            let absent = format!("{}: {}", fmt::short(id), empty::absent(Some(Model::Message)));
+            let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Message)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
         let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
@@ -251,8 +253,7 @@ fn resolve_words(tasks: &[EntityId]) -> (&'static str, Option<String>) {
     if tasks.is_empty() {
         return ("resolve", None);
     }
-    let names: Vec<String> =
-        tasks.iter().map(|t| store::task(*t).and_then(|t| t.title().ok()).unwrap_or_else(|| fmt::short(*t))).collect();
+    let names: Vec<String> = tasks.iter().map(|t| store::task_title(*t)).collect();
     (
         "resolve and check the step",
         Some(format!("resolves this thread and checks its highlight's step of {}", names.join(", "))),

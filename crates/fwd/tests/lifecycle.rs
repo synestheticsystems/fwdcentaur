@@ -796,7 +796,13 @@ async fn caught_on_the_way(caught: Caught) -> Result<()> {
     let task = ops::create_task(&client.graph, me, spec).await?;
     let joined = client.pf.clone();
     drop(client);
-    let relay = Relay::start(joined.port, Hold::AfterNaming(task)).await?;
+    // A write is caught in its own pre-checks, after the command found the project its task is in,
+    // which is a read; a read is caught as it finds that project.
+    let nth = match caught {
+        Caught::Write => 2,
+        Caught::Read => 1,
+    };
+    let relay = Relay::start(joined.port, Hold::AfterNaming { entity: task, nth }).await?;
     daemon::write_port_file(&paths.port_file(), &PortFile { port: relay.port, ..joined.clone() })?;
     let id = task.to_base64();
     let args = match caught {
@@ -893,9 +899,11 @@ enum Hold {
     /// After the daemon's first message, its presence, which lets the command's node join the
     /// project's system: the node waits for the answers to its first queries, and is never ready.
     AfterPresence,
-    /// From the first request of the command's node that names this entity, which a command whose
-    /// node is ready makes once it comes to the entity.
-    AfterNaming(EntityId),
+    /// From the `nth` request of the command's node that names this entity (the first is 1), which a
+    /// command whose node is ready makes once it comes to the entity: a command finds the project
+    /// of the record its id names first (`fwd_core::ops::locate`), and only then reads it as it
+    /// runs.
+    AfterNaming { entity: EntityId, nth: usize },
 }
 
 impl Relay {
@@ -943,7 +951,9 @@ async fn relay(
     // request goes on to the daemon, so that the daemon's answer to it is held back.
     let named = std::sync::Arc::new(AtomicBool::new(false));
     let naming = match hold {
-        Hold::AfterNaming(entity) if head.to_ascii_lowercase().contains("upgrade: websocket") => Some(entity),
+        Hold::AfterNaming { entity, nth } if head.to_ascii_lowercase().contains("upgrade: websocket") => {
+            Some((entity, nth))
+        }
         _ => None,
     };
     let requests = tokio::spawn({
@@ -954,13 +964,19 @@ async fn relay(
                     tokio::io::copy(&mut from_command, &mut to_daemon).await?;
                 }
                 // A request carries an entity's id as its 32 bytes.
-                Some(entity) => loop {
-                    let (frame, payload) = read_frame(&mut from_command).await?;
-                    if payload.windows(EntityId::BYTE_LEN).any(|bytes| bytes == entity.to_bytes()) {
-                        named.store(true, Ordering::SeqCst);
+                Some((entity, nth)) => {
+                    let mut seen = 0;
+                    loop {
+                        let (frame, payload) = read_frame(&mut from_command).await?;
+                        if payload.windows(EntityId::BYTE_LEN).any(|bytes| bytes == entity.to_bytes()) {
+                            seen += 1;
+                            if seen >= nth {
+                                named.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        to_daemon.write_all(&frame).await?;
                     }
-                    to_daemon.write_all(&frame).await?;
-                },
+                }
             }
             anyhow::Ok(())
         }

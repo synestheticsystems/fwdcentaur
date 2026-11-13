@@ -101,8 +101,8 @@ pub fn resolve(text: &str, slot: Slot, known: &Known) -> Result<EntityId, String
         Some(n) => known.numbers.iter().filter(|(_, number)| *number == n).map(|(id, _)| *id).collect(),
         None => Vec::new(),
     };
-    let id =
-        ops::name_to_id(text, slot.kinds, &numbered, &known.entities, &known.former_ids).map_err(|e| e.to_string())?;
+    let id = ops::name_to_id(text, slot.kinds, &numbered, &known.entities, &known.former_ids, &|_| None)
+        .map_err(|e| e.to_string())?;
     if known.entities.iter().any(|(held, kind)| *held == id && slot.kinds.contains(kind)) {
         Ok(id)
     } else {
