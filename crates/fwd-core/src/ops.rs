@@ -1187,7 +1187,8 @@ pub async fn rename_principal(graph: &ProjectGraph, principal: EntityId, name: &
         );
     }
     // No other principal has the name; one whose id it is, or starts, is named by it all the same.
-    let by_id: Vec<&PrincipalView> = match naming::resolve(&found, name, None, &FormerIds::of(graph).await?) {
+    let former = FormerIds::from_views(&graph.own_former_ids_starting(naming::bare(name)).await?);
+    let by_id: Vec<&PrincipalView> = match naming::resolve(&found, name, None, &former) {
         naming::Named::One(q) => vec![q],
         naming::Named::Started(several) => several,
         naming::Named::NoOne | naming::Named::Shared(_) => Vec::new(),
@@ -1242,7 +1243,8 @@ pub async fn person_by_handle(graph: &ProjectGraph, name: &str) -> Result<Entity
     if let Some(p) = naming::principal_named(graph, name, Some(PrincipalKind::Human)).await? {
         return Ok(p.id());
     }
-    match naming::resolve(&principals(graph).await?, name, None, &FormerIds::of(graph).await?) {
+    let former = FormerIds::from_views(&graph.own_former_ids_starting(naming::bare(name)).await?);
+    match naming::resolve(&principals(graph).await?, name, None, &former) {
         naming::Named::NoOne => bail!("no one in this project has the handle `@{name}`"),
         _ => bail!(
             "`@{name}` is an agent, not a person: a ruling recorded on someone's word names the person who gave it"

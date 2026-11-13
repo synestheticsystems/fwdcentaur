@@ -583,6 +583,16 @@ impl ProjectGraph {
         self.ctx.fetch(selecting(starting("former", prefix))).await
     }
 
+    /// The project's own former ids that start with `prefix`, read as
+    /// [`ProjectGraph::former_ids_starting`] reads every project's: what a name that is its
+    /// project's own, a principal's, may name by a former id.
+    pub async fn own_former_ids_starting(&self, prefix: &str) -> Result<Vec<FormerIdView>, RetrievalError> {
+        if !prefix.is_ascii() {
+            return Ok(Vec::new());
+        }
+        self.fetch(selecting(starting("former", prefix))).await
+    }
+
     /// The project of each of `projects`, project records as [`ProjectGraph::ids_in_every_project`]
     /// gives them, as a reader names it; one the store has no record of is left out.
     pub async fn projects_named(&self, projects: &[EntityId]) -> Result<Vec<(EntityId, Whose)>, ProjectGraphError> {

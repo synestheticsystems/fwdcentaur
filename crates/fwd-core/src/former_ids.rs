@@ -18,11 +18,6 @@ use anyhow::Result;
 pub struct FormerIds(Vec<(String, EntityId)>);
 
 impl FormerIds {
-    /// Every former id of the project `graph` holds.
-    pub async fn of(graph: &ProjectGraph) -> Result<FormerIds> {
-        Ok(FormerIds::from_views(&graph.all::<FormerIdView>().await?))
-    }
-
     /// The record the former id `whole` of the project `graph` holds names now, when it is one.
     pub async fn named_in(graph: &ProjectGraph, whole: &str) -> Result<Option<EntityId>> {
         let found: Vec<FormerIdView> = graph.fetch(with_string("former = ?", whole)?).await?;
