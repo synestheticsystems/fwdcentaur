@@ -5,38 +5,37 @@
 //! that leaves out the least important records first and says what it left out.
 
 use crate::{
-    act_as, autostart, format_of, lead_guidance, print_value, project_here, runs_in, scope_for_checkout,
-    unbound_notice, App, Cli, Command, Format,
+    autostart, format_of, lead_guidance, project_here, runs_in, scope_for_checkout, thread_hook_stand_in,
+    unbound_notice, App, Cli, Command, Format, Output,
 };
 use ankurah::EntityId;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use fwd_core::daemon;
 use fwd_core::model::*;
-use fwd_core::project::{NamedProject, Paths};
+use fwd_core::project::{self, NamedProject, Paths};
 use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph};
-use fwd_core::rules::ScopeHere;
+use fwd_core::route::page_path;
+use fwd_core::rules::{short_id, ScopeHere};
 use fwd_core::subject;
-use fwd_core::working_set::{self, Holder, Holding, Limits, SectionKind};
+use fwd_core::working_set::{self, Holder, Holding, Reading, Record, SectionKind};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::io::Write;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
+use uuid::Uuid;
 
 /// How many ready tasks `fwd prime` lists, so that what it puts into an agent's context stays
 /// short; a list it cut says so ([`cut_line`]).
 const PRIMED_READY: usize = 10;
 /// How many unread notifications `fwd prime` lists, for the same reason.
 const PRIMED_UNREAD: usize = 20;
-const LIMITS: Limits = Limits { ready: PRIMED_READY, unread: PRIMED_UNREAD };
 
 /// The budget of `--format hook` when `--max-chars` gives none: Claude Code keeps the first 10,000
 /// characters of a SessionStart hook's output, and a longer one would lose its end, where the line
 /// saying what was left out stands.
 const HOOK_CHARS: usize = 10_000;
-
-/// What the text ends with, before the line saying what was left out.
-const NEXT: &str = "Use `fwd task next --claim` to take work, `fwd inbox pop` to read notifications.";
 
 /// The two ways an agent no principal is bound to comes to hold something.
 const NAME_YOURSELF: &str = "fwd principal add <name> --role <role>";
@@ -45,7 +44,8 @@ const SUCCEED: &str = "fwd principal add <name> --succeeds <old name>";
 /// `fwd prime` for the agent `agent`, a command's subject: the stamp's, the hook's, or the own
 /// thread of the session `--session` names (`session`). It runs from any directory, joining the
 /// daemon through the directory's project, else through any project the daemon hosts, since every
-/// project is in its one node. While no principal is bound to the agent, the hook of a session's own
+/// project is in its one node, and it reads the ready tasks of the project the command runs in
+/// alone. While no principal of that project is bound to the agent, the hook of a session's own
 /// thread (`thread_hook`) reads for the principal `--as` or FWD_AS names, as every hook of that
 /// thread acts.
 pub(crate) async fn for_agent(
@@ -59,9 +59,9 @@ pub(crate) async fn for_agent(
     let Command::Prime { max_chars, include, timeout, .. } = &cli.command else {
         unreachable!("run for fwd prime alone")
     };
-    let wanted = wanted(include);
-    let here = project_here(cli, &paths)?;
-    let client = match &here {
+    let resolved = project_here(cli, &paths)?;
+    let directory = directory_project(&paths)?;
+    let client = match &resolved {
         Some(resolved) => daemon::ensure_daemon(&paths, &resolved.project, autostart(cli)?).await?,
         None => {
             let running = daemon::ensure_running(&paths, &autostart(cli)?).await?;
@@ -72,14 +72,18 @@ pub(crate) async fn for_agent(
     };
     let read = async {
         let graph = &client.graph;
-        let mut holdings = working_set::read(graph, Holder::Agent(agent), &wanted, LIMITS).await?;
-        if let (true, true, Some(name)) = (holdings.is_empty(), thread_hook && here.is_some(), &cli.act_as) {
-            let p: PrincipalView = graph.get(act_as(graph, name).await?).await?;
-            if p.active()? {
-                holdings = working_set::read(graph, Holder::Principal(p.id()), &wanted, LIMITS).await?;
+        let here = resolved.as_ref().map(|_| graph.record());
+        let reading = reading(include, here);
+        let mut holdings = working_set::read(graph, Holder::Agent(agent), &reading).await?;
+        if let (true, Some(_)) = (holdings.is_empty(), here) {
+            if let Some(Some(stand_in)) = thread_hook_stand_in(cli, graph, agent, thread_hook).await? {
+                // A retired principal acts for no one, as every hook of it does.
+                if graph.get::<PrincipalView>(stand_in).await?.active()? {
+                    holdings = working_set::read(graph, Holder::Principal(stand_in), &reading).await?;
+                }
             }
         }
-        let scope = match (&cli.scope, &here) {
+        let scope = match (&cli.scope, &resolved) {
             (Some(named), _) => Some(runs_in::scope_named(graph, &[], named).await?),
             (None, Some(resolved)) => match scope_for_checkout(&client, resolved).await? {
                 ScopeHere::One(scope) => Some(scope),
@@ -88,28 +92,27 @@ pub(crate) async fn for_agent(
             (None, None) => None,
         };
         // What the agent is told beside it is its principal's in the project the command runs in.
-        let here = here.as_ref().map(|_| graph.record());
-        let said = match holdings.iter().find(|h| Some(h.project.record) == here) {
-            Some(h) => Said::to(graph, h.principal, scope).await?,
-            None => Said::default(),
+        let notices = match holdings.iter().find(|h| Some(h.project.record) == here) {
+            Some(h) => Notices::to(graph, h.principal, scope).await?,
+            None => Notices::default(),
         };
-        let primer = Primer::new(graph, holdings, Some(agent), here, scope, client.port, session).await?;
-        anyhow::Ok((primer, said))
+        let primer = Primer::new(graph, holdings, Some(agent), directory, scope, client.port, session).await?;
+        anyhow::Ok((primer, notices))
     };
-    let (primer, said) = client.while_connected(read).await?;
+    let (primer, notices) = client.while_connected(read).await?;
     if primer.holdings.is_empty() && format == Format::Hook && timeout.is_none() {
         // As every hook of an agent that has not named itself prints nothing.
         return Ok(());
     }
-    match primer.answer(format, *max_chars, &said.lines()) {
-        Answer::Text(text) => println!("{text}"),
+    match primer.answer(format, *max_chars, &notices.lines())? {
+        Answer::Text(text) => write_answer(&text)?,
         Answer::Json(value, cut) => {
-            print_value(Format::Json, &value);
-            cut.into_iter().for_each(|cut| eprintln!("{cut}"));
+            write_answer(&pretty(&value))?;
+            cut.iter().for_each(|cut| say(cut));
         }
     }
     if format != Format::Hook {
-        said.lines().iter().for_each(|line| eprintln!("fwd: {line}"));
+        notices.lines().iter().for_each(|line| say(&format!("fwd: {line}")));
     }
     Ok(())
 }
@@ -122,22 +125,56 @@ pub(crate) async fn for_app(app: &App, max_chars: Option<usize>, include: &[Sect
         Some(agent) => Holder::Agent(agent),
         None => Holder::Principal(app.me),
     };
-    let holdings = working_set::read(graph, holder, &wanted(include), LIMITS).await?;
-    let said = Said::to(graph, app.me, app.scope).await?;
-    let primer = Primer::new(graph, holdings, None, Some(graph.record()), app.scope, app.daemon_port, None).await?;
-    match primer.answer(app.format, max_chars, &said.lines()) {
-        Answer::Text(text) => println!("{text}"),
-        Answer::Json(value, cut) => {
+    let holdings = working_set::read(graph, holder, &reading(include, Some(graph.record()))).await?;
+    let notices = Notices::to(graph, app.me, app.scope).await?;
+    let directory = directory_project(&app.paths)?;
+    let primer = Primer::new(graph, holdings, None, directory, app.scope, app.daemon_port, None).await?;
+    match (primer.answer(app.format, max_chars, &notices.lines())?, &app.out) {
+        (Answer::Text(text), _) => write_answer(&text)?,
+        (Answer::Json(value, cut), Output::Captured(_)) => {
             app.print(value)?;
             cut.into_iter().for_each(|cut| app.note(cut));
+        }
+        (Answer::Json(value, cut), Output::Stdout) => {
+            write_answer(&pretty(&value))?;
+            cut.iter().for_each(|cut| say(cut));
         }
     }
     // The notice of a triage agent that serves nothing is said after every command
     // (`say_unbound`); the lead's guidance only here.
-    if let (Some(guidance), false) = (said.guidance, app.format == Format::Hook) {
+    if let (Some(guidance), false) = (notices.guidance, app.format == Format::Hook) {
         app.note(format!("fwd: {guidance}"));
     }
     Ok(())
+}
+
+/// What a working set is read for `include` (every section when it names none), with the ready
+/// tasks of `here`, the project the command runs in, by its record.
+fn reading(include: &[Section], here: Option<EntityId>) -> Reading {
+    let selected = |kind: &SectionKind| {
+        include.contains(&match kind {
+            SectionKind::AskedOfYou | SectionKind::YouAsked => Section::Questions,
+            SectionKind::Assigned => Section::Assigned,
+            SectionKind::Unread => Section::Unread,
+            SectionKind::Ready => Section::Ready,
+        })
+    };
+    Reading {
+        sections: SectionKind::ALL.into_iter().filter(|kind| include.is_empty() || selected(kind)).collect(),
+        ready_in: here,
+        ready: PRIMED_READY,
+        unread: PRIMED_UNREAD,
+    }
+}
+
+/// The project the directory the command runs in finds, without `--project`: where the commands
+/// the text names run unless they name another.
+fn directory_project(paths: &Paths) -> Result<Option<Uuid>> {
+    match project::resolve(paths, &std::env::current_dir()?, None) {
+        Ok(resolved) => Ok(Some(resolved.project.id)),
+        Err(e) if e.is::<project::NoProject>() => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// A part of what `fwd prime` prints, which `--include` selects: a caller that keeps the text where
@@ -151,31 +188,18 @@ pub(crate) enum Section {
     Ready,
 }
 
-/// The sections of a working set `include` selects: every one when it names none.
-fn wanted(include: &[Section]) -> Vec<SectionKind> {
-    let selected = |kind: &SectionKind| {
-        include.contains(&match kind {
-            SectionKind::AskedOfYou | SectionKind::YouAsked => Section::Questions,
-            SectionKind::Assigned => Section::Assigned,
-            SectionKind::Unread => Section::Unread,
-            SectionKind::Ready => Section::Ready,
-        })
-    };
-    SectionKind::ALL.into_iter().filter(|kind| include.is_empty() || selected(kind)).collect()
-}
-
 /// What `fwd prime` tells the principal of the project it runs in beside what it holds, as its
 /// other commands tell it: a lead's guidance on making a triage agent (`lead_guidance`), and the
 /// notice of a triage agent that serves nothing (`unbound_notice`).
 #[derive(Default)]
-struct Said {
+struct Notices {
     guidance: Option<String>,
     unbound: Option<String>,
 }
 
-impl Said {
-    async fn to(graph: &ProjectGraph, principal: EntityId, scope: Option<EntityId>) -> Result<Said> {
-        Ok(Said {
+impl Notices {
+    async fn to(graph: &ProjectGraph, principal: EntityId, scope: Option<EntityId>) -> Result<Notices> {
+        Ok(Notices {
             guidance: lead_guidance(graph, principal, scope).await?,
             unbound: unbound_notice(graph, principal).await?,
         })
@@ -191,9 +215,9 @@ struct Primer {
     holdings: Vec<Holding>,
     /// The agent read for, which the line for an agent no principal is bound to names.
     agent: Option<String>,
-    /// The project a command run here without `--project` runs in, by its record; none outside
-    /// every project.
-    here: Option<EntityId>,
+    /// The project the directory the command runs in finds ([`directory_project`]): a command the
+    /// text names for another project's records carries `--project`.
+    directory: Option<Uuid>,
     /// The scope the command works in: the record of its project, and its title.
     scope: Option<(EntityId, String)>,
     /// The page's address, as `fwd ui --no-open` prints it without a project, for a panel that
@@ -226,7 +250,7 @@ impl Primer {
         graph: &ProjectGraph,
         holdings: Vec<Holding>,
         agent: Option<&str>,
-        here: Option<EntityId>,
+        directory: Option<Uuid>,
         scope: Option<EntityId>,
         port: u16,
         session: Option<&str>,
@@ -241,7 +265,7 @@ impl Primer {
         Ok(Primer {
             holdings,
             agent: agent.map(str::to_string),
-            here,
+            directory,
             scope,
             page: format!("http://127.0.0.1:{port}/"),
             session: session.map(str::to_string),
@@ -249,24 +273,41 @@ impl Primer {
     }
 
     /// What to print in `format`, fitted to `max_chars`, or with `--format hook` to [`HOOK_CHARS`];
-    /// a hook's text ends with `said` before its last lines, as other commands say it beside their
-    /// answer.
-    fn answer(&self, format: Format, max_chars: Option<usize>, said: &[String]) -> Answer {
+    /// a hook's text ends with `notices` before its last lines, as other commands say them beside
+    /// their answer. Where leaving out every record still leaves it longer than the budget, its last
+    /// line says so, with both numbers.
+    fn answer(&self, format: Format, max_chars: Option<usize>, notices: &[String]) -> Result<Answer> {
         let budget = max_chars.or((format == Format::Hook).then_some(HOOK_CHARS));
         // Counted as printed, its last newline with it.
         let size = |out: &str| out.chars().count() + 1;
-        match format {
+        Ok(match format {
             Format::Json => {
-                let pretty = |shown: &Shown| serde_json::to_string_pretty(&self.json(shown)).unwrap_or_default();
-                let shown = self.fit(budget, |shown| size(&pretty(shown)));
-                Answer::Json(self.json(&shown), cut_line(&self.cuts(&shown)))
+                let shown = self.fit(budget, |shown| size(&pretty(&self.json(shown))));
+                let json = self.json(&shown);
+                let over = budget.map(|b| (size(&pretty(&json)), b)).filter(|(length, b)| length > b);
+                Answer::Json(json, self.last_line(&shown, over))
             }
             Format::Text | Format::Hook => {
-                let said = if format == Format::Hook { said } else { &[] };
-                let shown = self.fit(budget, |shown| size(&self.text(shown, said)));
-                Answer::Text(self.text(&shown, said))
+                let notices = if format == Format::Hook { notices } else { &[] };
+                let shown = self.fit(budget, |shown| size(&self.text(shown, notices, None)));
+                let text = match budget.filter(|b| size(&self.text(&shown, notices, None)) > *b) {
+                    // The line states the length of the text that holds it, so its count is found
+                    // by writing it until it states its own length.
+                    Some(b) => {
+                        let mut stated = 0;
+                        loop {
+                            let text = self.text(&shown, notices, Some((stated, b)));
+                            if size(&text) == stated {
+                                break text;
+                            }
+                            stated = size(&text);
+                        }
+                    }
+                    None => self.text(&shown, notices, None),
+                };
+                Answer::Text(text)
             }
-        }
+        })
     }
 
     /// How many of each section's records fit in `budget` characters as `measure` counts what they
@@ -276,10 +317,16 @@ impl Primer {
         let mut shown: Shown =
             self.holdings.iter().map(|h| h.sections.iter().map(|s| s.records.len()).collect()).collect();
         let Some(budget) = budget else { return shown };
-        // Every holding has the same sections, those `--include` selects.
-        let sections = shown.first().map_or(0, Vec::len);
-        let order: Vec<(usize, usize)> =
-            (0..sections).rev().flat_map(|s| (0..shown.len()).rev().map(move |h| (h, s))).collect();
+        // By kind, since holdings need not have the same sections: the ready tasks are read in one.
+        let order: Vec<(usize, usize)> = SectionKind::ALL
+            .iter()
+            .rev()
+            .flat_map(|kind| {
+                self.holdings.iter().enumerate().rev().filter_map(move |(h, holding)| {
+                    holding.sections.iter().position(|s| s.kind == *kind).map(|s| (h, s))
+                })
+            })
+            .collect();
         while measure(&shown) > budget {
             let Some(&(h, s)) = order.iter().find(|(h, s)| shown[*h][*s] > 0) else { break };
             shown[h][s] -= 1;
@@ -288,8 +335,10 @@ impl Primer {
     }
 
     /// The text: for each holding, who the agent is there, then each section with records shown,
-    /// one line each; then `said`, how to go on, and what was left out.
-    fn text(&self, shown: &Shown, said: &[String]) -> String {
+    /// one line each, a record of another project than its principal's naming that project, and
+    /// what of it could not be read; then `notices`, how to go on, and the last line: what was left
+    /// out, and, given `over` (the text's length and the budget), that it is longer than the budget.
+    fn text(&self, shown: &Shown, notices: &[String], over: Option<(usize, usize)>) -> String {
         if self.holdings.is_empty() {
             return self.unbound_line();
         }
@@ -300,20 +349,47 @@ impl Primer {
                 _ => String::new(),
             };
             lines.push(format!("fwdcentaur context for {} ({}) in {}{scope}.", h.handle, role_word(h), h.project.name));
-            for (section, &n) in h.sections.iter().zip(counts).filter(|(_, n)| **n > 0) {
-                lines.push(format!("{} ({}):", header(section.kind), section.total));
-                lines.extend(section.records[..n].iter().map(|r| format!("{} {}", r.id.to_base64(), r.title)));
+            for (section, &n) in h.sections.iter().zip(counts) {
+                if n > 0 {
+                    lines.push(format!("{} ({}):", header(section.kind), section.total));
+                    lines.extend(section.records[..n].iter().map(|r| record_line(h, r)));
+                }
+                if let Some(first) = section.unreadable.first() {
+                    lines.push(format!(
+                        "{} {} could not be read, the first {}",
+                        section.unreadable.len(),
+                        noun(section.kind),
+                        short_id(first)
+                    ));
+                }
             }
         }
-        lines.extend(said.iter().cloned());
-        lines.push(NEXT.to_string());
-        lines.extend(cut_line(&self.cuts(shown)));
+        lines.extend(notices.iter().cloned());
+        lines.extend(self.next());
+        lines.extend(self.last_line(shown, over));
         lines.join("\n")
     }
 
-    /// The JSON a panel draws: the page's address, and for each principal its project, its name
-    /// and its role, its records shown in the text's order, and for each section how many are shown
-    /// of how many, with the command that prints the rest when some are left out.
+    /// How to go on from the sections included: taking work from the ready tasks, and reading the
+    /// unread notifications; none when neither is included.
+    fn next(&self) -> Option<String> {
+        let has = |kind| self.holdings.iter().any(|h| h.sections.iter().any(|s| s.kind == kind));
+        let ways: Vec<&str> = [
+            (SectionKind::Ready, "`fwd task next --claim` to take work"),
+            (SectionKind::Unread, "`fwd inbox pop` to read notifications"),
+        ]
+        .into_iter()
+        .filter(|(kind, _)| has(*kind))
+        .map(|(_, way)| way)
+        .collect();
+        (!ways.is_empty()).then(|| format!("Use {}.", ways.join(", ")))
+    }
+
+    /// The JSON a panel draws: the page's address, and for each principal its project, its name and
+    /// its role and its sections, each with how many records it shows of how many, the command that
+    /// prints the rest when some are left out, how many could not be read and the first of them,
+    /// and its records shown, in the text's order, each with its path on the page and, when it is
+    /// another than the principal's, its project.
     fn json(&self, shown: &Shown) -> Value {
         if self.holdings.is_empty() {
             let fix = format!("{NAME_YOURSELF}, or {SUCCEED} when this session carries on another's work");
@@ -324,27 +400,30 @@ impl Primer {
             .iter()
             .zip(shown)
             .map(|(h, counts)| {
-                let records: Vec<Value> = h
-                    .sections
-                    .iter()
-                    .zip(counts)
-                    .flat_map(|(s, &n)| s.records[..n].iter())
-                    .map(|r| json!({"id": r.id.to_base64(), "kind": r.kind.to_string(), "title": r.title}))
-                    .collect();
                 let sections: Vec<Value> = h
                     .sections
                     .iter()
                     .zip(counts)
                     .map(|(s, &n)| {
-                        let rest = (n < s.total).then(|| self.rest(h, s.kind, s.total));
-                        json!({"section": s.kind.to_string(), "shown": n, "of": s.total, "rest": rest})
+                        let records: Vec<Value> = s.records[..n].iter().map(|r| record_json(h, r)).collect();
+                        let unreadable = s
+                            .unreadable
+                            .first()
+                            .map(|first| json!({"count": s.unreadable.len(), "first": first.to_base64()}));
+                        json!({
+                            "section": s.kind.to_string(),
+                            "shown": n,
+                            "of": s.total,
+                            "rest": (n < s.total).then(|| self.rest(h, s.kind, s.total + s.listed_elsewhere)),
+                            "unreadable": unreadable,
+                            "records": records,
+                        })
                     })
                     .collect();
                 json!({
                     "project": {"id": h.project.uuid.to_string(), "name": h.project.name},
                     "name": h.handle,
                     "role": role_word(h),
-                    "records": records,
                     "sections": sections,
                 })
             })
@@ -360,41 +439,81 @@ impl Primer {
         )
     }
 
-    /// Each section with records left out, of each holding, in the text's order; the project is
-    /// named when the agent holds work in several.
-    fn cuts(&self, shown: &Shown) -> Vec<Cut> {
+    /// The last line: each section with records left out, of each holding, in the text's order,
+    /// the project named when the agent holds work in several, and the commands that print the
+    /// rest, each named once; then, given `over` (a length and the budget), that the text is longer
+    /// than its budget although every record that can be left out is. None when neither is so.
+    fn last_line(&self, shown: &Shown, over: Option<(usize, usize)>) -> Option<String> {
         let several = self.holdings.len() > 1;
         let mut cuts = Vec::new();
         for (h, counts) in self.holdings.iter().zip(shown) {
             for (s, &n) in h.sections.iter().zip(counts).filter(|(s, n)| **n < s.total) {
                 let what =
                     if several { format!("{} in {}", noun(s.kind), h.project.name) } else { noun(s.kind).into() };
-                cuts.push(Cut { what, shown: n, of: s.total, command: self.rest(h, s.kind, s.total) });
+                let command = self.rest(h, s.kind, s.total + s.listed_elsewhere);
+                cuts.push(Cut { what, shown: n, of: s.total, command });
             }
         }
-        cuts
+        let over = over.map(|(length, budget)| {
+            format!("at {length} characters this is longer than the budget of {budget}, which leaves out records alone")
+        });
+        match (cut_line(&cuts), over) {
+            (Some(cut), Some(over)) => Some(format!("{cut}; {over}")),
+            (Some(cut), None) => Some(cut),
+            (None, Some(over)) => Some(format!("fwd: {over}")),
+            (None, None) => None,
+        }
     }
 
-    /// The command that prints the `total` records of the section `kind` of `h`, run where this
-    /// one was: in another project than the one found here, with `--project`. The task list is
-    /// given a limit of every task it is to list, since its own default would cut a long one again;
-    /// no command lists the questions but this one, without the budget that left them out.
-    fn rest(&self, h: &Holding, kind: SectionKind, total: usize) -> String {
-        let project = if self.here == Some(h.project.record) {
+    /// The command that prints the records of the section `kind` of `h`, of which a whole list
+    /// holds `whole`, for the agent the text is for, whose own commands are stamped: the questions
+    /// and the assigned tasks by this command without the budget that left them out, wherever they
+    /// are; the notifications and the ready tasks by the command that lists them in their project,
+    /// with `--project` when that is not the one the directory finds, the task list given a limit of
+    /// every task it lists, since its own default would cut a long one again.
+    fn rest(&self, h: &Holding, kind: SectionKind, whole: usize) -> String {
+        let project = if self.directory == Some(h.project.uuid) {
             String::new()
         } else {
             format!(" {}", runs_in::project_flag(&h.project.name))
         };
         match kind {
-            SectionKind::AskedOfYou | SectionKind::YouAsked => match &self.session {
+            SectionKind::AskedOfYou | SectionKind::YouAsked | SectionKind::Assigned => match &self.session {
                 Some(session) => format!("fwd prime --session {session} --format text"),
                 None => "fwd prime --format text".to_string(),
             },
-            SectionKind::Assigned => format!("fwd{project} task list --mine --limit {total}"),
             SectionKind::Unread => format!("fwd{project} inbox --unread"),
-            SectionKind::Ready => format!("fwd{project} task list --ready --limit {total}"),
+            SectionKind::Ready => format!("fwd{project} task list --ready --limit {whole}"),
         }
     }
+}
+
+/// A record of `h`'s as one line: its short id, the form the page shows and every command takes,
+/// its title, and the project it is in when that is not `h`'s.
+fn record_line(h: &Holding, r: &Record) -> String {
+    let elsewhere =
+        if r.project.record == h.project.record { String::new() } else { format!(" in {}", r.project.name) };
+    format!("{} {}{elsewhere}", short_id(&r.id), r.title)
+}
+
+/// A record of `h`'s as the JSON gives it: its whole id, its kind, its title, its path on the page
+/// (null where the page has no route of its own for it), and the project it is in when that is not
+/// `h`'s (null otherwise).
+fn record_json(h: &Holding, r: &Record) -> Value {
+    let project = (r.project.record != h.project.record)
+        .then(|| json!({"id": r.project.uuid.to_string(), "name": r.project.name}));
+    json!({
+        "id": r.id.to_base64(),
+        "kind": r.kind.to_string(),
+        "title": r.title,
+        "path": r.route.as_ref().map(|route| page_path(r.project.uuid, route)),
+        "project": project,
+    })
+}
+
+/// `value` as `--format json` prints it.
+fn pretty(value: &Value) -> String {
+    serde_json::to_string_pretty(value).expect("a JSON value always serializes: its keys are strings")
 }
 
 /// What a holding's principal is, as `fwd principal list --format text` says it.
@@ -426,9 +545,9 @@ fn noun(kind: SectionKind) -> &'static str {
     }
 }
 
-/// The line that ends what `fwd prime` prints when it left records out, as `fwd task list` says
-/// when its limit cut it: how many of how many of each section it shows, and the commands that
-/// print the rest, each named once; none when it left nothing out.
+/// What the last line says when records were left out, as `fwd task list` says when its limit cut
+/// it: how many of how many of each section it shows, and the commands that print the rest, each
+/// named once; none when nothing was left out.
 fn cut_line(cuts: &[Cut]) -> Option<String> {
     if cuts.is_empty() {
         return None;
@@ -452,37 +571,71 @@ fn and_list(items: &[String]) -> String {
     }
 }
 
+/// Whether `fwd prime`'s answer has been written, held while it is written, so that the line a
+/// deadline prints comes neither inside an answer nor after one.
+static ANSWERED: Mutex<bool> = Mutex::new(false);
+
+/// Writes `text`, `fwd prime`'s answer, on standard output.
+fn write_answer(text: &str) -> Result<()> {
+    let mut answered = ANSWERED.lock().unwrap_or_else(PoisonError::into_inner);
+    *answered = true;
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{text}").and_then(|()| out.flush()).context("writing the answer on standard output")
+}
+
+/// Says `line` on standard error; a line that cannot be written has no reader left, and costs the
+/// command nothing.
+fn say(line: &str) {
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
 /// The deadline `fwd prime --timeout` gives, and whether its one line is JSON: read from the
-/// command line before the command runs, so that it bounds all of it, the wait for the daemon
-/// first.
-pub(crate) struct Bound {
+/// command line before the command runs, so that it bounds all of it.
+pub(crate) struct Deadline {
     within: Duration,
     json: bool,
 }
 
-pub(crate) fn bound() -> Option<Bound> {
+pub(crate) fn deadline() -> Option<Deadline> {
     let cli = Cli::try_parse().ok()?;
     let Command::Prime { timeout: Some(seconds), .. } = cli.command else { return None };
-    Some(Bound { within: Duration::from_secs(seconds), json: format_of(&cli) == Format::Json })
+    Some(Deadline { within: Duration::from_secs(seconds), json: format_of(&cli) == Format::Json })
 }
 
 /// Runs `ran`, a `fwd prime` given `--timeout`, and ends the process with exit 0 whatever becomes of
-/// it, so that a hook or a skill that runs it neither fails nor waits past the deadline: an error,
-/// and a deadline that passes first, are said in one line, as JSON with `--format json`. The
-/// process ends at once, without shutting the runtime down, which can wait for good on a thread
-/// left inside Ankurah (`watch::end` says how).
-pub(crate) async fn within(bound: Bound, ran: impl Future<Output = Result<()>>) -> ! {
-    let why = match tokio::time::timeout(bound.within, ran).await {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(format!("{error:#}").replace('\n', " ")),
-        Err(_) => Some(format!("it did not finish within {}s", bound.within.as_secs())),
-    };
-    match why {
-        Some(why) if bound.json => println!("{}", json!({"state": "unavailable", "reason": why})),
-        Some(why) => println!("fwd: nothing to show: {why}"),
-        None => {}
+/// it, so that a hook or a skill that runs it neither fails nor waits past the deadline. A thread of
+/// its own ends the process at the deadline, whatever the command is doing then, reading its
+/// standard input or a checkout's git files included, which no future's timeout could interrupt.
+/// An error, and the deadline passing first, are said in one line, as JSON with `--format json`,
+/// unless the answer was written. The process ends at once, without shutting the runtime down,
+/// which can wait for good on a thread left inside Ankurah (`watch::end` says how).
+pub(crate) async fn within(deadline: Deadline, ran: impl Future<Output = Result<()>>) -> ! {
+    let Deadline { within, json } = deadline;
+    std::thread::spawn(move || {
+        std::thread::sleep(within);
+        nothing_to_show(json, &format!("it did not finish within {}s", within.as_secs()))
+    });
+    if let Err(error) = ran.await {
+        nothing_to_show(json, &format!("{error:#}"));
     }
-    let _ = std::io::stdout().flush();
+    std::process::exit(0)
+}
+
+/// Says in one line why there is nothing to show, unless the answer was written, and ends the
+/// process with exit 0; a line that cannot be written has no reader left.
+fn nothing_to_show(json: bool, why: &str) -> ! {
+    let mut answered = ANSWERED.lock().unwrap_or_else(PoisonError::into_inner);
+    if !*answered {
+        *answered = true;
+        let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
+        let line = if json {
+            json!({"state": "unavailable", "reason": why}).to_string()
+        } else {
+            format!("fwd: nothing to show: {why}")
+        };
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}").and_then(|()| out.flush());
+    }
     std::process::exit(0)
 }
 
@@ -490,29 +643,37 @@ pub(crate) async fn within(bound: Bound, ran: impl Future<Output = Result<()>>) 
 mod tests {
     use super::*;
     use fwd_core::project_graph::ProjectRecord;
-    use fwd_core::working_set::{self, Record, RecordKind};
+    use fwd_core::route::Route;
+    use fwd_core::working_set::{RecordKind, Section};
 
-    /// A holding in `project`, whose sections hold, in order, the first of each pair of records of
-    /// the second.
-    fn holding(project: u8, counts: [(usize, usize); 5]) -> Holding {
-        let sections = SectionKind::ALL
+    fn project(n: u8) -> ProjectRecord {
+        let name = ["alpha", "beta"][usize::from(n)].to_string();
+        ProjectRecord { record: EntityId::from_bytes([100 + n; 32]), uuid: Uuid::from_bytes([n + 1; 16]), name }
+    }
+
+    /// A holding in `project` with a section of each `kinds`, each holding the first of its pair of
+    /// records of the second.
+    fn holding(project_n: u8, sections: &[(SectionKind, usize, usize)]) -> Holding {
+        let sections = sections
             .iter()
-            .zip(counts)
-            .map(|(kind, (records, total))| working_set::Section {
-                kind: *kind,
+            .map(|&(kind, records, total)| Section {
+                kind,
                 total,
+                listed_elsewhere: 0,
+                unreadable: Vec::new(),
                 records: (0..records)
                     .map(|i| Record {
                         id: EntityId::from_bytes([i as u8; 32]),
                         kind: RecordKind::Task,
                         title: format!("{kind} {i}"),
+                        project: project(project_n),
+                        route: Some(Route::task(EntityId::from_bytes([i as u8; 32]))),
                     })
                     .collect(),
             })
             .collect();
-        let name = ["alpha", "beta"][usize::from(project)].to_string();
         Holding {
-            project: ProjectRecord { record: EntityId::from_bytes([100 + project; 32]), uuid: uuid::Uuid::nil(), name },
+            project: project(project_n),
             principal: EntityId::from_bytes([200; 32]),
             handle: "impl-a".into(),
             kind: PrincipalKind::Agent,
@@ -521,69 +682,126 @@ mod tests {
         }
     }
 
-    /// A primer of `holdings`, run in the first one's project.
+    /// A primer of `holdings`, run in the first one's project's directory.
     fn primer(holdings: Vec<Holding>) -> Primer {
-        let here = holdings.first().map(|h| h.project.record);
-        Primer { holdings, agent: None, here, scope: None, page: "http://127.0.0.1:1/".into(), session: None }
+        let directory = holdings.first().map(|h| h.project.uuid);
+        Primer { holdings, agent: None, directory, scope: None, page: "http://127.0.0.1:1/".into(), session: None }
     }
 
+    use SectionKind::*;
+
     /// Over its budget, `fwd prime` leaves out one record at a time from the least important end:
-    /// every holding's ready tasks first, the last holding's before the first's, then the unread
-    /// notifications, then the assigned tasks, then the questions; and its last line names each
-    /// section it cut, of how many, and the commands that print the rest.
+    /// the ready tasks first, then every holding's unread notifications, the last holding's before
+    /// the first's, then the assigned tasks, then the questions, though the holdings do not have the
+    /// same sections; and its last line names each section it cut, of how many, and the commands
+    /// that print the rest, with `--project` for a project the directory does not find.
     #[test]
     fn a_budget_leaves_out_the_least_important_records_first_and_the_last_line_says_which() {
         let p = primer(vec![
-            holding(0, [(1, 1), (1, 1), (1, 1), (2, 2), (3, 3)]),
-            holding(1, [(0, 0), (0, 0), (0, 0), (0, 0), (2, 2)]),
+            holding(0, &[(AskedOfYou, 1, 1), (YouAsked, 1, 1), (Assigned, 1, 1), (Unread, 1, 1), (Ready, 2, 2)]),
+            holding(1, &[(AskedOfYou, 0, 0), (YouAsked, 0, 0), (Assigned, 0, 0), (Unread, 2, 2)]),
         ]);
         // A measure that counts the records shown, so that a budget of n keeps n of them.
         let records = |shown: &Shown| shown.iter().flatten().sum::<usize>();
-        let kept = [
-            [[1, 1, 1, 2, 3], [0, 0, 0, 0, 2]],
-            [[1, 1, 1, 2, 3], [0, 0, 0, 0, 1]],
-            [[1, 1, 1, 2, 3], [0, 0, 0, 0, 0]],
-            [[1, 1, 1, 2, 2], [0, 0, 0, 0, 0]],
-            [[1, 1, 1, 2, 1], [0, 0, 0, 0, 0]],
-            [[1, 1, 1, 2, 0], [0, 0, 0, 0, 0]],
-            [[1, 1, 1, 1, 0], [0, 0, 0, 0, 0]],
-            [[1, 1, 1, 0, 0], [0, 0, 0, 0, 0]],
-            [[1, 1, 0, 0, 0], [0, 0, 0, 0, 0]],
-            [[1, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
-            [[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
+        let kept: [(Vec<usize>, Vec<usize>); 9] = [
+            (vec![1, 1, 1, 1, 2], vec![0, 0, 0, 2]),
+            (vec![1, 1, 1, 1, 1], vec![0, 0, 0, 2]),
+            (vec![1, 1, 1, 1, 0], vec![0, 0, 0, 2]),
+            (vec![1, 1, 1, 1, 0], vec![0, 0, 0, 1]),
+            (vec![1, 1, 1, 1, 0], vec![0, 0, 0, 0]),
+            (vec![1, 1, 1, 0, 0], vec![0, 0, 0, 0]),
+            (vec![1, 1, 0, 0, 0], vec![0, 0, 0, 0]),
+            (vec![1, 0, 0, 0, 0], vec![0, 0, 0, 0]),
+            (vec![0, 0, 0, 0, 0], vec![0, 0, 0, 0]),
         ];
-        for (budget, kept) in (0..=10).rev().zip(kept) {
-            assert_eq!(p.fit(Some(budget), records), kept.map(Vec::from), "a budget of {budget} records");
+        for (budget, (a, b)) in (0..=8).rev().zip(kept.clone()) {
+            assert_eq!(p.fit(Some(budget), records), [a, b], "a budget of {budget} records");
         }
-        // With nothing left to leave out, what is left is printed whatever its size.
-        assert_eq!(p.fit(Some(0), |_| 100), [vec![0; 5], vec![0; 5]]);
-
-        let text = p.text(&kept[3].map(Vec::from).into(), &[]);
+        let text = p.text(&vec![kept[3].0.clone(), kept[3].1.clone()], &[], None);
         assert_eq!(
             text.lines().last(),
             Some(
-                "fwd: 2 of 3 ready tasks in alpha and 0 of 2 ready tasks in beta shown; `fwd task list --ready --limit 3` and `fwd --project 'beta' task list --ready --limit 2` list the rest"
+                "fwd: 0 of 2 ready tasks in alpha and 1 of 2 unread notifications in beta shown; `fwd task list --ready --limit 2` and `fwd --project 'beta' inbox --unread` list the rest"
             ),
             "{text}"
         );
     }
 
-    /// The last line names each section cut and each command that prints the rest once, `fwd task
-    /// list` given a limit of every task it is to list, as its own default would cut a long list
-    /// again; a text that left nothing out ends with how to go on, however near its caps it came.
+    /// The last line names each section cut and each command that prints the rest once, the task
+    /// list given a limit of every task it lists, the agent's own ready tasks listed as assigned
+    /// among them; a text that left nothing out ends with how to go on, and with neither the ready
+    /// tasks nor the notifications included, with its last record.
     #[test]
     fn the_last_line_names_each_section_cut_and_each_command_once() {
-        let p = primer(vec![holding(0, [(0, 0), (0, 0), (0, 0), (20, 20), (10, 10)])]);
-        let text = p.text(&p.fit(None, |_| 0), &[]);
-        assert_eq!(text.lines().last(), Some(NEXT), "{text}");
-        let p = primer(vec![holding(0, [(1, 1), (1, 1), (0, 0), (20, 31), (10, 60)])]);
+        let p = primer(vec![holding(0, &[(Unread, 20, 20), (Ready, 10, 10)])]);
+        let text = p.text(&p.fit(None, |_| 0), &[], None);
         assert_eq!(
-            cut_line(&p.cuts(&p.fit(None, |_| 0))).as_deref(),
-            Some("fwd: 20 of 31 unread notifications and 10 of 60 ready tasks shown; `fwd inbox --unread` and `fwd task list --ready --limit 60` list the rest")
+            text.lines().last(),
+            Some("Use `fwd task next --claim` to take work, `fwd inbox pop` to read notifications.")
         );
+        let mut held = primer(vec![holding(0, &[(AskedOfYou, 1, 1), (Assigned, 1, 1)])]);
+        let text = held.text(&held.fit(None, |_| 0), &[], None);
+        assert!(text.lines().last().is_some_and(|line| line.ends_with("assigned 0")), "{text}");
+
+        held.holdings = vec![holding(0, &[(AskedOfYou, 1, 1), (YouAsked, 1, 1), (Unread, 20, 31), (Ready, 10, 60)])];
+        held.holdings[0].sections[3].listed_elsewhere = 2;
+        let text = held.text(&vec![vec![0, 0, 20, 10]], &[], None);
         assert_eq!(
-            cut_line(&p.cuts(&vec![vec![0, 0, 0, 20, 10]])).as_deref(),
-            Some("fwd: 0 of 1 questions asked of you, 0 of 1 questions you asked, 20 of 31 unread notifications and 10 of 60 ready tasks shown; `fwd prime --format text`, `fwd inbox --unread` and `fwd task list --ready --limit 60` list the rest")
+            text.lines().last(),
+            Some("fwd: 0 of 1 questions asked of you, 0 of 1 questions you asked, 20 of 31 unread notifications and 10 of 60 ready tasks shown; `fwd prime --format text`, `fwd inbox --unread` and `fwd task list --ready --limit 62` list the rest")
         );
+    }
+
+    /// At the hook's budget the text, counted in characters as Claude Code keeps them, fits in
+    /// 10,000, its last line saying what was left out; where leaving out every record is not
+    /// enough, the last line says by how much, the length it states being the text's own.
+    #[test]
+    fn the_hook_fits_its_budget_and_says_when_leaving_out_records_is_not_enough() {
+        let mut p = primer(vec![holding(0, &[(Assigned, 400, 400)])]);
+        for r in &mut p.holdings[0].sections[0].records {
+            r.title = format!("{} {}", r.title, "é".repeat(40));
+        }
+        let Answer::Text(text) = p.answer(Format::Hook, None, &[]).expect("an answer") else { panic!("text") };
+        assert!(text.chars().count() < HOOK_CHARS, "{} characters", text.chars().count());
+        assert!(text
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("fwd: ") && line.contains("of 400 tasks assigned to you shown")));
+
+        let Answer::Text(text) = p.answer(Format::Text, Some(30), &[]).expect("an answer") else { panic!("text") };
+        let length = text.chars().count() + 1;
+        assert!(
+            text.lines().last().is_some_and(|line| line.ends_with(&format!(
+                "; at {length} characters this is longer than the budget of 30, which leaves out records alone"
+            ))),
+            "{text}"
+        );
+    }
+
+    /// A record of another project than its principal's names that project on its line and in the
+    /// JSON, which gives its path in that project; what could not be read is said by count and
+    /// first id.
+    #[test]
+    fn a_record_of_another_project_names_it_and_what_could_not_be_read_is_said() {
+        let mut p = primer(vec![holding(0, &[(Assigned, 1, 1)])]);
+        let moved = &mut p.holdings[0].sections[0];
+        moved.records[0].project = project(1);
+        moved.unreadable = vec![EntityId::from_bytes([9; 32]), EntityId::from_bytes([8; 32])];
+        let shown = p.fit(None, |_| 0);
+        let text = p.text(&shown, &[], None);
+        let id = EntityId::from_bytes([0; 32]);
+        assert!(text.contains(&format!("{} assigned 0 in beta\n", short_id(&id))), "{text}");
+        assert!(
+            text.contains(&format!(
+                "2 tasks assigned to you could not be read, the first {}",
+                short_id(&EntityId::from_bytes([9; 32]))
+            )),
+            "{text}"
+        );
+        let json = p.json(&shown);
+        let section = &json["principals"][0]["sections"][0];
+        assert_eq!(section["records"][0]["project"]["name"], "beta");
+        assert_eq!(section["records"][0]["path"], page_path(project(1).uuid, &Route::task(id)));
+        assert_eq!(section["unreadable"], json!({"count": 2, "first": EntityId::from_bytes([9; 32]).to_base64()}));
     }
 }

@@ -2232,8 +2232,8 @@ fn joins(matches: &ArgMatches) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if let Some(bound) = prime::bound() {
-        prime::within(bound, run_cli()).await
+    if let Some(deadline) = prime::deadline() {
+        prime::within(deadline, run_cli()).await
     }
     match run_cli().await {
         // A command whose daemon went away while it ran ends at once, with the exit of a command
@@ -2923,11 +2923,8 @@ async fn caller(
             let binds = matches!(cli.command, Command::Principal { command: PrincipalCommand::Bind { .. } });
             let bound = if binds {
                 subject::principal_of(graph, subject).await?.map(|p| p.id())
-            } else if thread_hook && subject::principal_of(graph, subject).await?.is_none() {
-                match cli.act_as.as_deref() {
-                    Some(name) => Some(act_as(graph, name).await?),
-                    None => None,
-                }
+            } else if let Some(stand_in) = thread_hook_stand_in(cli, graph, subject, thread_hook).await? {
+                stand_in
             } else {
                 subject::caller(graph, subject, typed_as).await?
             };
@@ -2982,6 +2979,26 @@ async fn caller(
         },
     };
     Ok(Caller { me, me_handle, acting, scope, several })
+}
+
+/// Whom the hook of a session's own thread (`thread_hook`) acts for while no principal of the
+/// project, retired or not, is bound to its agent `subject`: the principal `--as` or FWD_AS names, as
+/// the hooks did before agents named themselves, or no one without either. None for any other
+/// command, and while a principal is bound, which the command then acts as, or, retired, acts for
+/// no one.
+async fn thread_hook_stand_in(
+    cli: &Cli,
+    graph: &ProjectGraph,
+    subject: &str,
+    thread_hook: bool,
+) -> Result<Option<Option<EntityId>>> {
+    if !thread_hook || subject::principal_of(graph, subject).await?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(match cli.act_as.as_deref() {
+        Some(name) => Some(act_as(graph, name).await?),
+        None => None,
+    }))
 }
 
 /// The commands that write, beside those [`JOINING`] says write work into the project: the

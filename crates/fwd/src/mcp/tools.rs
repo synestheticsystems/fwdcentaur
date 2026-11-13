@@ -424,8 +424,19 @@ mod tests {
     fn no_tool_takes_an_actor_or_a_file() {
         for spec in specs() {
             let properties = spec.schema["properties"].as_object().unwrap();
-            for left_out in ["as", "act_as", "format", "no_autostart", "path", "lines", "against", "side", "hook_event"]
-            {
+            for left_out in [
+                "as",
+                "act_as",
+                "format",
+                "no_autostart",
+                "path",
+                "lines",
+                "against",
+                "side",
+                "hook_event",
+                "session",
+                "timeout",
+            ] {
                 assert!(!properties.contains_key(left_out), "{} takes {left_out}", spec.name);
             }
             assert!(properties.contains_key(PROJECT) && properties.contains_key(SCOPE), "{}", spec.name);
