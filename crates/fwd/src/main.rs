@@ -432,13 +432,14 @@ enum Command {
     /// one line by its id, the most important first, and end, when something was left out, with a
     /// line naming what and the command that prints it.
     Prime {
-        /// A Claude Code session's id: read for the session's own thread, as the commands the fwd
-        /// plugin stamps there act, for a command nothing stamps, such as one a skill runs as it
-        /// loads. Only this command takes it, and it reads.
+        /// A Claude Code session's id: read for the session's own thread, whoever runs the command,
+        /// stamped or not, for a command nothing stamps, such as one a skill runs as it loads. Only
+        /// this command takes it, and it only reads.
         #[arg(long)]
         session: Option<String>,
-        /// The most characters the output may take: past them the least important records are left
-        /// out, ready tasks first. 10000 with --format hook, the most Claude Code keeps of a
+        /// A budget of characters for the whole output: past it the least important records are
+        /// left out, ready tasks first, and when leaving out every record is not enough, the last
+        /// line says by how much. 10000 with --format hook, the most Claude Code keeps of a
         /// SessionStart hook's output; none otherwise.
         #[arg(long)]
         max_chars: Option<usize>,
@@ -447,9 +448,9 @@ enum Command {
         /// is is always printed, and `questions,assigned` changes only when what the agent holds does.
         #[arg(long, value_delimiter = ',', value_enum)]
         include: Vec<prime::Section>,
-        /// Seconds within which it ends with exit 0 whatever happens: when the daemon cannot be
-        /// reached, no principal is bound to the agent, or the time passes first, it prints one line
-        /// saying why there is nothing to show.
+        /// Seconds within which the process ends with exit 0, whatever it is doing then: when the
+        /// daemon cannot be reached, no principal is bound to the agent, or the time passes first,
+        /// it prints one line saying why there is nothing to show.
         #[arg(long)]
         timeout: Option<u64>,
     },
