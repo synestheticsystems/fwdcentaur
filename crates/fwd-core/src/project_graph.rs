@@ -547,6 +547,19 @@ impl ProjectGraph {
         self.ctx.fetch(selecting(starting("former", prefix))).await
     }
 
+    /// The records of `V`'s model, of every project, that `args` selects: what names one
+    /// principal of this project wherever it is, since a task moved to another project keeps its
+    /// assignee and its messages their authors and addressees (`task_move`). Only an agent's working
+    /// set reads it (`working_set`), and names each record's project beside it; no list reads
+    /// through it.
+    pub async fn fetch_in_every_project<V: InProjectView>(
+        &self,
+        args: impl TryInto<MatchArgs<Parsed>, Error = impl Into<RetrievalError>>,
+    ) -> Result<Vec<V>, RetrievalError> {
+        let args: MatchArgs<Parsed> = args.try_into().map_err(Into::into)?;
+        self.ctx.fetch(args).await
+    }
+
     /// The project of each of `projects`, project records as [`ProjectGraph::ids_in_every_project`]
     /// gives them, as a reader names it; one the store has no record of is left out.
     pub async fn projects_named(&self, projects: &[EntityId]) -> Result<Vec<(EntityId, Whose)>, ProjectGraphError> {
