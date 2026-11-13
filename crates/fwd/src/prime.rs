@@ -22,7 +22,7 @@ use fwd_core::working_set::{self, Holder, Holding, Reading, Record, SectionKind}
 use serde_json::{json, Value};
 use std::future::Future;
 use std::io::Write;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, TryLockError};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -55,12 +55,13 @@ pub(crate) async fn for_agent(
     agent: &str,
     session: Option<&str>,
     thread_hook: bool,
+    typed_as: Option<&str>,
 ) -> Result<()> {
     let Command::Prime { max_chars, include, timeout, .. } = &cli.command else {
         unreachable!("run for fwd prime alone")
     };
     let resolved = project_here(cli, &paths)?;
-    let directory = directory_project(&paths)?;
+    let directory = directory_project(&paths);
     let client = match &resolved {
         Some(resolved) => daemon::ensure_daemon(&paths, &resolved.project, autostart(cli)?).await?,
         None => {
@@ -96,7 +97,9 @@ pub(crate) async fn for_agent(
             Some(h) => Notices::to(graph, h.principal, scope).await?,
             None => Notices::default(),
         };
-        let primer = Primer::new(graph, holdings, Some(agent), directory, scope, client.port, session).await?;
+        let project = resolved.as_ref().map(|r| (r.project.id, r.project.name.as_str()));
+        let rest = prime_command(project, directory, typed_as, session);
+        let primer = Primer::new(graph, holdings, Some(agent), directory, scope, client.port, rest).await?;
         anyhow::Ok((primer, notices))
     };
     let (primer, notices) = client.while_connected(read).await?;
@@ -104,7 +107,7 @@ pub(crate) async fn for_agent(
         // As every hook of an agent that has not named itself prints nothing.
         return Ok(());
     }
-    match primer.answer(format, *max_chars, &notices.lines())? {
+    match primer.answer(format, *max_chars, &notices.lines()) {
         Answer::Text(text) => write_answer(&text)?,
         Answer::Json(value, cut) => {
             write_answer(&pretty(&value))?;
@@ -127,9 +130,14 @@ pub(crate) async fn for_app(app: &App, max_chars: Option<usize>, include: &[Sect
     };
     let holdings = working_set::read(graph, holder, &reading(include, Some(graph.record()))).await?;
     let notices = Notices::to(graph, app.me, app.scope).await?;
-    let directory = directory_project(&app.paths)?;
-    let primer = Primer::new(graph, holdings, None, directory, app.scope, app.daemon_port, None).await?;
-    match (primer.answer(app.format, max_chars, &notices.lines())?, &app.out) {
+    // An MCP call runs in the daemon, whose directory is no caller's.
+    let directory = match app.out {
+        Output::Captured(_) => None,
+        Output::Stdout => directory_project(&app.paths),
+    };
+    let rest = prime_command(Some((app.project.id, &app.project.name)), directory, app.typed_as.as_deref(), None);
+    let primer = Primer::new(graph, holdings, None, directory, app.scope, app.daemon_port, rest).await?;
+    match (primer.answer(app.format, max_chars, &notices.lines()), &app.out) {
         (Answer::Text(text), _) => write_answer(&text)?,
         (Answer::Json(value, cut), Output::Captured(_)) => {
             app.print(value)?;
@@ -168,13 +176,36 @@ fn reading(include: &[Section], here: Option<EntityId>) -> Reading {
 }
 
 /// The project the directory the command runs in finds, without `--project`: where the commands
-/// the text names run unless they name another.
-fn directory_project(paths: &Paths) -> Result<Option<Uuid>> {
-    match project::resolve(paths, &std::env::current_dir()?, None) {
-        Ok(resolved) => Ok(Some(resolved.project.id)),
-        Err(e) if e.is::<project::NoProject>() => Ok(None),
-        Err(e) => Err(e),
+/// the text names run unless they name another. It only decides whether a command the text names
+/// needs `--project`, so a directory that finds none, or not one alone, is none, and every command
+/// is named with its project; it never fails the read.
+fn directory_project(paths: &Paths) -> Option<Uuid> {
+    let here = std::env::current_dir().ok()?;
+    project::resolve(paths, &here, None).ok().map(|resolved| resolved.project.id)
+}
+
+/// The command that prints the questions and the assigned tasks whole: this one, without a budget,
+/// reading the same working set, with `--project` whenever the project it runs in (`project`) is
+/// not the one the directory finds, the `--as` its caller typed, and the session it named.
+fn prime_command(
+    project: Option<(Uuid, &str)>,
+    directory: Option<Uuid>,
+    typed_as: Option<&str>,
+    session: Option<&str>,
+) -> String {
+    let mut words = vec!["fwd".to_string()];
+    if let Some((_, name)) = project.filter(|(id, _)| directory != Some(*id)) {
+        words.push(runs_in::project_flag(name));
     }
+    if let Some(name) = typed_as {
+        words.push(format!("--as '{}'", name.replace('\'', r"'\''")));
+    }
+    words.push("prime".to_string());
+    if let Some(session) = session {
+        words.push(format!("--session {session}"));
+    }
+    words.push("--format text".to_string());
+    words.join(" ")
 }
 
 /// A part of what `fwd prime` prints, which `--include` selects: a caller that keeps the text where
@@ -223,8 +254,8 @@ struct Primer {
     /// The page's address, as `fwd ui --no-open` prints it without a project, for a panel that
     /// links to what it draws.
     page: String,
-    /// The session `--session` named, which the command that prints the rest names too.
-    session: Option<String>,
+    /// The command that prints the questions and the assigned tasks whole ([`prime_command`]).
+    rest_of_prime: String,
 }
 
 /// How many of each section's records are shown: for each holding, for each of its sections.
@@ -253,7 +284,7 @@ impl Primer {
         directory: Option<Uuid>,
         scope: Option<EntityId>,
         port: u16,
-        session: Option<&str>,
+        rest_of_prime: String,
     ) -> Result<Primer> {
         let scope = match scope {
             Some(scope) => match graph.follow::<ScopeView>(scope).await? {
@@ -268,7 +299,7 @@ impl Primer {
             directory,
             scope,
             page: format!("http://127.0.0.1:{port}/"),
-            session: session.map(str::to_string),
+            rest_of_prime,
         })
     }
 
@@ -276,11 +307,11 @@ impl Primer {
     /// a hook's text ends with `notices` before its last lines, as other commands say them beside
     /// their answer. Where leaving out every record still leaves it longer than the budget, its last
     /// line says so, with both numbers.
-    fn answer(&self, format: Format, max_chars: Option<usize>, notices: &[String]) -> Result<Answer> {
+    fn answer(&self, format: Format, max_chars: Option<usize>, notices: &[String]) -> Answer {
         let budget = max_chars.or((format == Format::Hook).then_some(HOOK_CHARS));
         // Counted as printed, its last newline with it.
         let size = |out: &str| out.chars().count() + 1;
-        Ok(match format {
+        match format {
             Format::Json => {
                 let shown = self.fit(budget, |shown| size(&pretty(&self.json(shown))));
                 let json = self.json(&shown);
@@ -307,7 +338,7 @@ impl Primer {
                 };
                 Answer::Text(text)
             }
-        })
+        }
     }
 
     /// How many of each section's records fit in `budget` characters as `measure` counts what they
@@ -340,7 +371,11 @@ impl Primer {
     /// out, and, given `over` (the text's length and the budget), that it is longer than the budget.
     fn text(&self, shown: &Shown, notices: &[String], over: Option<(usize, usize)>) -> String {
         if self.holdings.is_empty() {
-            return self.unbound_line();
+            return [Some(self.unbound_line()), self.last_line(shown, over)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n");
         }
         let mut lines = Vec::new();
         for (h, counts) in self.holdings.iter().zip(shown) {
@@ -354,7 +389,7 @@ impl Primer {
                     lines.push(format!("{} ({}):", header(section.kind), section.total));
                     lines.extend(section.records[..n].iter().map(|r| record_line(h, r)));
                 }
-                if let Some(first) = section.unreadable.first() {
+                if let Some(first) = section.unreadable.iter().min() {
                     lines.push(format!(
                         "{} {} could not be read, the first {}",
                         section.unreadable.len(),
@@ -408,7 +443,8 @@ impl Primer {
                         let records: Vec<Value> = s.records[..n].iter().map(|r| record_json(h, r)).collect();
                         let unreadable = s
                             .unreadable
-                            .first()
+                            .iter()
+                            .min()
                             .map(|first| json!({"count": s.unreadable.len(), "first": first.to_base64()}));
                         json!({
                             "section": s.kind.to_string(),
@@ -478,10 +514,7 @@ impl Primer {
             format!(" {}", runs_in::project_flag(&h.project.name))
         };
         match kind {
-            SectionKind::AskedOfYou | SectionKind::YouAsked | SectionKind::Assigned => match &self.session {
-                Some(session) => format!("fwd prime --session {session} --format text"),
-                None => "fwd prime --format text".to_string(),
-            },
+            SectionKind::AskedOfYou | SectionKind::YouAsked | SectionKind::Assigned => self.rest_of_prime.clone(),
             SectionKind::Unread => format!("fwd{project} inbox --unread"),
             SectionKind::Ready => format!("fwd{project} task list --ready --limit {whole}"),
         }
@@ -605,38 +638,47 @@ pub(crate) fn deadline() -> Option<Deadline> {
 /// Runs `ran`, a `fwd prime` given `--timeout`, and ends the process with exit 0 whatever becomes of
 /// it, so that a hook or a skill that runs it neither fails nor waits past the deadline. A thread of
 /// its own ends the process at the deadline, whatever the command is doing then, reading its
-/// standard input or a checkout's git files included, which no future's timeout could interrupt.
-/// An error, and the deadline passing first, are said in one line, as JSON with `--format json`,
-/// unless the answer was written. The process ends at once, without shutting the runtime down,
-/// which can wait for good on a thread left inside Ankurah (`watch::end` says how).
+/// standard input or a checkout's git files included, which no future's timeout could interrupt,
+/// and writing its answer too: an answer being written then is not waited for. An error, and the
+/// deadline passing first, are said in one line, as JSON with `--format json`, unless the answer
+/// was written. The process ends at once, without shutting the runtime down, which can wait for
+/// good on a thread left inside Ankurah (`watch::end` says how).
 pub(crate) async fn within(deadline: Deadline, ran: impl Future<Output = Result<()>>) -> ! {
     let Deadline { within, json } = deadline;
     std::thread::spawn(move || {
         std::thread::sleep(within);
-        nothing_to_show(json, &format!("it did not finish within {}s", within.as_secs()))
+        let answered = match ANSWERED.try_lock() {
+            Ok(answered) => Some(answered),
+            Err(TryLockError::Poisoned(answered)) => Some(answered.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut answered) = answered {
+            nothing_to_show(&mut answered, json, &format!("it did not finish within {}s", within.as_secs()));
+        }
+        std::process::exit(0)
     });
     if let Err(error) = ran.await {
-        nothing_to_show(json, &format!("{error:#}"));
+        let mut answered = ANSWERED.lock().unwrap_or_else(PoisonError::into_inner);
+        nothing_to_show(&mut answered, json, &format!("{error:#}"));
     }
     std::process::exit(0)
 }
 
-/// Says in one line why there is nothing to show, unless the answer was written, and ends the
-/// process with exit 0; a line that cannot be written has no reader left.
-fn nothing_to_show(json: bool, why: &str) -> ! {
-    let mut answered = ANSWERED.lock().unwrap_or_else(PoisonError::into_inner);
-    if !*answered {
-        *answered = true;
-        let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
-        let line = if json {
-            json!({"state": "unavailable", "reason": why}).to_string()
-        } else {
-            format!("fwd: nothing to show: {why}")
-        };
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{line}").and_then(|()| out.flush());
+/// Says in one line why there is nothing to show, unless the answer was written (`answered`); a
+/// line that cannot be written has no reader left.
+fn nothing_to_show(answered: &mut bool, json: bool, why: &str) {
+    if *answered {
+        return;
     }
-    std::process::exit(0)
+    *answered = true;
+    let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = if json {
+        json!({"state": "unavailable", "reason": why}).to_string()
+    } else {
+        format!("fwd: nothing to show: {why}")
+    };
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{line}").and_then(|()| out.flush());
 }
 
 #[cfg(test)]
@@ -685,7 +727,14 @@ mod tests {
     /// A primer of `holdings`, run in the first one's project's directory.
     fn primer(holdings: Vec<Holding>) -> Primer {
         let directory = holdings.first().map(|h| h.project.uuid);
-        Primer { holdings, agent: None, directory, scope: None, page: "http://127.0.0.1:1/".into(), session: None }
+        Primer {
+            holdings,
+            agent: None,
+            directory,
+            scope: None,
+            page: "http://127.0.0.1:1/".into(),
+            rest_of_prime: "fwd prime --format text".into(),
+        }
     }
 
     use SectionKind::*;
@@ -761,14 +810,14 @@ mod tests {
         for r in &mut p.holdings[0].sections[0].records {
             r.title = format!("{} {}", r.title, "é".repeat(40));
         }
-        let Answer::Text(text) = p.answer(Format::Hook, None, &[]).expect("an answer") else { panic!("text") };
+        let Answer::Text(text) = p.answer(Format::Hook, None, &[]) else { panic!("text") };
         assert!(text.chars().count() < HOOK_CHARS, "{} characters", text.chars().count());
         assert!(text
             .lines()
             .last()
             .is_some_and(|line| line.starts_with("fwd: ") && line.contains("of 400 tasks assigned to you shown")));
 
-        let Answer::Text(text) = p.answer(Format::Text, Some(30), &[]).expect("an answer") else { panic!("text") };
+        let Answer::Text(text) = p.answer(Format::Text, Some(30), &[]) else { panic!("text") };
         let length = text.chars().count() + 1;
         assert!(
             text.lines().last().is_some_and(|line| line.ends_with(&format!(
@@ -776,11 +825,26 @@ mod tests {
             ))),
             "{text}"
         );
+
+        // The one line for an agent no principal is bound to says so too.
+        let unbound = Primer { holdings: Vec::new(), agent: Some("claude-code:s1/main".into()), ..primer(Vec::new()) };
+        let Answer::Text(text) = unbound.answer(Format::Text, Some(30), &[]) else { panic!("text") };
+        let length = text.chars().count() + 1;
+        assert!(text.starts_with("fwd: nothing to show: no principal is bound to"), "{text}");
+        assert_eq!(
+            text.lines().last(),
+            Some(
+                format!(
+                    "fwd: at {length} characters this is longer than the budget of 30, which leaves out records alone"
+                )
+                .as_str()
+            )
+        );
     }
 
     /// A record of another project than its principal's names that project on its line and in the
-    /// JSON, which gives its path in that project; what could not be read is said by count and
-    /// first id.
+    /// JSON, which gives its path in that project; what could not be read is said by count and by
+    /// the least of its ids, so that the same set always names the same one.
     #[test]
     fn a_record_of_another_project_names_it_and_what_could_not_be_read_is_said() {
         let mut p = primer(vec![holding(0, &[(Assigned, 1, 1)])]);
@@ -794,14 +858,14 @@ mod tests {
         assert!(
             text.contains(&format!(
                 "2 tasks assigned to you could not be read, the first {}",
-                short_id(&EntityId::from_bytes([9; 32]))
+                short_id(&EntityId::from_bytes([8; 32]))
             )),
             "{text}"
         );
         let json = p.json(&shown);
         let section = &json["principals"][0]["sections"][0];
         assert_eq!(section["records"][0]["project"]["name"], "beta");
-        assert_eq!(section["records"][0]["path"], page_path(project(1).uuid, &Route::task(id)));
-        assert_eq!(section["unreadable"], json!({"count": 2, "first": EntityId::from_bytes([9; 32]).to_base64()}));
+        assert_eq!(section["records"][0]["path"], format!("?p={}#/tasks/{}", project(1).uuid, id.to_base64()));
+        assert_eq!(section["unreadable"], json!({"count": 2, "first": EntityId::from_bytes([8; 32]).to_base64()}));
     }
 }

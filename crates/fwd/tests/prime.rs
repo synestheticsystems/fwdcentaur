@@ -11,7 +11,6 @@ use fwd_core::daemon::{self, Autostart, Bind, Client, PortFile};
 use fwd_core::model::*;
 use fwd_core::naming;
 use fwd_core::project::{NamedProject, Paths};
-use fwd_core::route::{page_path, Route};
 use fwd_core::rules::short_id;
 use serde_json::{json, Value};
 use std::io::Write;
@@ -384,8 +383,8 @@ fn the_json_holds_the_records_the_text_lists() -> Result<()> {
             let id: EntityId = r["id"].as_str().unwrap_or_default().parse()?;
             as_lines.push(format!("{} {}", short_id(&id), r["title"].as_str().unwrap_or("")));
             let route = match r["kind"].as_str() {
-                Some("task") => Some(page_path(alpha, &Route::task(id))),
-                Some("ask") => Some(page_path(alpha, &Route::question(id))),
+                Some("task") => Some(format!("?p={alpha}#/tasks/{}", id.to_base64())),
+                Some("ask") => Some(format!("?p={alpha}#/questions/{}", id.to_base64())),
                 _ => None,
             };
             assert_eq!(r["path"], json!(route), "{r}");
@@ -412,11 +411,14 @@ fn the_json_holds_the_records_the_text_lists() -> Result<()> {
 
 /// Work moved to another project is still the agent's: a task assigned to it and the questions
 /// about it, one asked of it and one it asked, moved from alpha to beta, are listed under its
-/// principal of alpha, each naming beta on its line and in the JSON, which gives each a path there.
+/// principal of alpha, each naming beta on its line and in the JSON, which gives each a path there,
+/// as it gives the task that stayed one in alpha.
 #[test]
 fn work_moved_to_another_project_is_still_held_and_names_where_it_is() -> Result<()> {
     let s = Scratch::new()?;
     s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let stayed = s.made(&s.alpha, None, &["task", "create", "Cap the backoff"])?;
+    s.json(&s.alpha, None, &["task", "assign", &stayed, "impl-sam"])?;
     let task = s.made(&s.alpha, None, &["task", "create", "Retry on disconnect"])?;
     s.json(&s.alpha, None, &["task", "assign", &task, "impl-sam"])?;
     let it_asked = s.made(&s.alpha, Some("main"), &["ask", "--to", "tester", "--about", &task, "which backoff?"])?;
@@ -426,18 +428,25 @@ fn work_moved_to_another_project_is_still_held_and_names_where_it_is() -> Result
     let json = s.json(&s.alpha, Some("main"), &["prime"])?;
     let principal = &json["principals"][0];
     assert_eq!(principal["project"]["name"], "alpha", "{json}");
-    let beta: uuid::Uuid = s.json(&s.beta, None, &["project", "show"])?["id"].as_str().unwrap_or_default().parse()?;
-    for (section, id, route) in [
-        ("assigned", &task, Route::task(task.parse()?)),
-        ("asked_of_you", &asked_of_it, Route::question(asked_of_it.parse()?)),
-        ("you_asked", &it_asked, Route::question(it_asked.parse()?)),
+    let project_id = |dir: &Path| -> Result<String> {
+        Ok(s.json(dir, None, &["project", "show"])?["id"].as_str().unwrap_or_default().to_string())
+    };
+    let (alpha, beta) = (project_id(&s.alpha)?, project_id(&s.beta)?);
+    for (section, id, path) in [
+        ("asked_of_you", &asked_of_it, format!("?p={beta}#/questions/{asked_of_it}")),
+        ("you_asked", &it_asked, format!("?p={beta}#/questions/{it_asked}")),
     ] {
         let listed = records(principal, section);
         assert_eq!(listed.len(), 1, "{section}: {json}");
         assert_eq!(listed[0]["id"], *id);
         assert_eq!(listed[0]["project"]["name"], "beta", "{section}: {json}");
-        assert_eq!(listed[0]["path"], page_path(beta, &route));
+        assert_eq!(listed[0]["path"], path);
     }
+    let assigned = records(principal, "assigned");
+    let paths: Vec<(&Value, &Value, &Value)> = assigned.iter().map(|r| (&r["id"], &r["project"], &r["path"])).collect();
+    let (moved, kept) = (json!(format!("?p={beta}#/tasks/{task}")), json!(format!("?p={alpha}#/tasks/{stayed}")));
+    let beta_named = json!({"id": beta, "name": "beta"});
+    assert_eq!(paths, [(&json!(stayed), &Value::Null, &kept), (&json!(task), &beta_named, &moved)], "{json}");
     let text = s.text(&s.alpha, Some("main"), &["prime", "--format", "text"])?;
     let line = format!("{} Retry on disconnect [open] in beta", short_id(&task.parse()?));
     assert!(text.lines().any(|l| l == line), "{text}");
@@ -559,5 +568,149 @@ fn with_a_deadline_nothing_outlasts_it_and_a_reader_gone_costs_no_failure() -> R
     let (out, _) = exited_within(unread, limit)?;
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
     drop((open, still_open));
+    Ok(())
+}
+
+/// The deadline does not wait for an answer being written: with its reader not reading, an answer
+/// longer than the pipe holds stops the command's write, and the deadline ends it all the same,
+/// with exit 0.
+#[tokio::test]
+async fn the_deadline_ends_the_command_while_its_answer_waits_to_be_read() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let client = s.client(&s.alpha).await?;
+    let graph = &client.graph;
+    let named = |handle: &'static str| async move {
+        naming::principal_named(graph, handle, None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no {handle}"))
+    };
+    let (tester, agent) = (named("tester").await?, named("impl-sam").await?);
+    let trx = graph.begin();
+    for n in 0..300 {
+        trx.create(&Task {
+            project: graph.project(),
+            title: format!("Held task {n} {}", "with a long title ".repeat(16)),
+            what: String::new(),
+            why: String::new(),
+            done_when: String::new(),
+            status: TaskStatus::InProgress,
+            needs_review: false,
+            hold: None,
+            not_before: None,
+            assignee: Some(Ref::new(agent)),
+            priority: None,
+            labels: Json::new(json!([])),
+            context: Json::new(json!({})),
+            created_by: Ref::new(tester),
+            created: n,
+            updated: n,
+            closed: None,
+            closed_reason: None,
+        })
+        .await?;
+    }
+    trx.commit().await?;
+    drop(client);
+
+    let mut primed = s.command(&s.alpha, Some("main"), &["prime", "--format", "text", "--timeout", "3"]);
+    let mut child = primed.stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let never_read = child.stdout.take();
+    let (out, _) = exited_within(child, Duration::from_secs(30))?;
+    assert_eq!(out.status.code(), Some(0));
+    drop(never_read);
+    Ok(())
+}
+
+/// Given `--timeout`, a standard error with no reader left fails nothing: the lead's guidance said
+/// beside the answer cannot be written, and the command exits 0.
+#[test]
+fn with_a_deadline_a_standard_error_gone_fails_nothing() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, None, &["--as", "lead-x", "principal", "add", "lead-x", "--role", "lead"])?;
+    let mut primed = s.command(&s.alpha, None, &["--as", "lead-x", "prime", "--format", "text", "--timeout", "20"]);
+    let mut child = primed.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    drop(child.stderr.take());
+    let (out, _) = exited_within(child, Duration::from_secs(30))?;
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8(out.stdout)?.starts_with("fwdcentaur context for lead-x (lead) in alpha."));
+    Ok(())
+}
+
+/// A question asked of the agent by its name is found whatever characters the name holds, and
+/// whether its addressee is written with the at-sign or without, as routing reads it.
+#[tokio::test]
+async fn a_question_asked_by_name_is_found_however_the_name_is_written() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let name = r"sam o'brien\x";
+    s.json(&s.alpha, Some("main"), &["principal", "rename", name])?;
+    let client = s.client(&s.alpha).await?;
+    let graph = &client.graph;
+    let tester = naming::principal_named(graph, "tester", None).await?.ok_or_else(|| anyhow!("no tester"))?.id();
+    let mut asked = Vec::new();
+    for (to, text) in [(name.to_string(), "is the retry done?"), (format!("@{name}"), "and the backoff?")] {
+        let by_name = fwd_core::ops::MessageContext { to: Some(to), ..Default::default() };
+        asked.push(fwd_core::ops::post_message(graph, tester, text, Priority::Now, by_name).await?.to_base64());
+    }
+    drop(client);
+    let json = s.json(&s.alpha, Some("main"), &["prime"])?;
+    let mut found = ids(&json["principals"][0], "asked_of_you");
+    found.sort();
+    asked.sort();
+    assert_eq!(found, asked, "{json}");
+    Ok(())
+}
+
+/// A question two of the reads find, asked by the id that is also the agent's name, is listed once.
+#[test]
+fn a_question_found_two_ways_is_listed_once() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let id = s.json(&s.alpha, Some("main"), &["whoami"])?["principal"]["id"].as_str().unwrap_or_default().to_string();
+    s.json(&s.alpha, Some("main"), &["principal", "rename", &id])?;
+    let question = s.made(&s.alpha, None, &["ask", "--to", &id, "does the retry hold?"])?;
+    let json = s.json(&s.alpha, Some("main"), &["prime"])?;
+    let principal = &json["principals"][0];
+    assert_eq!(ids(principal, "asked_of_you"), [question], "{json}");
+    assert_eq!(principal["sections"][0]["of"], 1, "{json}");
+    Ok(())
+}
+
+/// A project named on the command is read even where the directory alone finds several, which
+/// only costs the commands the text names a `--project` each.
+#[test]
+fn a_project_named_on_the_command_is_read_where_the_directory_finds_several() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.beta, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    // Alpha's checkout joins beta too, and its marker goes: both projects claim its repository.
+    s.json(&s.alpha, None, &["init", "--project", "beta"])?;
+    std::fs::remove_file(s.alpha.join(".fwd/project.toml"))?;
+    let alone = s.command(&s.alpha, None, &["--format", "json", "task", "list"]).output()?;
+    assert!(!alone.status.success(), "the directory alone finds no one project");
+    let json = s.json(&s.alpha, Some("main"), &["--project", "beta", "prime"])?;
+    assert_eq!(json["principals"][0]["name"], "lead-sam", "{json}");
+    Ok(())
+}
+
+/// The command the last line names for the rest of the assigned tasks reads the same working set:
+/// it carries the `--project` and the `--as` the caller typed.
+#[test]
+fn the_command_that_prints_the_rest_reads_the_same_working_set() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.beta, None, &["--as", "lead-b", "principal", "add", "lead-b", "--role", "lead"])?;
+    for title in ["Name the page", "Draw the panel", "Link the records"] {
+        let task = s.made(&s.beta, None, &["task", "create", title])?;
+        s.json(&s.beta, None, &["task", "assign", &task, "lead-b"])?;
+    }
+    let text = s.text(
+        &s.alpha,
+        None,
+        &["--project", "beta", "--as", "lead-b", "prime", "--format", "text", "--max-chars", "200"],
+    )?;
+    let last = text.lines().last().unwrap_or_default();
+    assert!(
+        last.contains("0 of 3 tasks assigned to you")
+            && last.contains("`fwd --project 'beta' --as 'lead-b' prime --format text`"),
+        "{text}"
+    );
     Ok(())
 }

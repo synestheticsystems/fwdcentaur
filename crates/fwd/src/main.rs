@@ -1689,7 +1689,10 @@ impl App {
     fn note(&self, line: impl Into<String>) {
         let line = line.into();
         match &self.out {
-            Output::Stdout => eprintln!("{line}"),
+            // A line that cannot be written has no reader left, and fails no command.
+            Output::Stdout => {
+                let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("{line}\n"));
+            }
             Output::Captured(captured) => captured.lock().expect("captured output").notes.push(line),
         }
     }
@@ -2634,8 +2637,17 @@ async fn run_cli() -> Result<()> {
     if let Command::Prime { session, .. } = &cli.command {
         let named = session.as_deref().map(|s| subject::claude_code(s, subject::MAIN)).transpose()?;
         if let Some(agent) = named.as_ref().or(subject.as_ref()) {
-            return prime::for_agent(&cli, paths, format, agent, session.as_deref(), thread_hook && named.is_none())
-                .await;
+            let typed = typed_as.as_deref();
+            return prime::for_agent(
+                &cli,
+                paths,
+                format,
+                agent,
+                session.as_deref(),
+                thread_hook && named.is_none(),
+                typed,
+            )
+            .await;
         }
     }
     let resolved = resolve_project(&cli, &paths)?;
@@ -2986,7 +2998,8 @@ async fn caller(
 /// project, retired or not, is bound to its agent `subject`: the principal `--as` or FWD_AS names, as
 /// the hooks did before agents named themselves, or no one without either. None for any other
 /// command, and while a principal is bound, which the command then acts as, or, retired, acts for
-/// no one.
+/// no one. A principal bound to the thread in another project does not count: the thread acts in
+/// this project, as every other hook of it does, through the stand-in.
 async fn thread_hook_stand_in(
     cli: &Cli,
     graph: &ProjectGraph,
