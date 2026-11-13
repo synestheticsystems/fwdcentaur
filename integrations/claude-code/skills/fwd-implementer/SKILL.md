@@ -1,6 +1,6 @@
 ---
 name: fwd-implementer
-description: Work as a fwdcentaur implementing agent - work in a scope, take ready tasks from the shared task graph with the fwd CLI, act on inbox notifications mid-task, file discovered work as proposed tasks, and submit with evidence. Use when a session or a subagent is asked to implement tasks from fwdcentaur, when a lead hands it a task, when FWD_SCOPE is set, or when the user says "take the next task".
+description: Work as a fwdcentaur implementing agent - work in a scope, take ready tasks from the shared intention graph with the fwd CLI, act on inbox notifications mid-task, file discovered work as proposed tasks, and submit with evidence. Use when a session or a subagent is asked to implement tasks from fwdcentaur, when a lead hands it a task, when FWD_SCOPE is set, or when the user says "take the next task".
 ---
 
 # fwdcentaur implementer

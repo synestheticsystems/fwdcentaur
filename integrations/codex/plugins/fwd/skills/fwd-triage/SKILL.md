@@ -1,6 +1,6 @@
 ---
 name: fwd-triage
-description: Hold a fwdcentaur project's triage through the fwd plugin's tools - for the scopes served, link people's comments to the tasks they concern, record what they require, turn suggestions into proposed tasks, answer from what the graph records, and bring what needs a judgment to a lead or a person. Triage is a Sonnet agent's role, so a Codex thread takes it only where the project's person has ruled that it may. Use when asked to triage or groom a fwdcentaur task graph, or when a principal's role is triage.
+description: Hold a fwdcentaur project's triage through the fwd plugin's tools - for the scopes served, link people's comments to the tasks they concern, record what they require, turn suggestions into proposed tasks, answer from what the graph records, and bring what needs a judgment to a lead or a person. Triage is a Sonnet agent's role, so a Codex thread takes it only where the project's person has ruled that it may. Use when asked to triage or groom a fwdcentaur intention graph, or when a principal's role is triage.
 ---
 
 # fwdcentaur triage (Codex)

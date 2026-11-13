@@ -1,8 +1,8 @@
 //! Projects, the checkouts that belong to them, and the directories the daemon and CLI share.
 //!
-//! A project is a task graph: a UUID and a name, whose records the daemon keeps with every other
-//! project's in one store under the data directory, independent of any folder on disk. A project
-//! is a set of repositories, each
+//! A project is an intention graph: a UUID and a name, whose records the daemon keeps with every
+//! other project's in one store under the data directory, independent of any folder on disk. A
+//! project is a set of repositories, each
 //! identified by its upstream remote, never by a clone or a worktree (Daniel, 2026-09-25). A
 //! checkout is any clone or worktree of a member repository on this machine: local, dynamic, and
 //! never in the graph. Resolution goes from a directory to its git upstream, and from the

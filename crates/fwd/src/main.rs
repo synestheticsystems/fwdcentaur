@@ -74,7 +74,7 @@ macro_rules! naming_in_text {
 #[command(
     name = "fwd",
     version = BUILD,
-    about = "fwdcentaur: a shared task graph for people and coding agents",
+    about = "fwdcentaur: a shared intention graph for people and coding agents",
     after_long_help = concat!(
         "Conventions:\n",
         "  An argument that takes an id also takes its first six characters or more, and `D<number>` for a\n",
@@ -424,7 +424,7 @@ enum Command {
     },
     /// A bounded context block for an agent session: scope, tasks, unread.
     Prime,
-    /// The task graph in one call: tasks (with readiness) and their relations.
+    /// The graph of tasks in one call: tasks (with readiness) and their relations.
     Graph {
         /// Include done, cancelled and rejected tasks.
         #[arg(long)]

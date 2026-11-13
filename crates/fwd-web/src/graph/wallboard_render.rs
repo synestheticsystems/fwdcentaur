@@ -84,7 +84,7 @@ pub fn WallboardGraph(presentation: RwSignal<Presentation>, selection: TaskSelec
         }
     });
     view! {
-        <div class="wallboard-graph" node_ref=host role="img" aria-label="Task graph"
+        <div class="wallboard-graph" node_ref=host role="img" aria-label="Graph of tasks"
             data-loaded=move || store::standing_loaded().to_string()></div>
     }
 }

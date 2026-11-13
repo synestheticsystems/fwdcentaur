@@ -1,6 +1,6 @@
 # The wallboard, built and run by hand
 
-The wallboard shows one project's task graph on a dedicated monitor, all day, with no one at the
+The wallboard shows one project's graph of tasks on a dedicated monitor, all day, with no one at the
 keyboard: the work in the statuses you choose, what waits on what, and what changed recently. This
 directory holds what runs beside the display: the launcher (`wallboard.py`), its settings contract,
 an example configuration, an example systemd unit and the sound cues, with the wallboard's checks in

@@ -1,6 +1,6 @@
 ---
 name: fwd-triage
-description: Run a fwdcentaur project's triage as a Sonnet agent that annotates and relays - for the scopes you serve, or a small project whole, link people's comments to the tasks they concern, record what they require in those tasks, turn suggestions into proposed tasks, answer from what the graph records, and bring what needs a judgment to your lead by Claude message, or to a person in the graph, with the fwd CLI. Use when a lead spawns you as its triage subagent, when your principal's role is triage, or when asked to triage or groom the task graph.
+description: Run a fwdcentaur project's triage as a Sonnet agent that annotates and relays - for the scopes you serve, or a small project whole, link people's comments to the tasks they concern, record what they require in those tasks, turn suggestions into proposed tasks, answer from what the graph records, and bring what needs a judgment to your lead by Claude message, or to a person in the graph, with the fwd CLI. Use when a lead spawns you as its triage subagent, when your principal's role is triage, or when asked to triage or groom the intention graph.
 ---
 
 # fwdcentaur triage
