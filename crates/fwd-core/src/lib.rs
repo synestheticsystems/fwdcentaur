@@ -37,6 +37,7 @@ pub mod project_graph;
 pub mod query;
 pub mod reason;
 pub mod references;
+pub mod route;
 pub mod routing;
 pub mod rules;
 #[cfg(feature = "native")]

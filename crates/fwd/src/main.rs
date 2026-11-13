@@ -2593,7 +2593,7 @@ async fn run_cli() -> Result<()> {
             // The selection travels in the query string: the page's router owns the fragment.
             let mut query = Vec::new();
             if let Some(id) = project {
-                query.push(format!("p={id}"));
+                query.push(format!("{}={id}", fwd_core::route::PROJECT_PARAM));
                 // Only with a project: the principal was created in its graph above, and a page
                 // on the selector has no graph to find it in.
                 if let Some(me) = acting {
