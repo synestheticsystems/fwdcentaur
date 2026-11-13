@@ -120,15 +120,16 @@ Start an implementer's session inside the project's checkout (or set `FWD_PROJEC
 
 In the agent's own checkout, once it has named itself ("Who is acting", above), so that its hooks act for it:
 
-1. `fwd prime` shows the principal, the project, the scope, up to ten ready tasks and the unread notifications. The session-start hook runs it as `fwd prime --format hook`:
+1. `fwd prime` shows what the agent holds in every project of the daemon, the project it runs in first: who it is there, the questions asked of it and those it asked, the tasks assigned to it and its unread notifications, then the ready tasks of the project it runs in, each record on one line by its short id (`design/cli.md`, "Sessions"). The session-start hook runs it as `fwd prime --format hook --timeout 10`:
    ```text
-   fwdcentaur context for impl-alice: 1 ready task(s), 0 unread notification(s).
-   Ready: gA3lqGfsNDEnWOu9bF6ATxx7FQt_vkOId03OD_HkEnE Retry on disconnect
-   Unread:
-
+   fwdcentaur context for impl-alice (implementer) in widgets, in the scope Replication.
+   Assigned to you (1):
+   gA3lqGfs Retry on disconnect [in_progress]
+   Ready to start (1):
+   x7PbN2Qe Cap the backoff
    Use `fwd task next --claim` to take work, `fwd inbox pop` to read notifications.
    ```
-   A task already started is no longer ready, so it is not listed; `fwd task list --mine` lists the tasks assigned to the agent. `fwd task show <task id>` prints one task with its checklist; `--include messages` adds its comments and questions, each thread under its first message, and `--include relations` what it points at and what points at it.
+   `fwd task show <task id>` prints one task with its checklist; `--include messages` adds its comments and questions, each thread under its first message, and `--include relations` what it points at and what points at it.
 2. `fwd task next --claim` takes the highest-priority ready task (one already assigned to the agent first, then unassigned ones; one assigned to someone else never), starts it, makes the agent its assignee and works it in the scope the agent works in, in one step, and prints it with its `what`, `why`, `done_when`, `steps` and `messages`, `"status": "in_progress"` and `"claimed": true`. It passes over a task worked in a scope other than the one the agent works in, which waits for whoever works in that scope, and so does `fwd task next` without `--claim`. With nothing ready it prints `{"reason": "no ready task", "task": null}`; when the only ready tasks are worked in other scopes, the `reason` says so. Without a scope it starts the task all the same; in a checkout several active scopes name, it is refused, naming them.
 3. Work, and write down what turns up. A task is filed open, or proposed when its filer is unsure it should exist; a proposed task reaches the triage agent of each of its scopes. A title states the assignment verb first ("Add jitter to the backoff", not "Backoff jitter"), so a list of tasks reads as a list of things to do (Daniel's convention):
    ```sh
