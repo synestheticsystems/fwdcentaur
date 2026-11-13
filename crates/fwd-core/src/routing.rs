@@ -630,7 +630,7 @@ pub async fn scope_to_ask(graph: &ProjectGraph, mc: &ops::MessageContext) -> Res
 }
 
 /// Whom a message asks, as rule 5 gives it its question: what [`asked_of`] answers.
-enum Asked {
+pub(crate) enum Asked {
     /// The one principal its `to` names, by id, or by a handle no other principal of the project
     /// has (a handle several share names none of them: docs/design/agents-and-inbox.md, "A
     /// principal's name").
@@ -642,7 +642,7 @@ enum Asked {
 
 impl Asked {
     /// The principal the question reaches.
-    fn recipient(&self) -> EntityId {
+    pub(crate) fn recipient(&self) -> EntityId {
         match self {
             Asked::Principal(principal) => *principal,
             Asked::FrontLine(f) => f.agent,
@@ -650,14 +650,14 @@ impl Asked {
     }
 }
 
-/// Whom the message `mc` describes asks (rule 5), so that the rule and a step's list of the threads
-/// on its lines, which leaves a question out for the party it asks (`plan_for_relation`), read it
-/// alike: the one principal its `to` names, by id wherever it is, or by a handle one of
-/// `principals`, those of the message's project, has; or for a question asked of no one in
-/// particular the triage agent that answers first for the scope it asks, in that scope's project;
-/// none for a message that asks no one, or no one its project has, or while no triage agent answers
-/// for its scope.
-async fn asked_of(
+/// Whom the message `mc` describes asks (rule 5), so that the rule, a step's list of the threads on
+/// its lines, which leaves a question out for the party it asks (`plan_for_relation`), and an
+/// agent's working set (`working_set`) read it alike: the one principal its `to` names, by id
+/// wherever it is, or by a handle one of `principals`, those of the message's project, has; or for
+/// a question asked of no one in particular the triage agent that answers first for the scope it
+/// asks, in that scope's project; none for a message that asks no one, or no one its project has,
+/// or while no triage agent answers for its scope.
+pub(crate) async fn asked_of(
     graph: &ProjectGraph,
     principals: &[PrincipalView],
     mc: &ops::MessageContext,
