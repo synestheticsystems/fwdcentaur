@@ -62,6 +62,8 @@ use ankurah::{Context, EntityId, LiveQuery, MatchArgs, Model, Ref, Value, View};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+mod placed;
+
 /// A model whose records each name their project: the nine models of a project's work, and
 /// [`FormerId`].
 pub trait InProject: Model {
@@ -112,6 +114,7 @@ in_project!(
     Scope => ScopeView,
     Decision => DecisionView,
     FormerId => FormerIdView,
+    Placement => PlacementView,
 );
 
 /// The scope as `fwd admin migrate` reads and clears what it held before D108, which no one makes.
@@ -157,6 +160,10 @@ pub enum ProjectGraphError {
     /// ends with this, and runs there when it is run again.
     #[error("{} is a record of project `{project}`, not of `{here}`, whose graph read it by its id", .record.to_base64())]
     InAnotherProject { record: EntityId, project: String, here: String },
+    /// A component was to be added to a record that carries it already
+    /// ([`ProjectTransaction::add`]).
+    #[error("the record carries `{label}` already")]
+    Carried { label: &'static str },
     #[error(transparent)]
     Retrieval(Box<RetrievalError>),
     #[error(transparent)]
@@ -594,7 +601,7 @@ impl ProjectGraph {
 
     /// A transaction that makes and edits the project's records alone.
     pub fn begin(&self) -> ProjectTransaction {
-        ProjectTransaction { trx: self.ctx.begin(), project: self.project }
+        ProjectTransaction { trx: self.ctx.begin(), ctx: self.ctx.clone(), project: self.project }
     }
 }
 
@@ -815,6 +822,9 @@ pub enum Referent {
 /// only the project's records.
 pub struct ProjectTransaction {
     trx: Transaction,
+    /// The context the transaction began on, which registers the components a placed record is
+    /// given ([`ProjectTransaction::add`]).
+    ctx: Context,
     project: EntityId,
 }
 

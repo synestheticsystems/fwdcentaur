@@ -925,6 +925,17 @@ pub struct Decision {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Placement
+
+/// The project a record built on the Commons' models is placed in, as a component on the record's
+/// own entity: those models name no project, and a project's lists are read by it as they are by
+/// the `project` field of fwd's own models (`crate::project_graph`).
+#[derive(Model, Debug, Clone, Serialize, Deserialize)]
+pub struct Placement {
+    pub project: Ref<Project>,
+}
+
+// ---------------------------------------------------------------------------------------------
 // FormerId
 
 /// An id a record had before it was renumbered, which people may have cited for months in messages,

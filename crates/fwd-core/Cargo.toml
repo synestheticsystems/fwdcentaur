@@ -49,6 +49,7 @@ uniffi = ["ankurah/uniffi", "dep:uniffi"]
 
 [dependencies]
 ankurah = { workspace = true }
+ankurah-commons = { workspace = true }
 ankurah-storage-sqlite = { workspace = true, optional = true }
 bb8 = { workspace = true, optional = true }
 ankurah-websocket-client = { workspace = true, optional = true }
