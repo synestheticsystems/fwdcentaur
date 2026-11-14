@@ -337,7 +337,7 @@ async fn intention(graph: &ProjectGraph, by: EntityId, title: &str) -> Result<En
 #[tokio::test]
 async fn an_intention_is_named_by_the_start_of_its_id_in_any_project() -> Result<()> {
     let t = two().await?;
-    let held = intention(&t.alpha, t.daniel, "Readers keep their place").await?;
+    let held = intention(&t.alpha, t.alice, "Readers keep their place").await?;
     let here = ops::Located { id: held, project: Whose::This };
     assert_eq!(ops::locate(&t.alpha, &held.to_base64()[..8], &[Kind::Intention]).await?, here);
     let found = ops::locate(&t.beta, &held.to_base64()[..8], &[Kind::Intention]).await?;
@@ -351,15 +351,15 @@ async fn an_intention_is_named_by_the_start_of_its_id_in_any_project() -> Result
 #[tokio::test]
 async fn a_start_two_intentions_share_names_this_projects_and_is_refused_when_two_here_share_it() -> Result<()> {
     let t = two().await?;
-    let ours = intention(&t.alpha, t.daniel, "Readers keep their place").await?;
-    let theirs = intention(&t.beta, t.their_daniel, "Readers keep their place").await?;
+    let ours = intention(&t.alpha, t.alice, "Readers keep their place").await?;
+    let theirs = intention(&t.beta, t.their_alice, "Readers keep their place").await?;
     let shared = ours.to_base64()[..8].to_string();
     renumbered(&t.beta, &starting(&shared), theirs).await?;
     let only = [Kind::Intention];
     assert_eq!(ops::locate(&t.alpha, &shared, &only).await?, ops::Located { id: ours, project: Whose::This });
     assert_eq!(ops::locate(&t.beta, &shared, &only).await?, ops::Located { id: theirs, project: Whose::This });
 
-    let second = intention(&t.alpha, t.daniel, "The list keeps its scroll").await?;
+    let second = intention(&t.alpha, t.alice, "The list keeps its scroll").await?;
     let cited = starting(&shared);
     renumbered(&t.alpha, &cited, second).await?;
     let refused = ops::locate(&t.alpha, &shared, &only).await.expect_err("two of alpha's start so").to_string();
