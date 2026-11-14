@@ -2562,23 +2562,27 @@ async fn run_cli() -> Result<()> {
         }
         Command::Daemon { command } => {
             return match command {
-                DaemonCommand::Status => match daemon::status(&paths).await? {
-                    Some(running) => {
-                        let mut out = serde_json::to_value(&running.pf)?;
-                        out["projects"] = serde_json::to_value(&running.projects)?;
-                        // The project of the directory this runs in, for callers that serve one
-                        // project (the VS Code extension reads it).
-                        if let Some(resolved) = project_here(&cli, &paths)? {
-                            out["project"] = json!(resolved.project.id.to_string());
+                DaemonCommand::Status => {
+                    let said = match daemon::find(&paths).await? {
+                        daemon::Found::Answering(running) => {
+                            let mut out = serde_json::to_value(&running.pf)?;
+                            out["projects"] = serde_json::to_value(&running.projects)?;
+                            // The project of the directory this runs in, for callers that serve one
+                            // project (the VS Code extension reads it).
+                            if let Some(resolved) = project_here(&cli, &paths)? {
+                                out["project"] = json!(resolved.project.id.to_string());
+                            }
+                            println!("{}", serde_json::to_string_pretty(&out)?);
+                            return Ok(());
                         }
-                        println!("{}", serde_json::to_string_pretty(&out)?);
-                        Ok(())
-                    }
-                    None => {
-                        eprintln!("no daemon is answering");
-                        std::process::exit(7)
-                    }
-                },
+                        daemon::Found::Unreached(daemon) => daemon.to_string(),
+                        daemon::Found::Unnamed => daemon::Unnamed.to_string(),
+                        daemon::Found::Busy => daemon::Busy.to_string(),
+                        daemon::Found::Absent => "no daemon is answering".to_string(),
+                    };
+                    eprintln!("{said}");
+                    std::process::exit(7)
+                }
                 DaemonCommand::Start { lan, loopback } => {
                     let wanted = if *lan {
                         Some(Bind::Lan)
@@ -2611,7 +2615,8 @@ async fn run_cli() -> Result<()> {
                     Ok(())
                 }
                 DaemonCommand::Stop => {
-                    println!("{}", if daemon::stop(&paths).await? { "stopped" } else { "no daemon was running" });
+                    let said = if daemon::stop(&paths).await? { "stopped" } else { "no daemon was running" };
+                    println!("{said}");
                     Ok(())
                 }
                 DaemonCommand::Logs => {
