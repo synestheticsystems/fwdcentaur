@@ -25,7 +25,8 @@
 
 mod holder;
 
-pub use holder::{lock_holder, not_answering, LockHolder, NotAnswering, StoppedNothing, Unreached};
+use holder::not_answering;
+pub use holder::{find, lock_holder, Found, LockHolder, NotAnswering, StoppedNothing, Unnamed, Unreached};
 
 use crate::daemon_socket;
 use crate::project::{Checkout, NamedProject, Paths};
@@ -510,7 +511,7 @@ pub async fn ensure_running(paths: &Paths, autostart: &Autostart) -> Result<Runn
         }
         bail!("no daemon is running and autostart is off");
     };
-    let _bootstrap = wait_for_lock(&paths.bootstrap_lock(), START_DEADLINE).await?;
+    let _bootstrap = take_bootstrap(paths).await?;
     if let Some(running) = answering(paths).await? {
         return Ok(running);
     }
@@ -629,14 +630,29 @@ pub async fn host(pf: &PortFile, project: &NamedProject) -> Result<()> {
     }
 }
 
-async fn wait_for_lock(path: &Path, deadline: Duration) -> Result<File> {
+/// The bootstrap lock, waited for up to the start deadline. A launcher that holds it that long is
+/// waiting on the daemon that holds the lifetime lock, so at the deadline, when the lifetime lock
+/// names that daemon and no command reaches it, the error is that daemon's ([`NotAnswering`]),
+/// as the launcher holding the bootstrap lock gives it, and not the wait's.
+async fn take_bootstrap(paths: &Paths) -> Result<File> {
+    if let Some(lock) = wait_for_lock(&paths.bootstrap_lock(), START_DEADLINE).await? {
+        return Ok(lock);
+    }
+    if let Some(daemon) = not_answering(paths)? {
+        return Err(daemon.into());
+    }
+    bail!("timed out waiting for the bootstrap lock at {}", paths.bootstrap_lock().display())
+}
+
+/// The lock at `path`, once it is free; `None` once `deadline` has passed without it.
+async fn wait_for_lock(path: &Path, deadline: Duration) -> Result<Option<File>> {
     let until = Instant::now() + deadline;
     loop {
         if let Some(file) = try_lock(path)? {
-            return Ok(file);
+            return Ok(Some(file));
         }
         if Instant::now() >= until {
-            bail!("timed out waiting for the bootstrap lock at {}", path.display());
+            return Ok(None);
         }
         tokio::time::sleep(POLL).await;
     }
@@ -675,11 +691,10 @@ pub async fn status(paths: &Paths) -> Result<Option<Running>> {
     answering(paths).await
 }
 
-/// Asks the running daemon to drain and exit; returns false when none answered, whether none runs
-/// or one that no command reaches holds the lifetime lock ([`not_answering`]).
-/// Waits for its process to end, not for the lifetime lock to come free: the moment the lock is free,
-/// another command may start a successor that takes it, and probing the lock could take it
-/// from a daemon that is starting.
+/// Asks the running daemon to stop listening and exit; returns false when none answered, whether
+/// none runs or another process holds the lifetime lock ([`find`]). Waits for its process to end,
+/// not for the lifetime lock to come free: the moment the lock is free, another command may start a
+/// successor that takes it, and probing the lock could take it from a daemon that is starting.
 pub async fn stop(paths: &Paths) -> Result<bool> {
     let Some(Running { pf, .. }) = answering(paths).await? else { return Ok(false) };
     let Some((status, body)) = http(&pf, "POST", "/stop", None, CONNECT_TIMEOUT).await? else { return Ok(false) };

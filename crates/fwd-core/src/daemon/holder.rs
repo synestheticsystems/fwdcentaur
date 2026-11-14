@@ -11,12 +11,16 @@
 //! 2026-11-11 macOS's temp cleaner removed the port file of a daemon that went on serving, and for
 //! nine hours `fwd daemon status` and `fwd daemon stop` said that no daemon ran while every command
 //! gave up, until its process was ended by hand.
+//!
+//! The record names the holder; only the lock says whether anyone holds it. A record that names no
+//! daemon that runs is therefore never taken for "no daemon": [`find`] asks the lock itself.
 
-use super::read_port_file;
+use super::{answering, read_port_file, take_bootstrap, try_lock, Running};
 use crate::project::Paths;
 use anyhow::{anyhow, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::path::Path;
 
 /// What the daemon writes into the daemon lock once it holds it, and again once it listens: its
 /// pid, and when its process started, which tells that process apart from a later one the system
@@ -40,13 +44,17 @@ impl LockHolder {
         Ok(LockHolder { pid, process_started, listening_on: None })
     }
 
-    /// Writes the record into `lock`, the daemon lock, which this process holds. It is emptied first
-    /// and written whole from its start, so a reader finds the record before, none, or this one.
+    /// Publishes the record in `lock`, the daemon lock, which this process holds: one line, ended by
+    /// a newline, put in place by one write at the start of the file, which is never emptied first.
+    /// A reader finds the record before or this one whole, or, if its read caught the write midway,
+    /// bytes that are no whole line, which it cannot take for an empty lock. A record shorter than
+    /// the one before leaves that one's end after its newline, where readers do not look. The file
+    /// keeps its inode, and so its lock.
     pub fn write(&self, lock: &File) -> Result<()> {
         use std::os::unix::fs::FileExt;
-        lock.set_len(0).context("emptying the daemon lock")?;
-        lock.write_all_at(&serde_json::to_vec(self)?, 0).context("writing the daemon's record into its lock")?;
-        Ok(())
+        let mut line = serde_json::to_vec(self)?;
+        line.push(b'\n');
+        lock.write_all_at(&line, 0).context("writing the daemon's record into its lock")
     }
 
     /// Whether the recorded process still runs, as that process and not another given its pid.
@@ -55,24 +63,42 @@ impl LockHolder {
     }
 }
 
-/// The daemon process that holds the daemon lock, by the record it wrote there; `None` when the lock
-/// carries no record (no daemon of this build has held it, or one has just taken it and not written
-/// yet) or the record of a process that has ended. A recorded process that still runs holds the
-/// lock: the daemon writes the record only once it holds the lock, and keeps the lock until its
-/// process ends, when the system frees it.
-pub fn lock_holder(paths: &Paths) -> Result<Option<LockHolder>> {
-    let path = paths.lifetime_lock();
-    let record = match std::fs::read(&path) {
-        Ok(record) => record,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+/// What a reader finds in the daemon lock.
+#[derive(Debug, PartialEq, Eq)]
+enum Record {
+    /// Nothing: no daemon of this build has written there.
+    Empty,
+    /// A whole record.
+    Whole(LockHolder),
+    /// Bytes that are no whole record: a read that caught a write midway, or a record no build
+    /// of this kind writes.
+    Unreadable,
+}
+
+fn read_record(path: &Path) -> Result<Record> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Record::Empty),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    if record.is_empty() {
-        return Ok(None);
+    if bytes.is_empty() {
+        return Ok(Record::Empty);
     }
-    let holder: LockHolder = serde_json::from_slice(&record)
-        .with_context(|| format!("reading the record of the daemon that holds {}", path.display()))?;
-    Ok(holder.runs()?.then_some(holder))
+    let Some(end) = bytes.iter().position(|byte| *byte == b'\n') else { return Ok(Record::Unreadable) };
+    Ok(serde_json::from_slice(&bytes[..end]).map_or(Record::Unreadable, Record::Whole))
+}
+
+/// The daemon process that holds the daemon lock, by the record it wrote there; `None` when the
+/// record names no daemon that runs: there is none, it cannot be read, or it names a process that
+/// has ended. `None` does not mean that no daemon runs: a daemon of an earlier build writes no
+/// record, and one that has just taken the lock has not written yet. A recorded process that runs
+/// holds the lock: the daemon writes the record only once it holds the lock, and keeps the lock
+/// until its process ends, when the system frees it.
+pub fn lock_holder(paths: &Paths) -> Result<Option<LockHolder>> {
+    match read_record(&paths.lifetime_lock())? {
+        Record::Whole(holder) => Ok(holder.runs()?.then_some(holder)),
+        Record::Empty | Record::Unreadable => Ok(None),
+    }
 }
 
 /// A daemon that holds the daemon lock, by its record, and that no command reaches.
@@ -108,8 +134,8 @@ impl std::fmt::Display for Unreached {
 }
 
 /// The daemon that holds the daemon lock, for a caller that found no daemon answering as the port
-/// file names one (`status`); `None` when the lock has no recorded holder that still runs.
-pub fn not_answering(paths: &Paths) -> Result<Option<NotAnswering>> {
+/// file names one; `None` when the lock's record names no daemon that runs ([`lock_holder`]).
+pub(super) fn not_answering(paths: &Paths) -> Result<Option<NotAnswering>> {
     let Some(holder) = lock_holder(paths)? else { return Ok(None) };
     let its_port_file = read_port_file(&paths.port_file())?.filter(|pf| pf.pid == holder.pid);
     let why = match (its_port_file, holder.listening_on) {
@@ -120,6 +146,56 @@ pub fn not_answering(paths: &Paths) -> Result<Option<NotAnswering>> {
     Ok(Some(NotAnswering { holder, why }))
 }
 
+/// A process holds the daemon lock and names no daemon there that runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a process holds the daemon lock but names no daemon there that runs: a daemon of an earlier build of fwd, one that has only just taken the lock, or `fwd admin restore`; `pgrep -fl 'fwd daemon serve'` lists the daemons that run")]
+pub struct Unnamed;
+
+/// This runtime directory's daemon, as `fwd daemon status` and `fwd daemon stop` find it.
+#[derive(Debug)]
+pub enum Found {
+    /// A daemon answers as the port file names it.
+    Answering(Running),
+    /// The lifetime lock names the daemon that holds it, which no command reaches.
+    Unreached(NotAnswering),
+    /// A process holds the lifetime lock and names no daemon there that runs.
+    Unnamed,
+    /// No process holds the lifetime lock: no daemon runs.
+    Absent,
+}
+
+/// Finds this runtime directory's daemon; never autostarts. Whether a daemon that no record names
+/// holds the lifetime lock only the lock tells, by being taken for a moment, and a daemon starting
+/// in that moment would find it held and exit. Launchers spawn a daemon only under the bootstrap
+/// lock, and keep it until the daemon answers, so the lock is tried under the bootstrap lock too,
+/// after asking once more for an answer from a daemon that may have started meanwhile.
+pub async fn find(paths: &Paths) -> Result<Found> {
+    if let Some(running) = answering(paths).await? {
+        return Ok(Found::Answering(running));
+    }
+    if let Some(daemon) = not_answering(paths)? {
+        return Ok(Found::Unreached(daemon));
+    }
+    // A lifetime lock that was never created was never held; nothing in fwd removes it.
+    if !paths.lifetime_lock().exists() {
+        return Ok(Found::Absent);
+    }
+    let _bootstrap = match take_bootstrap(paths).await {
+        Ok(lock) => lock,
+        Err(error) => return error.downcast::<NotAnswering>().map(Found::Unreached),
+    };
+    if let Some(running) = answering(paths).await? {
+        return Ok(Found::Answering(running));
+    }
+    if let Some(daemon) = not_answering(paths)? {
+        return Ok(Found::Unreached(daemon));
+    }
+    Ok(match try_lock(&paths.lifetime_lock())? {
+        Some(_) => Found::Absent,
+        None => Found::Unnamed,
+    })
+}
+
 /// Why `fwd daemon stop` stopped nothing although a process holds the daemon lock: it stops only a
 /// daemon that answers, and sends no signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -127,6 +203,9 @@ pub enum StoppedNothing {
     /// The daemon the lock names, which no command reaches.
     #[error("`fwd daemon stop` stopped nothing, as it sends no signal: {0}")]
     Unreached(NotAnswering),
+    /// A process that names no daemon there.
+    #[error("`fwd daemon stop` stopped nothing: {0}")]
+    Unnamed(Unnamed),
 }
 
 /// When the process with this pid started, as the system tells it: a number only ever compared
@@ -189,6 +268,8 @@ fn process_started(pid: u32) -> Result<Option<u64>> {
 mod tests {
     use super::*;
     use crate::daemon::{try_lock, write_port_file, Bind, PortFile};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Barrier;
 
     /// A runtime and a data folder in `dir`, created.
     fn paths(dir: &std::path::Path) -> Paths {
@@ -212,18 +293,97 @@ mod tests {
         let lock = try_lock(&paths.lifetime_lock()).expect("the lock").expect("free");
         assert_eq!(lock_holder(&paths).expect("an empty lock"), None, "a lock with no record names no one");
 
-        let this = LockHolder::this_process().expect("this process");
-        this.write(&lock).expect("written");
-        assert_eq!(lock_holder(&paths).expect("a record"), Some(this));
-        let listening = LockHolder { listening_on: Some(4242), ..this };
-        listening.write(&lock).expect("written again");
-        assert_eq!(lock_holder(&paths).expect("a record"), Some(listening), "the second record replaces the first");
+        let listening = LockHolder { listening_on: Some(4242), ..LockHolder::this_process().expect("this process") };
+        listening.write(&lock).expect("written");
+        assert_eq!(lock_holder(&paths).expect("a record"), Some(listening));
+        let this = LockHolder { listening_on: None, ..listening };
+        this.write(&lock).expect("written again");
+        assert_eq!(lock_holder(&paths).expect("a record"), Some(this), "a shorter record replaces a longer one");
 
         // The same pid, given to a later process: the start time differs.
         LockHolder { process_started: this.process_started + 1, ..this }.write(&lock).expect("written");
         assert_eq!(lock_holder(&paths).expect("a record"), None, "a pid the system gave another process");
         LockHolder { pid: ended_pid(), ..this }.write(&lock).expect("written");
         assert_eq!(lock_holder(&paths).expect("a record"), None, "a process that has ended");
+    }
+
+    /// A reader running while the daemon publishes its record again and again never finds the lock
+    /// empty, which it would take for a lock no daemon has written: it finds a whole record, or,
+    /// should its read catch a write midway, bytes it cannot read. The two start together at a
+    /// barrier, and the reader reads until the writer says it has written them all.
+    #[test]
+    fn a_reader_never_finds_the_record_being_published_empty() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let paths = paths(dir.path());
+        let lock = try_lock(&paths.lifetime_lock()).expect("the lock").expect("free");
+        let this = LockHolder::this_process().expect("this process");
+        this.write(&lock).expect("the first record");
+        let records = [this, LockHolder { listening_on: Some(4242), ..this }];
+        let start = Barrier::new(2);
+        let written = AtomicBool::new(false);
+        let found = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                for record in records.iter().cycle().take(20_000) {
+                    record.write(&lock).expect("written");
+                }
+                written.store(true, Ordering::Release);
+            });
+            let reader = scope.spawn(|| {
+                start.wait();
+                let mut found = Vec::new();
+                while !written.load(Ordering::Acquire) {
+                    found.push(read_record(&paths.lifetime_lock()).expect("read"));
+                }
+                found
+            });
+            reader.join().expect("the reader")
+        });
+        assert!(!found.contains(&Record::Empty), "a reader found the lock empty while a record was published");
+        assert!(found.iter().any(|record| *record == Record::Whole(records[1])), "the reader read during the writes");
+    }
+
+    /// Only the lock says whether a process holds it: one whose record names no daemon that runs,
+    /// or that wrote none, is told apart from no daemon at all.
+    #[tokio::test]
+    async fn a_lock_held_by_a_process_that_names_no_daemon_is_not_taken_for_no_daemon() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let paths = paths(dir.path());
+        assert!(matches!(find(&paths).await.expect("found"), Found::Absent), "no lock was ever made");
+        drop(try_lock(&paths.lifetime_lock()).expect("the lock").expect("free"));
+        assert!(matches!(find(&paths).await.expect("found"), Found::Absent), "a lock no one holds");
+
+        let lock = try_lock(&paths.lifetime_lock()).expect("the lock").expect("free");
+        assert!(matches!(find(&paths).await.expect("found"), Found::Unnamed), "a held lock with no record");
+        let this = LockHolder::this_process().expect("this process");
+        LockHolder { pid: ended_pid(), ..this }.write(&lock).expect("written");
+        assert!(matches!(find(&paths).await.expect("found"), Found::Unnamed), "a held lock naming an ended process");
+        this.write(&lock).expect("written");
+        match find(&paths).await.expect("found") {
+            Found::Unreached(daemon) => assert_eq!((daemon.holder, daemon.why), (this, Unreached::NotListening)),
+            other => panic!("found {other:?} where the lock names this process"),
+        }
+    }
+
+    /// A launcher that gives up waiting for the bootstrap lock, which another launcher holds while
+    /// it waits on the daemon that holds the lifetime lock, names that daemon when no command reaches
+    /// it, as the other launcher does. This process holds both locks before the launcher starts.
+    #[tokio::test]
+    async fn a_launcher_that_gives_up_on_the_bootstrap_lock_names_the_daemon_no_command_reaches() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let paths = paths(dir.path());
+        let lock = try_lock(&paths.lifetime_lock()).expect("the lock").expect("free");
+        let holder = LockHolder { listening_on: Some(4242), ..LockHolder::this_process().expect("this process") };
+        holder.write(&lock).expect("written");
+        let _bootstrap = try_lock(&paths.bootstrap_lock()).expect("the bootstrap lock").expect("free");
+
+        let spawn = crate::daemon::Autostart::Spawn { daemon_bin: "/nonexistent/fwd".into() };
+        let error = crate::daemon::ensure_running(&paths, &spawn).await.expect_err("no daemon answers");
+        assert_eq!(
+            error.downcast_ref::<NotAnswering>(),
+            Some(&NotAnswering { holder, why: Unreached::PortFileGone { port: 4242 } }),
+            "{error:#}"
+        );
     }
 
     #[test]
