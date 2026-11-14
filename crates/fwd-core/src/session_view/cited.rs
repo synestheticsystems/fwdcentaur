@@ -19,6 +19,9 @@ use uuid::Uuid;
 /// What a reference that names nothing fwd holds is shown as.
 const NOT_FOUND: &str = "something fwd cannot find";
 
+/// What a reference to an intention whose title cannot be read is shown as.
+const TITLE_NOT_READ: &str = "an intention whose title fwd cannot read";
+
 /// The records the texts of one read cite, followed.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Cited {
@@ -94,7 +97,9 @@ impl Cited {
             },
             Referent::Principal { handle } => format!("@{handle}"),
             Referent::Relation { kind } => format!("a {} relation", kind.to_string().replace('_', " ")),
-            Referent::Intention { title } => title.clone(),
+            // Read where the view names it. A label cannot fail the document, so a title that
+            // cannot be read is named as such.
+            Referent::Intention(intention) => intention.title().unwrap_or_else(|_| TITLE_NOT_READ.into()),
         }
     }
 
@@ -109,7 +114,7 @@ impl Cited {
             Referent::Message { .. }
             | Referent::Principal { .. }
             | Referent::Relation { .. }
-            | Referent::Intention { .. } => return None,
+            | Referent::Intention(_) => return None,
         };
         Some(page_path(found.project, &route))
     }

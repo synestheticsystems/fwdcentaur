@@ -595,7 +595,7 @@ impl ProjectGraph {
         }
         if let Some(i) = absent(self.ctx.get::<IntentionView>(id).await)? {
             let placement: PlacementView = self.ctx.get(id).await?;
-            return at(placement.project_id(), Referent::Intention { title: i.title()? });
+            return at(placement.project_id(), Referent::Intention(i));
         }
         Ok(None)
     }
@@ -902,7 +902,7 @@ impl ProjectRecord {
 
 /// What a reader needs of a record another record refers to, by its kind: what names it, and
 /// what a dependency on it is judged by.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Referent {
     Task {
         title: String,
@@ -935,9 +935,8 @@ pub enum Referent {
     Relation {
         kind: RelationKind,
     },
-    Intention {
-        title: String,
-    },
+    /// An intention, by its view, whose title a reader reads where it names it.
+    Intention(IntentionView),
 }
 
 /// A transaction in one project's graph: it makes only records that name the project, and edits

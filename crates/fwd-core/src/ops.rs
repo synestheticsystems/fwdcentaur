@@ -3833,9 +3833,10 @@ pub async fn describe(graph: &ProjectGraph, id: EntityId) -> Result<Option<(Kind
     })
 }
 
-/// A record's kind and the name [`describe`] gives it, from what was read of it.
-pub fn named(referent: &Referent) -> (Kind, String) {
-    match referent {
+/// A record's kind and the name [`describe`] gives it, from what was read of it: an intention's
+/// title read from its view.
+pub fn named(referent: &Referent) -> Result<(Kind, String), ankurah::property::PropertyError> {
+    Ok(match referent {
         Referent::Task { title, .. } => (Kind::Task, title.clone()),
         Referent::Decision { number, title, .. } => (Kind::Decision, format!("D{number} ({title})")),
         Referent::Scope { title, .. } => (Kind::Scope, title.clone()),
@@ -3845,8 +3846,8 @@ pub fn named(referent: &Referent) -> (Kind, String) {
         Referent::Message { words, .. } => (Kind::Message, format!("“{words}”")),
         Referent::Relation { kind } => (Kind::Relation, format!("a {kind} relation")),
         Referent::Principal { handle } => (Kind::Principal, format!("@{handle}")),
-        Referent::Intention { title } => (Kind::Intention, title.clone()),
-    }
+        Referent::Intention(intention) => (Kind::Intention, intention.title()?),
+    })
 }
 
 /// A record whose id another record holds, as a reader is shown it: what
@@ -3865,7 +3866,7 @@ pub enum Reference {
 pub async fn reference(graph: &ProjectGraph, id: EntityId) -> Result<Reference> {
     Ok(match graph.follow_any(id).await? {
         Followed::Held { record, project, found } => {
-            let (kind, name) = named(&found);
+            let (kind, name) = named(&found)?;
             Reference::Followed { record, kind, name, project }
         }
         Followed::NotHeld => Reference::NotFollowed,

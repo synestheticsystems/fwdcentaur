@@ -190,8 +190,9 @@ async fn a_question_the_person_answered_waits_on_them_no_more() -> Result<()> {
 }
 
 /// A question that cites a task names it, in its title by its title and in its text as a link to
-/// its page, and a reference that names nothing fwd holds is named without an id: no id shows in
-/// any text of the document.
+/// its page; one that cites an intention names it by its title, with no link, since the page has
+/// no intention; and a reference that names nothing fwd holds is named without an id: no id shows
+/// in any text of the document.
 #[tokio::test]
 async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
     let t = two().await?;
@@ -206,6 +207,10 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
         task.to_base64()
     );
     ops::post_message(&t.alpha, t.lead, &text, Priority::Now, asking(t.tester)).await?;
+    let intention = intentions::create(&t.alpha, t.tester, "Readers keep their place", String::new(), None).await?;
+    let intention = intention.0.id();
+    let about = format!("Is [[{}]] still what you want from the page, or has it changed?", intention.to_base64());
+    ops::post_message(&t.alpha, t.lead, &about, Priority::Now, asking(t.tester)).await?;
     // A reference stored before what it names was taken away, as a text written in another store
     // can hold.
     let gone = EntityId::from_bytes([7; 32]);
@@ -248,14 +253,18 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
         waiting.iter().find(|r| r["title"].as_str().is_some_and(|t| t.starts_with("Was"))).expect("the other");
     assert_eq!(missing["title"], "Was something fwd cannot find ever finished, and…");
     assert_eq!(missing["lines"], json!(["Was something fwd cannot find ever finished, and by whom?"]));
+    let wanted =
+        waiting.iter().find(|r| r["title"].as_str().is_some_and(|t| t.starts_with("Is"))).expect("the intention's");
+    assert_eq!(
+        wanted["lines"],
+        json!(["Is Readers keep their place still what you want from the page, or has it changed?"])
+    );
     for row in &waiting {
         let shown = format!("{} {}", row["title"], row["lines"]);
         let link = format!("#/tasks/{}", task.to_base64());
         let without_links = shown.replace(&link, "");
-        assert!(
-            !without_links.contains(&task.to_base64()[..8]) && !without_links.contains(&gone.to_base64()[..8]),
-            "{shown}"
-        );
+        let ids = [task, gone, intention].map(|id| id.to_base64()[..8].to_string());
+        assert!(ids.iter().all(|id| !without_links.contains(id)), "{shown}");
     }
     Ok(())
 }
