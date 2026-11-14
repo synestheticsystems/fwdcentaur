@@ -13,14 +13,14 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/synestheticsystems/fwdcentaur"
 
 [workspace.dependencies]
-# Pinned by hash to Ankurah main (docs/DECISIONS.md, D23: fwdcentaur pins Ankurah by hash); the
-# previous pin was f8e85d2 on the feat/storage-node-sqlite-wasm branch, whose stores
-# crates/fwd-store-convert converts to this revision's format. crates/fwd-host stays on f8e85d2
+# Pinned by hash to Ankurah main (docs/DECISIONS.md, D23: fwdcentaur pins Ankurah by hash).
+# crates/fwd-store-convert converts stores written by Ankurah f8e85d2, on the
+# feat/storage-node-sqlite-wasm branch, into this revision's format. crates/fwd-host stays on f8e85d2
 # until storage/sqlite-node, the SQLite engine it runs on in Node.js, reaches Ankurah main.
-ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda", features = ["derive"] }
-ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda" }
-ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda" }
-ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "5d8a000ba9b1375be9307e2aab6887886be35dda" }
+ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "5919b1a06b5c3e462597d4627521354f9052f4bb", features = ["derive"] }
+ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "5919b1a06b5c3e462597d4627521354f9052f4bb" }
+ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "5919b1a06b5c3e462597d4627521354f9052f4bb" }
+ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "5919b1a06b5c3e462597d4627521354f9052f4bb" }
 # The connection pool ankurah-storage-sqlite is built on, the same major: the CLI builds the pool
 # of its in-memory store itself (crates/fwd-core/src/daemon.rs, `ephemeral_store`).
 bb8                    = "0.9"
@@ -49,7 +49,8 @@ include_dir            = "0.7"
 local-ip-address       = "0.6"
 sha2                   = "0.10"
 # The anchors' local store beside a project's database (crates/fwd-core/src/sidecar.rs): the same
-# version and `bundled` feature as ankurah-storage-sqlite's, so the build links one SQLite.
+# version and `bundled` feature as ankurah-storage-sqlite's, so the build links one SQLite and the
+# backup's connections are ones `ankurah_storage_sqlite::register_id_bytes` takes.
 # `backup` adds SQLite's online backup, which `fwd admin backup` copies the live databases with
 # (crates/fwd-core/src/backup.rs).
 rusqlite               = { version = "0.32", features = ["bundled", "backup"] }

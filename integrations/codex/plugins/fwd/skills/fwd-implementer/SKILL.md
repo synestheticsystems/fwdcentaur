@@ -1,6 +1,6 @@
 ---
 name: fwd-implementer
-description: Work as a fwdcentaur implementing agent in Codex through the fwd plugin's tools - work in a scope, take ready tasks from the shared task graph, act on inbox notifications mid-task, file discovered work as proposed tasks, and submit with evidence. Use when a Codex thread or subagent is asked to implement tasks from fwdcentaur, when a lead hands it a task, or when the user says "take the next task".
+description: Work as a fwdcentaur implementing agent in Codex through the fwd plugin's tools - work in a scope, take ready tasks from the shared intention graph, act on inbox notifications mid-task, file discovered work as proposed tasks, and submit with evidence. Use when a Codex thread or subagent is asked to implement tasks from fwdcentaur, when a lead hands it a task, or when the user says "take the next task".
 ---
 
 # fwdcentaur implementer (Codex)

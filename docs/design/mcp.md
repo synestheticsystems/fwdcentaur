@@ -1,6 +1,6 @@
 # The daemon's MCP endpoint (`/mcp`)
 
-Task jDv1EY7K, "Local MCP: serve shared fwd operations from the daemon without authentication", in the Connections scope. The endpoint lets a Codex thread, or any MCP client, work in the task graph without a shell. It is the CLI by another door, not a second fwd API: each tool is a CLI command, parsed by the CLI's own parser and run by the CLI's own dispatcher, so the two cannot drift (D124: fwd documents itself through its CLI and MCP).
+Task jDv1EY7K, "Local MCP: serve shared fwd operations from the daemon without authentication", in the Connections scope. The endpoint lets a Codex thread, or any MCP client, work in the intention graph without a shell. It is the CLI by another door, not a second fwd API: each tool is a CLI command, parsed by the CLI's own parser and run by the CLI's own dispatcher, so the two cannot drift (D124: fwd documents itself through its CLI and MCP).
 
 ## Transport
 

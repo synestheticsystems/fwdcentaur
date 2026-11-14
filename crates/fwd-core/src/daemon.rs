@@ -161,6 +161,21 @@ pub fn write_port_file(path: &Path, pf: &PortFile) -> Result<()> {
     Ok(())
 }
 
+/// Holds a shared lock on the port file for as long as the returned file lives, which the daemon
+/// keeps for its whole run, so that macOS's temp cleaner leaves the file. The cleaner (dirhelper,
+/// nightly at 03:35) removes a file from the per-user temporary folder, where the runtime
+/// directory is, once it has gone three days without an access, and APFS stops counting reads as
+/// accesses once a file has been read since it last changed: the port file, written once and then
+/// only read, looks unused three days after its daemon started. On 2026-11-11 the cleaner removed
+/// the port file of a daemon that had served since 2026-11-07, and no command could find it. The
+/// cleaner leaves a file another process holds a lock on, as it always left `daemon.lock`; a
+/// shared lock is enough, and keeps no reader out.
+pub fn hold_port_file(path: &Path) -> Result<File> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    file.lock_shared().with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
+}
+
 /// Opens a lock file and tries to take it exclusively without blocking. `Ok(Some(file))` holds
 /// the lock until dropped; `Ok(None)` means someone else holds it.
 pub fn try_lock(path: &Path) -> Result<Option<File>> {

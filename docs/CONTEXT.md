@@ -1,5 +1,7 @@
 # fwdcentaur: project context
 
+*Emotionally intelligent language is the key to stakeholder alignment.*
+
 Started 2026-09-24. Working name: **fwdcentaur** ("forward centaur": a human and a coding agent working as one unit, the way centaur chess teams did). Owner: Daniel Norman.
 
 ## What it is for
@@ -8,13 +10,13 @@ Humans and coding agents lose the thread between them. The reasons for a task ev
 
 ## The pieces
 
-- **A task graph**: tasks with dependencies, sub-tasks, motivations ("why"), provenance ("discovered from"), stored as finely as the work is actually divided.
+- **An intention graph**: tasks with dependencies, sub-tasks, motivations ("why"), provenance ("discovered from"), stored as finely as the work is actually divided.
 - **Code anchors**: comments on specific lines or ranges of source, in the editor and in diffs, anchored so they survive the code changing underneath them and link into the graph. The graph therefore has code parts as well as task parts.
-- **Projects and scopes**: a project is the task graph and its database; it spans one or more repositories, each identified by its upstream, and any number of local checkouts. A scope is an area of work, which anyone may work in and several people and agents share: its status, an articulated intention, the repository and branches its work happens on, the checkouts bound to it on each machine (local-only, not synced), and the tasks worked in it. It has no owner: who does a task is the task's assignee (D108, "A scope has no owner", 2026-09-29, which narrowed the vision's scopes per team member, D1).
+- **Projects and scopes**: a project is the intention graph and its database; it spans one or more repositories, each identified by its upstream, and any number of local checkouts. A scope is an area of work, which anyone may work in and several people and agents share: its status, an articulated intention, the repository and branches its work happens on, the checkouts bound to it on each machine (local-only, not synced), and the tasks worked in it. It has no owner: who does a task is the task's assignee (D108, "A scope has no owner", 2026-09-29, which narrowed the vision's scopes per team member, D1).
 - **Messages and inboxes**: everything a person or agent says is a durable message (a comment on code or on a task, a question, a proposal) with a status; a notification is created only when a specific party needs to know, and the inbox lists them. A human's comment on a line of code notifies the agent whose work it concerns and the project's triage agent, the agent that keeps the graph tidy.
 - **A CLI intended for agents** (`fwd`): an ephemeral Ankurah node and the only interface agents use, so any agent harness with a shell can play either role. The daemon's MCP endpoint serves the same commands as tools for a harness that speaks MCP (`design/mcp.md`). The same binary, re-executed as `fwd daemon serve`, is the daemon that hosts the project's durable node.
 - **A VS Code extension**: a graph panel (visualize, add, remove, propose, comment) and line comments in code and diff views that route to inboxes.
-- **A web UI served by the daemon** (`fwd ui`): the inbox and the task graph in a browser, an ephemeral Ankurah node in WASM (Leptos) running the same rules and operations as the CLI.
+- **A web UI served by the daemon** (`fwd ui`): the inbox and the intention graph in a browser, an ephemeral Ankurah node in WASM (Leptos) running the same rules and operations as the CLI.
 - **Two agent roles**: the *implementing agent* works in a scope, takes tasks, and receives inbox notifications about them mid-session; the *triage* agent, one per scope (or one for a small project whole), which each agent selects for itself from a fixed set (lead, triage, implementer, reviewer), hears the questions asked of no one in particular about the work of the scopes it serves, new annotations and proposals, links and relinks tasks, amends descriptions, answers from what the graph records, and relays the rest to whoever can answer or decide it: a Sonnet agent that annotates and relays rather than judging the work (D129, "The triage agent is a Sonnet agent that annotates and relays", 2026-10-01).
 
 ## Foundations and relationships

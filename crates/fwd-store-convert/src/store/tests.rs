@@ -242,6 +242,8 @@ async fn the_inventory_refuses_a_dropped_entity() {
     inventory::compare(&store.from, &store.to).unwrap();
 
     let db = Connection::open(&store.to).unwrap();
+    // Deleting an entity row updates the engine's index on its id, which this function computes.
+    ankurah_storage_sqlite::register_id_bytes(&db).unwrap();
     for table in ["_ankurah_entity", "note"] {
         db.execute(&format!(r#"DELETE FROM "{table}" WHERE "id" = ?"#), [store.forked.to_base64()]).unwrap();
     }
