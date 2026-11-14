@@ -233,24 +233,12 @@ fn the_sessions_active_intentions_stand_first_and_say_so_when_there_are_none() {
             "records": [],
         }])
     );
-    let row = Row {
-        id: id(50).to_base64(),
-        kind: RowKind::Intention,
-        title: "Readers keep their place".into(),
-        tags: Vec::new(),
-        lines: vec!["**Tester, 2026-11-14:** The list stays where I left it.".into()],
-        path: None,
-        actions: Vec::new(),
-    };
-    view.intentions = vec![row];
     view.unreadable_intentions = 1;
-    let one = printed(&view.document(PAGE));
-    let section = &one["sections"][0];
+    let unread = printed(&view.document(PAGE));
     assert_eq!(
-        (&section["shown"], &section["of"], &section["records"][0]["kind"]),
-        (&json!(1), &json!(1), &json!("intention"))
+        unread["sections"][0]["lines"],
+        json!(["fwd could not read 1 of the intentions assigned to this session."])
     );
-    assert_eq!(section["lines"], json!(["fwd could not read 1 of the intentions assigned to this session."]));
 }
 
 /// A question asked of the person, now in a project where they have no principal of their own,

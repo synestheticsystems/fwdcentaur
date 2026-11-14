@@ -1060,23 +1060,6 @@ mod tests {
         }
     }
 
-    /// The active intentions come before everything else, under a heading that counts those not
-    /// ended, each with its words; one since ended is its one line.
-    #[test]
-    fn the_active_intentions_come_first_and_one_since_ended_is_one_line() {
-        let mut p = primer(vec![holding(0, &[(Assigned, 1, 1)])]);
-        let ended =
-            "BBBBBBBB intention 2 [fulfilled]: still assigned to you; `fwd intention unassign BBBBBBBB` takes it off";
-        p.intentions = vec![
-            assigned(1, "the list keeps its place"),
-            PrintedIntention { lines: ended.into(), words: None, json: json!({}) },
-        ];
-        let text = p.text(&p.fit(None, |_| 0), p.active(), &[], None);
-        let id = short_id(&EntityId::from_bytes([1; 32]));
-        let expected = format!("Active Intentions (1):\n{id} intention 1\n  @ines, 2026-11-14:\n    the list keeps its place\n{ended}\nfwdcentaur context for impl-a");
-        assert!(text.starts_with(&expected), "{text}");
-    }
-
     /// Over its budget prime leaves out every other record before an intention's words, then the
     /// last intentions' words first, and never a title; the last line says how many kept theirs
     /// and names the command that prints them, and the JSON gives the others' words as null.

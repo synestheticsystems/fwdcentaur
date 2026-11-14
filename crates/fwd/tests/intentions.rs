@@ -104,6 +104,23 @@ fn an_agent_records_what_the_person_said_and_an_intention_of_another_project_sho
     Ok(())
 }
 
+/// `fwd intention list` lists the intentions of the project it runs in alone, the node holding
+/// every project's: alpha's in alpha, beta's in beta.
+#[test]
+fn the_list_holds_the_intentions_of_the_project_it_runs_in_alone() -> Result<()> {
+    let s = Scratch::new()?;
+    let create = |dir: &Path, title: &str| s.made(dir, None, &["intention", "create", title, "--words", ""], "");
+    let ours = create(&s.alpha, "Readers keep their place")?;
+    let theirs = create(&s.beta, "Builds stay under a minute")?;
+    let listed = |dir: &Path| -> Result<Vec<Value>> {
+        let list = s.json(dir, None, &["intention", "list"])?;
+        Ok(list.as_array().into_iter().flatten().map(|r| r["id"].clone()).collect())
+    };
+    assert_eq!(listed(&s.alpha)?, [Value::from(ours)]);
+    assert_eq!(listed(&s.beta)?, [Value::from(theirs)]);
+    Ok(())
+}
+
 /// impl-sam, an agent of alpha, assigns itself an intention of beta: it is among its active
 /// intentions, named with beta, until it is fulfilled, and is unassigned all the same afterwards;
 /// assigning it to someone else is refused.
