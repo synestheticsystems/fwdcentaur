@@ -19,10 +19,10 @@
 //!   its record is ([`ProjectGraph::follow`]), and the record comes with its project, which a
 //!   reader names beside it.
 //! - An id someone types names a record of any project (D181): the resolver reads the former ids
-//!   that start with it ([`ProjectGraph::former_ids_starting`]) and, when no record of the
-//!   project has an id that starts with it, every project's ids
-//!   ([`ProjectGraph::ids_in_every_project`]), and a command that acts on a record of another
-//!   project runs in that project, as if it had been run there.
+//!   that start with it ([`ProjectGraph::former_ids_starting`]), the project's ids that start with
+//!   it ([`ProjectGraph::ids_starting`]) and, when no record of the project has an id that starts
+//!   with it, every project's ([`ProjectGraph::ids_in_every_project`]), and a command that acts on
+//!   a record of another project runs in that project, as if it had been run there.
 //! - The routing service alone hears every project's records, through [`NodeGraph`], whose
 //!   standing queries name no project (D177), and it routes each change through the graph of the
 //!   record's own project ([`ProjectGraph::graph_of`]), so that each rule is read where its subject
@@ -33,7 +33,10 @@
 //!   ([`ProjectGraph::unfinished_tasks_assigned_to`]), the open questions it asked
 //!   ([`ProjectGraph::open_questions_by`]) and those asked of it by its id
 //!   ([`ProjectGraph::open_questions_to`]) in every project, each with its project, which the
-//!   reader names beside it (`working_set`). No read takes a caller's selection across projects.
+//!   reader names beside it (`working_set`); and a fourth, given a question's id, the answers in
+//!   its thread ([`ProjectGraph::answers_to`]), wherever they were written (`session_view`). Each
+//!   has a live form that follows the same rule. No read takes a caller's selection across
+//!   projects.
 //!
 //! - A page shows one project's lists from live queries that carry the project, and names what
 //!   their records hold the ids of through live reads that carry none ([`ProjectGraph::follow_live`],
@@ -58,7 +61,7 @@
 
 use crate::model::*;
 use crate::ops::{ASKS_KEY, ASKS_PROJECT};
-use crate::query::{with_id, with_string};
+use crate::query::{with_id, with_ids, with_string};
 use ankurah::ankql::ast::{ComparisonOperator, Expr, Parsed, PathExpr, Predicate, Selection};
 use ankurah::error::{MutationError, RetrievalError};
 use ankurah::model::MutableBorrow;
@@ -223,6 +226,25 @@ fn starting(field: &str, prefix: &str) -> Predicate<Parsed> {
     Predicate::And(Box::new(from), Box::new(before))
 }
 
+/// The records whose id starts with `prefix`, the start of an id someone typed, read as one range
+/// of ids ([`EntityId::base64_prefix_range`]), and the records `formerly`, which the former ids that
+/// start with it name.
+fn named_by_start(prefix: &str, formerly: &[EntityId]) -> Selection<Parsed> {
+    let started = match EntityId::base64_prefix_range(prefix) {
+        Ok(ids) => Predicate::And(
+            Box::new(comparing("id", ComparisonOperator::GreaterThanOrEqual, Value::EntityId(*ids.start()))),
+            Box::new(comparing("id", ComparisonOperator::LessThanOrEqual, Value::EntityId(*ids.end()))),
+        ),
+        // A character outside an id's alphabet, more characters than an id has, or a 43rd character
+        // no id ends in: no id starts so.
+        Err(_) => Predicate::False,
+    };
+    let named = formerly
+        .iter()
+        .fold(started, |any, record| Predicate::Or(Box::new(any), Box::new(equals("id", Value::EntityId(*record)))));
+    selecting(named)
+}
+
 /// Every record a selection with this predicate is made from.
 fn selecting(predicate: Predicate<Parsed>) -> Selection<Parsed> {
     Selection { predicate, order_by: None, limit: None }
@@ -235,6 +257,31 @@ fn touching(end: &str, id: EntityId, kind: Option<RelationKind>) -> Selection<Pa
         Some(kind) => Predicate::And(Box::new(at), Box::new(equals("kind", Value::String(kind.to_string())))),
         None => at,
     })
+}
+
+/// The tasks assigned to `principal` that are not done, cancelled or rejected, of every project:
+/// what [`ProjectGraph::unfinished_tasks_assigned_to`] reads, and its live form.
+fn unfinished_tasks_assigned_to(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    with_id("assignee = ? AND status != 'done' AND status != 'cancelled' AND status != 'rejected'", principal)
+}
+
+/// The open messages `principal` wrote that ask someone, or no one in particular, of every project.
+fn open_questions_by(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    let asking = format!(
+        "author = ? AND status = '{}' AND (context.to IS NOT NULL OR context.{ASKS_KEY} = '{ASKS_PROJECT}')",
+        MessageStatus::Active
+    );
+    with_id(&asking, principal)
+}
+
+/// The open messages that ask `principal` by its id, of every project.
+fn open_questions_to(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    with_string(&format!("status = '{}' AND context.to = ?", MessageStatus::Active), &principal.to_base64())
+}
+
+/// The messages that reply to `message` or are of the thread it opens, of every project.
+fn answers_to(message: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    with_ids("reply_to = ? OR thread = ?", &[message, message])
 }
 
 /// None for a record the node does not hold, or holds as a record of another model.
@@ -545,11 +592,28 @@ impl ProjectGraph {
         Ok(None)
     }
 
-    /// The id of every record of `V`'s model in the node, with the record of the project it is in:
-    /// what an id someone types may name, since a typed id names a record of any project (D181).
-    /// Only the command line's resolver reads it; no screen or list shows it.
-    pub async fn ids_in_every_project<V: InProjectView>(&self) -> Result<Vec<(EntityId, EntityId)>, ProjectGraphError> {
-        let every: Vec<V> = self.ctx.fetch(selecting(Predicate::True)).await?;
+    /// The id of each of the project's records of `V`'s model whose id starts with `prefix`, the
+    /// start of an id someone typed, or which is one of `formerly`, the records the former ids that
+    /// start with it name: what the resolver looks for the typed id among first.
+    pub async fn ids_starting<V: InProjectView>(
+        &self,
+        prefix: &str,
+        formerly: &[EntityId],
+    ) -> Result<Vec<EntityId>, RetrievalError> {
+        let found: Vec<V> = self.fetch(named_by_start(prefix, formerly)).await?;
+        Ok(found.iter().map(View::id).collect())
+    }
+
+    /// The id of each record of `V`'s model in the node whose id starts with `prefix`, or which is
+    /// one of `formerly`, as [`ProjectGraph::ids_starting`] reads the project's, with the record of
+    /// the project it is in: what an id someone types may name, since a typed id names a record of
+    /// any project (D181). Only the command line's resolver reads it; no screen or list shows it.
+    pub async fn ids_in_every_project<V: InProjectView>(
+        &self,
+        prefix: &str,
+        formerly: &[EntityId],
+    ) -> Result<Vec<(EntityId, EntityId)>, ProjectGraphError> {
+        let every: Vec<V> = self.ctx.fetch(named_by_start(prefix, formerly)).await?;
         Ok(every.iter().map(|v| Ok((v.id(), v.project_id()?))).collect::<Result<_, PropertyError>>()?)
     }
 
@@ -574,28 +638,39 @@ impl ProjectGraph {
         self.ctx.fetch(selecting(starting("former", prefix))).await
     }
 
+    /// The project's own former ids that start with `prefix`, read as
+    /// [`ProjectGraph::former_ids_starting`] reads every project's: what a name that is its
+    /// project's own, a principal's, may name by a former id.
+    pub async fn own_former_ids_starting(&self, prefix: &str) -> Result<Vec<FormerIdView>, RetrievalError> {
+        if !prefix.is_ascii() {
+            return Ok(Vec::new());
+        }
+        self.fetch(selecting(starting("former", prefix))).await
+    }
+
     /// The tasks assigned to `principal` that are not done, cancelled or rejected, of every
     /// project: a task moved to another project keeps its assignee.
     pub async fn unfinished_tasks_assigned_to(&self, principal: EntityId) -> anyhow::Result<Vec<TaskView>> {
-        let held = "assignee = ? AND status != 'done' AND status != 'cancelled' AND status != 'rejected'";
-        Ok(self.ctx.fetch(with_id(held, principal)?).await?)
+        Ok(self.ctx.fetch(unfinished_tasks_assigned_to(principal)?).await?)
     }
 
     /// The open messages `principal` wrote that ask someone, or no one in particular, of every
     /// project: a message moved with its task keeps its author.
     pub async fn open_questions_by(&self, principal: EntityId) -> anyhow::Result<Vec<MessageView>> {
-        let asking = format!(
-            "author = ? AND status = '{}' AND (context.to IS NOT NULL OR context.{ASKS_KEY} = '{ASKS_PROJECT}')",
-            MessageStatus::Active
-        );
-        Ok(self.ctx.fetch(with_id(&asking, principal)?).await?)
+        Ok(self.ctx.fetch(open_questions_by(principal)?).await?)
     }
 
     /// The open messages that ask `principal` by its id, of every project: a message moved with its
     /// task keeps its addressee.
     pub async fn open_questions_to(&self, principal: EntityId) -> anyhow::Result<Vec<MessageView>> {
-        let asked = format!("status = '{}' AND context.to = ?", MessageStatus::Active);
-        Ok(self.ctx.fetch(with_string(&asked, &principal.to_base64())?).await?)
+        Ok(self.ctx.fetch(open_questions_to(principal)?).await?)
+    }
+
+    /// The messages that answer `message` in its thread, whichever project wrote them: those that
+    /// reply to it, and those of the thread it opens. A question asked of the person has been
+    /// answered once one of these is theirs (`session_view`), as the page's Waiting on you counts it.
+    pub async fn answers_to(&self, message: EntityId) -> anyhow::Result<Vec<MessageView>> {
+        Ok(self.ctx.fetch(answers_to(message)?).await?)
     }
 
     /// The project of each of `projects`, project records as [`ProjectGraph::ids_in_every_project`]
@@ -702,6 +777,31 @@ impl ProjectGraph {
     }
 }
 
+/// The live forms of the reads of what an agent holds, each given one principal's id, or one
+/// message's, and building its own selection, as the reads do: what a view that follows a working
+/// set listens to, to read it again when one of them changes (`live_read`).
+impl ProjectGraph {
+    /// A live query on what [`ProjectGraph::unfinished_tasks_assigned_to`] reads.
+    pub fn query_unfinished_tasks_assigned_to(&self, principal: EntityId) -> anyhow::Result<LiveQuery<TaskView>> {
+        Ok(self.ctx.query(unfinished_tasks_assigned_to(principal)?)?)
+    }
+
+    /// A live query on what [`ProjectGraph::open_questions_by`] reads.
+    pub fn query_open_questions_by(&self, principal: EntityId) -> anyhow::Result<LiveQuery<MessageView>> {
+        Ok(self.ctx.query(open_questions_by(principal)?)?)
+    }
+
+    /// A live query on what [`ProjectGraph::open_questions_to`] reads.
+    pub fn query_open_questions_to(&self, principal: EntityId) -> anyhow::Result<LiveQuery<MessageView>> {
+        Ok(self.ctx.query(open_questions_to(principal)?)?)
+    }
+
+    /// A live query on what [`ProjectGraph::answers_to`] reads.
+    pub fn query_answers_to(&self, message: EntityId) -> anyhow::Result<LiveQuery<MessageView>> {
+        Ok(self.ctx.query(answers_to(message)?)?)
+    }
+}
+
 /// What a [`LiveFollow`] reads for the ids it is given.
 #[derive(Clone, Copy)]
 enum Reads {
@@ -775,7 +875,7 @@ pub enum Whose {
 
 /// A project of the node: its record, the UUID the index and the daemon's routes name it by, and
 /// its name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectRecord {
     pub record: EntityId,
     pub uuid: Uuid,

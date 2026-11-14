@@ -13,6 +13,14 @@ pub fn date_at(ms: i64, offset_ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// The instant `ms` as RFC 3339 writes it in UTC, to the second (`2026-11-13T21:52:49Z`), the same
+/// on every machine.
+pub(crate) fn instant_utc(ms: i64) -> String {
+    let seconds = ms.div_euclid(1000).rem_euclid(DAY_MS / 1000);
+    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    format!("{}T{h:02}:{m:02}:{s:02}Z", date_at(ms, 0))
+}
+
 /// How far east of UTC this machine's clock is at `ms`, daylight saving included.
 #[cfg(all(feature = "native", unix))]
 pub(crate) fn local_offset_ms(ms: i64) -> i64 {
@@ -120,5 +128,12 @@ mod tests {
         assert_eq!(date_at(midnight_utc, 0), "2000-02-29");
         assert_eq!(date_at(midnight_utc, -HOUR), "2000-02-28", "an hour west");
         assert_eq!(date_at(midnight_utc - 1, HOUR), "2000-02-29", "a moment earlier, an hour east");
+    }
+
+    #[test]
+    fn an_instant_is_written_in_utc_to_the_second() {
+        let day = parse_day("2026-11-13").unwrap() * DAY_MS;
+        assert_eq!(instant_utc(day + 78_769_999), "2026-11-13T21:52:49Z");
+        assert_eq!(instant_utc(day - 1), "2026-11-12T23:59:59Z", "a moment before midnight");
     }
 }

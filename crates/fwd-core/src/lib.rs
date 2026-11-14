@@ -27,6 +27,7 @@ pub mod former_ids;
 pub mod guidance;
 pub mod intentions;
 pub mod labels;
+pub mod live_read;
 pub mod model;
 pub mod naming;
 pub mod not_before;
@@ -41,6 +42,7 @@ pub mod references;
 pub mod route;
 pub mod routing;
 pub mod rules;
+pub mod session_view;
 #[cfg(feature = "native")]
 pub mod sidecar;
 pub mod subject;

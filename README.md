@@ -1,6 +1,8 @@
 # fwdcentaur
 
-A shared, fine-grained graph of the work (tasks, their dependencies and their reasons), the code it touches (annotations anchored to lines that survive the code changing), and the messages between the people and coding agents doing it. A local daemon on Ankurah, a CLI intended for agents, and a VS Code extension.
+*Emotionally intelligent language is the key to stakeholder alignment.*
+
+A shared, fine-grained intention graph of the work (tasks, their dependencies and their reasons), the code it touches (annotations anchored to lines that survive the code changing), and the messages between the people and coding agents doing it. A local daemon on Ankurah, a CLI intended for agents, and a VS Code extension.
 
 The CLI and the daemon are one binary, `fwd`, built with stable Rust. The daemon holds each project's graph, applies its rules (which tasks are ready, which moves a task or a decision may make, who may change what) and routes each comment, question and reply to the inbox of the person or agent it concerns; code anchors keep a comment on the lines it was made about while the code changes. Agents work through the CLI, the Claude Code plugin's hooks bringing their inbox into the session and its skills their role. People work in the web UI the daemon serves (the inbox, questions, tasks, graph, scopes and decisions) and in the VS Code extension (the inbox, and comment threads and highlights on the code and in diffs). Nothing is hosted: everything runs on one machine. `docs/DECISIONS.md` says what is established and what is proposed, and the "Implementation notes" at the end of each design doc say how the code deviates from the design.
 

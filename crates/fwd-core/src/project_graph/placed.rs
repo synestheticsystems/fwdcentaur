@@ -5,9 +5,11 @@
 //! project's, or followed into whichever project it is in; a transaction places what it makes in
 //! its own project and changes only that project's records.
 
-use super::{equals, selecting, Followed, InProjectView, ProjectGraph, ProjectGraphError, ProjectTransaction};
+use super::{
+    equals, named_by_start, selecting, Followed, InProjectView, ProjectGraph, ProjectGraphError, ProjectTransaction,
+};
 use crate::model::{Placement, PlacementView};
-use ankurah::ankql::ast::{Parsed, Predicate};
+use ankurah::ankql::ast::Parsed;
 use ankurah::entity::LocalTrxEntity;
 use ankurah::error::RetrievalError;
 use ankurah::model::{ComponentViews, MutableBorrow};
@@ -31,13 +33,28 @@ impl ProjectGraph {
         self.ctx.fetch(self.everything()).await
     }
 
-    /// The id of every record in the node placed with `R`'s components, with the record of its
-    /// project, as [`ProjectGraph::ids_in_every_project`] reads fwd's own models: what an id
-    /// someone types may name (D181).
+    /// The id of each of the project's records placed with `R`'s components whose id starts with
+    /// `prefix`, or which is one of `formerly`, as [`ProjectGraph::ids_starting`] reads fwd's own
+    /// models: what the resolver looks for a typed id among first.
+    pub async fn placed_ids_starting<R: ComponentViews>(
+        &self,
+        prefix: &str,
+        formerly: &[EntityId],
+    ) -> Result<Vec<EntityId>, RetrievalError> {
+        let found: Vec<(PlacementView, R)> = self.fetch_placed(named_by_start(prefix, formerly)).await?;
+        Ok(found.iter().map(|(p, _)| p.id()).collect())
+    }
+
+    /// The id of each record in the node placed with `R`'s components whose id starts with
+    /// `prefix`, or which is one of `formerly`, with the record of its project, as
+    /// [`ProjectGraph::ids_in_every_project`] reads fwd's own models: what an id someone types may
+    /// name (D181).
     pub async fn placed_ids_in_every_project<R: ComponentViews>(
         &self,
+        prefix: &str,
+        formerly: &[EntityId],
     ) -> Result<Vec<(EntityId, EntityId)>, ProjectGraphError> {
-        let every: Vec<(PlacementView, R)> = self.ctx.fetch(selecting(Predicate::True)).await?;
+        let every: Vec<(PlacementView, R)> = self.ctx.fetch(named_by_start(prefix, formerly)).await?;
         Ok(every.iter().map(|(p, _)| Ok((p.id(), p.project_id()?))).collect::<Result<_, PropertyError>>()?)
     }
 

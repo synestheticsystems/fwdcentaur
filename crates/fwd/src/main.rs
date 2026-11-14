@@ -37,6 +37,7 @@ mod prime;
 mod runs_in;
 mod serve;
 mod services;
+mod session_view;
 mod watch;
 
 /// The build this binary is, as crates/fwd/build.rs names it (`0.0.1-646.g184fd78`), so that one
@@ -76,7 +77,7 @@ macro_rules! naming_in_text {
 #[command(
     name = "fwd",
     version = BUILD,
-    about = "fwdcentaur: a shared task graph for people and coding agents",
+    about = "fwdcentaur: a shared intention graph for people and coding agents",
     after_long_help = concat!(
         "Conventions:\n",
         "  An argument that takes an id also takes its first six characters or more, and `D<number>` for a\n",
@@ -136,6 +137,12 @@ enum Format {
     /// for no one, printing nothing, as the hook of a retired principal does; without the hook's
     /// JSON, --as and FWD_AS name the principal.
     Hook,
+    /// What an action of `fwd session view` prints, which a pane runs when the person presses it:
+    /// nothing when the command succeeds, since the view shows what changed, and when it fails one
+    /// plain line on standard error saying why. Exit 0: the daemon acknowledged the write; 7: the
+    /// daemon went away while it was made, so it may or may not exist; any other: nothing was
+    /// written. Only `reply` takes it.
+    Pane,
 }
 
 #[derive(Subcommand, Debug)]
@@ -468,7 +475,7 @@ enum Command {
         #[arg(long)]
         timeout: Option<u64>,
     },
-    /// The task graph in one call: tasks (with readiness) and their relations.
+    /// The graph of tasks in one call: tasks (with readiness) and their relations.
     Graph {
         /// Include done, cancelled and rejected tasks.
         #[arg(long)]
@@ -1595,6 +1602,29 @@ enum SessionCommand {
     /// which fwd reads as the agent that runs it. For any other command it prints nothing, and the
     /// command runs as it would without the plugin. It needs no project and starts no daemon.
     Stamp,
+    /// The person's view of a Claude Code session, for a pane beside the chat: what each principal
+    /// bound to the session's own thread, then to its subagents, holds, in every project, as one
+    /// JSON document on one line, each record with its text and what the person can do from it.
+    ///
+    /// For each principal: the questions it asked the person that the person has not answered,
+    /// what it holds (the questions asked of it, then the tasks assigned to it), and the questions
+    /// it asked anyone else or no one in particular; its unread notifications are counted. It reads
+    /// for the person this machine's identity file names (`fwd init --handle`), or the person --as or
+    /// FWD_AS names by a name or a principal's id, from any directory, and writes no record of the
+    /// project's work. No visible text holds an id, and an action acts as the person's principal it
+    /// names by its id.
+    View {
+        /// The Claude Code session's id.
+        session: String,
+        /// Print the document again whenever it differs from the last one printed, as the daemon's
+        /// live queries tell of a change, never on a timer, until the process is stopped; an empty
+        /// line every 30 seconds while the connection to the daemon is healthy; while the daemon
+        /// is out of reach, the last document saying so, and the fresh one when it answers again.
+        /// It ends by itself, with exit 0, when the daemon answers running another build, and when
+        /// its reader, or the process that started it, is gone.
+        #[arg(long)]
+        follow: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1703,6 +1733,8 @@ impl App {
     fn note(&self, line: impl Into<String>) {
         let line = line.into();
         match &self.out {
+            // A pane's press that succeeds says nothing; what it changed shows in the view.
+            Output::Stdout if self.format == Format::Pane => {}
             // A line that cannot be written has no reader left, and fails no command.
             Output::Stdout => {
                 let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("{line}\n"));
@@ -1790,7 +1822,9 @@ impl App {
         }
         match self.format {
             Format::Text => println!("{}", to_text(&value)),
-            _ => println!("{}", serde_json::to_string_pretty(&value)?),
+            // The view the pane draws shows what the command changed.
+            Format::Pane => {}
+            Format::Json | Format::Hook => println!("{}", serde_json::to_string_pretty(&value)?),
         }
         Ok(())
     }
@@ -2226,6 +2260,7 @@ const JOINING: &[(&str, Writes)] = &[
     ("graph", Writes::No),
     ("session stop-check", Writes::No),
     ("session stamp", Writes::No),
+    ("session view", Writes::No),
     ("admin migrate", Writes::No),
     ("admin bind", Writes::No),
     ("admin backup", Writes::No),
@@ -2259,10 +2294,21 @@ fn joins(matches: &ArgMatches) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let parsed = Cli::try_parse().ok();
+    let pane = parsed.as_ref().is_some_and(|cli| cli.format == Some(Format::Pane));
+    // A pane runs only the commands the view's actions name, and the others print outside it; so
+    // it is refused before anything runs, a hook's command and a deadline's included.
+    if parsed.is_some_and(|cli| pane && !matches!(cli.command, Command::Reply { .. })) {
+        fail_in_one_line(anyhow!(
+            "--format pane is for the commands a session view's actions run, `reply` alone; leave it off"
+        ))
+    }
     if let Some(deadline) = prime::deadline() {
         prime::within(deadline, run_cli()).await
     }
     match run_cli().await {
+        Err(error) if pane => fail_in_one_line(error),
+        Err(error) if error.is::<session_view::Ended>() => ended(error),
         // A command whose daemon went away while it ran ends at once, with the exit of a command
         // that finds no daemon (docs/design/cli.md, the exit codes), and not through the runtime's
         // shutdown: its node, left without the daemon, can leave a thread stuck inside Ankurah,
@@ -2274,6 +2320,17 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Ends `fwd session view --follow` as it ended by itself ([`session_view::Ended`]), with exit 0
+/// at once, as [`fail`] ends a command: when the daemon runs another build, saying so on standard
+/// error; when its reader is gone, quietly.
+fn ended(error: anyhow::Error) -> ! {
+    use std::io::Write;
+    if let Some(another @ session_view::Ended::AnotherBuild { .. }) = error.downcast_ref() {
+        let _ = writeln!(std::io::stderr(), "{another}");
+    }
+    std::process::exit(0)
+}
+
 /// Ends the process after an error as returning it from `main` would (`Error: ` and the error with
 /// its causes on standard error), with exit `code`, but at once, without shutting the runtime
 /// down, which waits for each of its threads (`watch::end` says why one can be stuck for good).
@@ -2283,6 +2340,24 @@ fn fail(error: anyhow::Error, code: i32) -> ! {
     let mut err = std::io::stderr().lock();
     // A line that cannot be written has no reader left; the exit status still tells the end.
     let _ = writeln!(err, "Error: {error:?}").and_then(|()| err.flush());
+    std::process::exit(code)
+}
+
+/// Ends a command given `--format pane` after an error, as [`fail`] does, with the error as one
+/// plain line, its causes after it on the same line, which a pane shows under the row whose action
+/// failed, with no control character in it: exit 7 when the daemon went away while a write was
+/// made, so that whether it was made is not known ([`pressed`]), and 1 for anything else, which
+/// wrote nothing.
+fn fail_in_one_line(error: anyhow::Error) -> ! {
+    use std::io::Write;
+    let unknown = matches!(
+        error.downcast_ref::<daemon::Lost>(),
+        Some(daemon::Lost::Unconfirmed { .. } | daemon::Lost::Unfinished { .. })
+    );
+    let code = if unknown { 7 } else { 1 };
+    let said = fwd_core::session_view::one_line(&format!("{error:#}"));
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "{said}").and_then(|()| err.flush());
     std::process::exit(code)
 }
 
@@ -2343,6 +2418,9 @@ async fn run_cli() -> Result<()> {
 
     match &cli.command {
         command if refuse_before_running(command).is_err() => return refuse_before_running(command),
+        Command::Session { command: SessionCommand::View { session, follow } } => {
+            return session_view::print(&cli, paths, session, *follow).await
+        }
         Command::Capabilities => {
             println!(
                 "{}",
@@ -2737,6 +2815,9 @@ async fn run_cli() -> Result<()> {
             // The watch ends the process itself, after its last line or an error (`watch::run`).
             match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
         }
+        if let (Format::Pane, Command::Reply { id, text }) = (app.format, &cli.command) {
+            return pressed(&app, id, text.clone(), joining, stamping).await;
+        }
         let command = cli.command;
         let body = run_as_caller(&app, command, joining, stamping);
         // A command whose daemon goes away while it runs ends within a bound and says so, rather than
@@ -2764,6 +2845,38 @@ async fn run_cli() -> Result<()> {
     }
     .await;
     ran.map_err(|error| ran_in.failure(error))
+}
+
+/// `fwd reply` pressed in a pane (`--format pane`), whose exit status tells the pane whether the
+/// reply was written. A failure before the post wrote nothing, and ends with exit 1. The post is
+/// the one write whose fate can be unknown: a daemon that goes away while it is made fails it as
+/// `Lost::Unconfirmed` (`Client::while_writing`), exit 7. Once the daemon has acknowledged it, the
+/// command succeeds: what follows, making the writer belong to the project and stamping when it
+/// last wrote, can neither fail it nor print. Nothing is read back or printed, since the view shows
+/// the reply.
+async fn pressed(app: &App, id: &str, text: String, joining: bool, stamping: bool) -> Result<()> {
+    let client = app.client.as_ref().expect("the CLI connected through its client");
+    let text = given_text(app, text)?;
+    if joining {
+        refuse_without_role(app.graph(), app.me).await?;
+    }
+    let (reply_to, notification) = client.while_connected(message_behind(app, id, true)).await?;
+    let reply = MessageContext { reply_to: Some(reply_to), ..Default::default() };
+    let post = ops::post_settling(app.graph(), app.me, &text, Priority::Next, reply, notification);
+    let files_in = app.checkout_root().ok().map(Path::to_path_buf);
+    client.while_writing(fwd_core::file_mention::reading_files_in(files_in, post)).await?;
+    let recorded = async {
+        if joining {
+            ops::join(app.graph(), app.me).await?;
+        }
+        match app.acting.filter(|_| stamping) {
+            Some(acting) => dormancy::wrote(app.graph(), acting).await,
+            None => Ok(()),
+        }
+    };
+    // The reply stands whatever becomes of these.
+    let _ = client.while_connected(recorded).await;
+    Ok(())
 }
 
 /// Refuses, before anything is read or written, a command the CLI refuses for its arguments alone:
@@ -5970,7 +6083,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                                 )?
                             );
                         }
-                        Format::Text | Format::Json => {
+                        Format::Text | Format::Json | Format::Pane => {
                             if let Some(guidance) = guidance {
                                 app.note(format!("fwd: {guidance}"));
                             }
@@ -6057,7 +6170,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 }
                 Ok(())
             }
-            SessionCommand::Stamp => unreachable!("handled before connecting"),
+            SessionCommand::Stamp | SessionCommand::View { .. } => unreachable!("handled before connecting"),
         },
     }
 }

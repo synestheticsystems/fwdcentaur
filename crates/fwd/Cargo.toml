@@ -15,6 +15,7 @@ fwd-core = { path = "../fwd-core" }
 ankurah = { workspace = true }
 ankurah-commons = { workspace = true }
 ankurah-storage-sqlite = { workspace = true }
+ankurah-websocket-client = { workspace = true }
 ankurah-websocket-server = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }

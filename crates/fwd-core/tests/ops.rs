@@ -3834,6 +3834,46 @@ async fn d_and_five_digits_is_a_decision_number_first_and_else_the_start_of_an_i
     Ok(())
 }
 
+/// The first six characters of an id name its record whatever character follows them. The ids
+/// that start with them are read as one range of ids in the order of their bytes, in which a digit,
+/// `-` or a small letter sorts where it does not in the order of their text, so tasks are made
+/// until the seventh character of one's id is one of those.
+#[tokio::test]
+async fn the_first_six_characters_of_an_id_name_its_record_whatever_follows_them() -> Result<()> {
+    let graph = project().await?;
+    let pat = ops::ensure_principal(&graph, "pat", "Pat", PrincipalKind::Human, None).await?;
+    let mut made: Vec<EntityId> = Vec::new();
+    while made.iter().all(|id| matches!(id.to_base64().as_bytes()[6], b'A'..=b'Z' | b'_')) {
+        let title = format!("Task {}", made.len());
+        made.push(ops::create_task(&graph, pat, CreateTask { title, ..Default::default() }).await?);
+    }
+    for id in made {
+        assert_eq!(ops::resolve_id(&graph, &id.to_base64()[..6], ops::ANY).await?, id);
+    }
+    Ok(())
+}
+
+/// A start no id can have, longer than an id or ending in a 43rd character no id ends in, is
+/// refused as one no id starts with, though all but its last character start a record's id, and
+/// reads no record.
+#[tokio::test]
+async fn a_start_no_id_can_have_is_refused_as_one_no_id_starts_with() -> Result<()> {
+    let graph = project().await?;
+    let pat = ops::ensure_principal(&graph, "pat", "Pat", PrincipalKind::Human, None).await?;
+    let task = ops::create_task(&graph, pat, CreateTask { title: "Cap".into(), ..Default::default() }).await?;
+    let id = task.to_base64();
+    // The 43rd character holds the id's last four bits and two that are always clear, which `B` sets.
+    for typed in [format!("{}B", &id[..42]), format!("{id}A")] {
+        let refused = ops::resolve_id(&graph, &typed, ops::ANY).await.expect_err("no id starts so").to_string();
+        assert_eq!(
+            refused,
+            format!("no task, message, decision, scope, anchor, relation, intention has an id starting with `{typed}`")
+        );
+        assert!(graph.ids_starting::<TaskView>(&typed, &[]).await?.is_empty(), "`{typed}` read a task");
+    }
+    Ok(())
+}
+
 /// A comment on a decision reaches whoever filed it and whoever ruled, never its writer; a
 /// proposal reaches the project's triage agent and its people, never its author; a repeal or a supersession
 /// reaches the authors of everything citing the decision, never whoever moved it.

@@ -129,6 +129,8 @@ pub struct HostedProject {
 pub struct Running {
     pub pf: PortFile,
     pub projects: Vec<HostedProject>,
+    /// The build the daemon runs, as `/health` names it; none from a daemon older than that.
+    pub build: Option<String>,
 }
 
 pub fn read_port_file(path: &Path) -> Result<Option<PortFile>> {
@@ -157,6 +159,21 @@ pub fn write_port_file(path: &Path, pf: &PortFile) -> Result<()> {
     file.sync_all()?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
+}
+
+/// Holds a shared lock on the port file for as long as the returned file lives, which the daemon
+/// keeps for its whole run, so that macOS's temp cleaner leaves the file. The cleaner (dirhelper,
+/// nightly at 03:35) removes a file from the per-user temporary folder, where the runtime
+/// directory is, once it has gone three days without an access, and APFS stops counting reads as
+/// accesses once a file has been read since it last changed: the port file, written once and then
+/// only read, looks unused three days after its daemon started. On 2026-11-11 the cleaner removed
+/// the port file of a daemon that had served since 2026-11-07, and no command could find it. The
+/// cleaner leaves a file another process holds a lock on, as it always left `daemon.lock`; a
+/// shared lock is enough, and keeps no reader out.
+pub fn hold_port_file(path: &Path) -> Result<File> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    file.lock_shared().with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
 }
 
 /// Opens a lock file and tries to take it exclusively without blocking. `Ok(Some(file))` holds
@@ -528,11 +545,11 @@ pub async fn ensure_running(paths: &Paths, autostart: &Autostart) -> Result<Runn
 async fn answering(paths: &Paths) -> Result<Option<Running>> {
     let Some(pf) = read_port_file(&paths.port_file())? else { return Ok(None) };
     let answer = async {
-        identify(&pf).await?;
-        hosted_projects(&pf).await
+        let health = identify(&pf).await?;
+        Ok::<_, anyhow::Error>((health.build, hosted_projects(&pf).await?))
     };
     match answer.await {
-        Ok(projects) => Ok(Some(Running { pf, projects })),
+        Ok((build, projects)) => Ok(Some(Running { pf, projects, build })),
         Err(e) => {
             tracing::debug!(port = pf.port, error = %e, "port file present but its daemon did not answer");
             Ok(None)
@@ -546,10 +563,13 @@ async fn answering(paths: &Paths) -> Result<Option<Running>> {
 struct Health {
     pid: u32,
     instance_id: String,
+    /// The build the daemon runs, which a daemon older than the field does not name.
+    build: Option<String>,
 }
 
-/// Succeeds when the process listening on the port file's port is the daemon the file names.
-async fn identify(pf: &PortFile) -> Result<()> {
+/// What the process listening on the port file's port says of itself, when it is the daemon the
+/// file names.
+async fn identify(pf: &PortFile) -> Result<Health> {
     let health: Health = match http(pf, "GET", "/health", None, CONNECT_TIMEOUT).await? {
         Some((200, body)) => serde_json::from_str(&body).context("parsing the daemon's health check")?,
         Some((status, body)) => bail!("the health check was refused ({status}): {}", first_line(&body)),
@@ -565,7 +585,7 @@ async fn identify(pf: &PortFile) -> Result<()> {
             pf.pid
         );
     }
-    Ok(())
+    Ok(health)
 }
 
 async fn hosted_projects(pf: &PortFile) -> Result<Vec<HostedProject>> {

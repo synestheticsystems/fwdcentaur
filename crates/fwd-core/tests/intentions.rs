@@ -404,10 +404,5 @@ async fn works_under_joins_a_principal_to_an_intention_and_serves_a_task_or_an_i
     assert!(refusal(link(RelationKind::Serves, task, task, false).await).contains("not a task to a task"));
 
     assert_eq!(ops::describe(&w.alpha, broad).await?, Some((Kind::Intention, "Readers keep their place".into())));
-    let start = &broad.to_base64()[..8];
-    assert_eq!(ops::resolve_id(&w.alpha, start, &[Kind::Intention]).await?, broad, "this project's");
-    assert_eq!(ops::resolve_id(&w.beta, start, &[Kind::Intention]).await?, broad, "from another project");
-    let reading = read(&w.alpha, w.tide, broad, "as I read it", Stance::Agree).await?;
-    assert_eq!(ops::resolve_id(&w.alpha, &reading.to_base64()[..8], &[Kind::Reading]).await?, reading);
     Ok(())
 }
