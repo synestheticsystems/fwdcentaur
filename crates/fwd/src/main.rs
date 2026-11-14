@@ -2496,7 +2496,10 @@ async fn run_cli() -> Result<()> {
                         Ok(())
                     }
                     None => {
-                        eprintln!("no daemon is answering");
+                        match daemon::not_answering(&paths)? {
+                            Some(daemon) => eprintln!("{daemon}"),
+                            None => eprintln!("no daemon is answering"),
+                        }
                         std::process::exit(7)
                     }
                 },
@@ -2532,7 +2535,14 @@ async fn run_cli() -> Result<()> {
                     Ok(())
                 }
                 DaemonCommand::Stop => {
-                    println!("{}", if daemon::stop(&paths).await? { "stopped" } else { "no daemon was running" });
+                    let said = if daemon::stop(&paths).await? {
+                        "stopped"
+                    } else if let Some(daemon) = daemon::not_answering(&paths)? {
+                        return Err(daemon::StoppedNothing::Unreached(daemon).into());
+                    } else {
+                        "no daemon was running"
+                    };
+                    println!("{said}");
                     Ok(())
                 }
                 DaemonCommand::Logs => {

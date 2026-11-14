@@ -39,7 +39,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, routing::post, Json, Router};
 use fwd_core::daemon::{
-    hold_port_file, try_lock, write_port_file, Bind, CheckoutRecord, DaemonConfig, HostedProject, PortFile,
+    hold_port_file, try_lock, write_port_file, Bind, CheckoutRecord, DaemonConfig, HostedProject, LockHolder, PortFile,
 };
 use fwd_core::daemon_socket;
 use fwd_core::project::{self, Index, NamedProject, Paths};
@@ -309,6 +309,10 @@ pub async fn serve(paths: Paths) -> Result<()> {
         info!("another daemon holds the lifetime lock; exiting");
         return Ok(());
     };
+    // Named in the lock from now on, so that `fwd daemon status` and `fwd daemon stop` find this
+    // daemon by its pid should no command reach it, before it listens or after.
+    let mut holder = LockHolder::this_process()?;
+    holder.write(&lifetime)?;
     let config = DaemonConfig::load(&paths)?;
     let index = Index::load(&paths)?;
     refuse_a_folder_not_moved(&paths, &index)?;
@@ -351,6 +355,8 @@ pub async fn serve(paths: Paths) -> Result<()> {
     write_port_file(&paths.port_file(), &info)?;
     // Held until the daemon exits, so that macOS's temp cleaner leaves the port file (`hold_port_file`).
     let _port_file_held = hold_port_file(&paths.port_file())?;
+    holder.listening_on = Some(port);
+    holder.write(&lifetime)?;
     dev_runner.announce(port, open);
     let address = match config.bind {
         Bind::Loopback => "127.0.0.1",

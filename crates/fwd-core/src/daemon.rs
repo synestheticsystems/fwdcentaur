@@ -19,6 +19,13 @@
 //! node makes while its socket is closed goes to the node's own store alone, which goes when the
 //! command exits, so such a command ends with [`Lost`] whenever its socket closed while it ran
 //! ([`Client::while_writing`]).
+//!
+//! A daemon that holds the lifetime lock but that no command reaches is named by the record it
+//! writes into the lock, with the line that ends it ([`holder`]).
+
+mod holder;
+
+pub use holder::{lock_holder, not_answering, LockHolder, NotAnswering, StoppedNothing, Unreached};
 
 use crate::daemon_socket;
 use crate::project::{Checkout, NamedProject, Paths};
@@ -498,6 +505,9 @@ pub async fn ensure_running(paths: &Paths, autostart: &Autostart) -> Result<Runn
         return Ok(running);
     }
     let Autostart::Spawn { daemon_bin } = autostart else {
+        if let Some(daemon) = not_answering(paths)? {
+            return Err(daemon.into());
+        }
         bail!("no daemon is running and autostart is off");
     };
     let _bootstrap = wait_for_lock(&paths.bootstrap_lock(), START_DEADLINE).await?;
@@ -509,8 +519,9 @@ pub async fn ensure_running(paths: &Paths, autostart: &Autostart) -> Result<Runn
     // is starting (it opens every project before it listens), exiting (it holds the lock until
     // its process ends), or wedged; spawning another would only make the newcomer exit, so this
     // waits, and spawns once the lock comes free without an answer. It spawns at most once, so a
-    // daemon that fails at start is reported rather than retried. Pids are never killed on the
-    // strength of a file.
+    // daemon that fails at start is reported rather than retried. A daemon that still holds the
+    // lock at the deadline is named, with why no command reaches it ([`NotAnswering`]). Pids are
+    // never killed on the strength of a file.
     let mut spawned = false;
     let deadline = Instant::now() + START_DEADLINE;
     loop {
@@ -526,6 +537,9 @@ pub async fn ensure_running(paths: &Paths, autostart: &Autostart) -> Result<Runn
             }
         }
         if Instant::now() >= deadline {
+            if let Some(daemon) = not_answering(paths)? {
+                return Err(daemon.into());
+            }
             bail!(
                 "no daemon answered within {}s (one may still be opening its projects, or be stuck before it listens); see {}",
                 START_DEADLINE.as_secs(),
@@ -661,8 +675,9 @@ pub async fn status(paths: &Paths) -> Result<Option<Running>> {
     answering(paths).await
 }
 
-/// Asks the running daemon to drain and exit; returns false when none was running. Waits for
-/// its process to end, not for the lifetime lock to come free: the moment the lock is free,
+/// Asks the running daemon to drain and exit; returns false when none answered, whether none runs
+/// or one that no command reaches holds the lifetime lock ([`not_answering`]).
+/// Waits for its process to end, not for the lifetime lock to come free: the moment the lock is free,
 /// another command may start a successor that takes it, and probing the lock could take it
 /// from a daemon that is starting.
 pub async fn stop(paths: &Paths) -> Result<bool> {
