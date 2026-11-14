@@ -58,7 +58,10 @@ pub fn ended(status: IntentionStatus) -> bool {
 
 /// The principal `said_by` names, with its kind, wherever in the node it is: whose words a write
 /// records ([`rules::speaker_of`]).
-async fn said_by(graph: &ProjectGraph, said_by: Option<EntityId>) -> Result<Option<(EntityId, PrincipalKind)>> {
+async fn followed_principal(
+    graph: &ProjectGraph,
+    said_by: Option<EntityId>,
+) -> Result<Option<(EntityId, PrincipalKind)>> {
     let Some(id) = said_by else { return Ok(None) };
     match graph.follow::<PrincipalView>(id).await? {
         Followed::Held { record, found, .. } => Ok(Some((record, found.kind()?))),
@@ -79,7 +82,7 @@ pub async fn create(
     if title.is_empty() {
         bail!("an intention's title cannot be blank");
     }
-    let speaker = rules::speaker_of(by, self::said_by(graph, said_by).await?)?;
+    let speaker = rules::speaker_of(by, followed_principal(graph, said_by).await?)?;
     let trx = graph.begin();
     let made = trx.create_placed(&Intention { title, words, status: IntentionStatus::Open }).await?;
     let record = Mutable::entity(&*made);
@@ -93,11 +96,10 @@ pub async fn create(
     Ok(views)
 }
 
-/// Gives the intention `record` a new title, new words, or both, as `by` rewords it, in its
-/// speaker's words: `by`'s own, or those of the person `said_by` names
-/// ([`rules::can_change_words`]). One fulfilled or withdrawn is not reworded. Whatever is given as
-/// it stands changes nothing, and nothing at all is written when nothing changes. True when it
-/// changed.
+/// Gives the intention a new title, new words, or both, as `by` rewords it, in its speaker's
+/// words: `by`'s own, or those of the person `said_by` names ([`rules::can_change_words`]). One
+/// fulfilled or withdrawn is not reworded. Whatever is given as it stands changes nothing, and
+/// nothing at all is written when nothing changes. True when it changed.
 pub async fn reword(
     graph: &ProjectGraph,
     by: EntityId,
@@ -111,7 +113,7 @@ pub async fn reword(
         bail!("the intention is {status}, and is not reworded");
     }
     let attribution = graph.component_of::<AttributionView>(placement).await?;
-    let written_for = rules::speaker_of(by, self::said_by(graph, said_by).await?)?;
+    let written_for = rules::speaker_of(by, followed_principal(graph, said_by).await?)?;
     rules::can_change_words(speaker(creation, attribution.as_ref())?, written_for)?;
     let title = title.map(str::trim);
     if title.is_some_and(str::is_empty) {
@@ -136,8 +138,8 @@ pub async fn reword(
     Ok(true)
 }
 
-/// Marks the intention `record` fulfilled or withdrawn, as `by` closes it in its speaker's words,
-/// as [`reword`] takes them, with why: a withdrawal says why, as a task's cancellation does.
+/// Marks the intention fulfilled or withdrawn, as `by` closes it in its speaker's words, as
+/// [`reword`] takes them, with why: a withdrawal says why, as a task's cancellation does.
 pub async fn close(
     graph: &ProjectGraph,
     by: EntityId,
@@ -157,7 +159,7 @@ pub async fn close(
         bail!("the intention is {now} already");
     }
     let attribution = graph.component_of::<AttributionView>(placement).await?;
-    let written_for = rules::speaker_of(by, self::said_by(graph, said_by).await?)?;
+    let written_for = rules::speaker_of(by, followed_principal(graph, said_by).await?)?;
     rules::can_change_words(speaker(creation, attribution.as_ref())?, written_for)?;
     let trx = graph.begin();
     let m = trx.edit_placed::<Intention>(placement)?;
@@ -188,8 +190,8 @@ async fn record_edit(
     Ok(())
 }
 
-/// Assigns the intention `record` to the principal `to`, as `by` does: an accepted `assigned_to`
-/// relation from the intention to the principal, made in the intention's project, where it lives,
+/// Assigns the intention to the principal `to`, as `by` does: an accepted `assigned_to` relation
+/// from the intention to the principal, made in the intention's project, where it lives,
 /// whichever project the command runs in. One that holds already is the answer, so that assigning
 /// twice keeps one. A principal assigns an intention to itself alone: nothing yet tells another
 /// that an intention was assigned to it, as a task's assignee is told.
@@ -219,8 +221,8 @@ pub async fn assign(
     Ok(made)
 }
 
-/// Takes the intention `record` off the principal `to`, as `by` does: retracts each accepted
-/// `assigned_to` from the intention to the principal, in the intention's project, where they live.
+/// Takes the intention off the principal `to`, as `by` does: retracts each accepted `assigned_to`
+/// from the intention to the principal, in the intention's project, where they live.
 /// Anyone takes an intention off themselves and a person takes one off anyone, but an agent taking
 /// one off another principal is refused. How many it retracted, none when the intention was not
 /// assigned to them.

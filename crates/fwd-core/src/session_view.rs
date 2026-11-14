@@ -142,7 +142,9 @@ pub struct Row {
     pub tags: Vec<Tag>,
     /// The record's own text as one Markdown block, cut where it is long, its references named;
     /// none for a task with no what, and none where the title holds the whole text, which `lines`
-    /// never repeats. Then why it cannot be answered, where it cannot.
+    /// never repeats. Then why it cannot be answered, where it cannot. An intention's is whose
+    /// words they are and when they were last written down, then the words, and for one since
+    /// fulfilled or withdrawn a line saying so.
     pub lines: Vec<String>,
     /// Where the page shows it, after the page's address.
     pub path: Option<String>,
@@ -193,8 +195,8 @@ pub struct Input {
     pub multiline: bool,
 }
 
-/// What the view is drawn from: the working set of every principal bound to the session, the
-/// person it is for, and the names it shows in place of ids.
+/// What the view is drawn from: the session's active intentions, the working set of every
+/// principal bound to the session, the person it is for, and the names it shows in place of ids.
 #[derive(Debug, Clone)]
 pub struct Held {
     /// The Claude Code session's id.

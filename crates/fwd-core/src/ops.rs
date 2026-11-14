@@ -4801,7 +4801,7 @@ pub enum Kind {
     Anchor,
     Relation,
     Notification,
-    /// A person or an agent: named inline in a message's text, never as a command's id argument.
+    /// A person or an agent: named inline in a message's text, and by id given to `--said-by`.
     Principal,
     Intention,
 }

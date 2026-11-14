@@ -390,7 +390,7 @@ enum Command {
         note: Option<String>,
     },
     /// What a person or an agent wants to be true, in their own words: create, list, show, reword,
-    /// fulfil, withdraw.
+    /// fulfil, withdraw, assign, unassign.
     Intention {
         #[command(subcommand)]
         command: intentions::IntentionCommand,

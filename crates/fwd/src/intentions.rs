@@ -39,6 +39,7 @@ pub(crate) enum IntentionCommand {
         #[arg(long)]
         active: bool,
     },
+    /// Show an intention, of any project.
     Show {
         #[arg(allow_hyphen_values = true)]
         id: String,
@@ -56,6 +57,7 @@ pub(crate) enum IntentionCommand {
         #[arg(long)]
         said_by: Option<String>,
     },
+    /// Mark an intention fulfilled; --reason may say how.
     Fulfil {
         #[arg(allow_hyphen_values = true)]
         id: String,
@@ -151,13 +153,13 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
             close(app, &id, IntentionStatus::Withdrawn, reason, said_by).await
         }
         IntentionCommand::Assign { id, to } => {
-            let record = followed(app, &id).await?;
+            let record = followed_intention(app, &id).await?;
             let to = principal_for(app, to.as_deref().map(|t| t.trim_start_matches('@'))).await?;
             let assignment = intentions::assign(graph, app.me, &record, to).await?;
             print_assignment(app, &record, &assignment).await
         }
         IntentionCommand::Unassign { id, to } => {
-            let record = followed(app, &id).await?;
+            let record = followed_intention(app, &id).await?;
             let to = principal_for(app, to.as_deref().map(|t| t.trim_start_matches('@'))).await?;
             let retracted = intentions::unassign(graph, app.me, &record, to).await?;
             match app.format {
@@ -175,7 +177,7 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
 
 /// The intention `typed` names, of any project, wherever it is: one is assigned from whichever
 /// project the command runs in, to a principal of that project.
-async fn followed(app: &App, typed: &str) -> Result<(PlacementView, Parts)> {
+async fn followed_intention(app: &App, typed: &str) -> Result<(PlacementView, Parts)> {
     let id = app.id(typed, INTENTION).await?;
     match app.graph().follow_placed::<Parts>(id).await? {
         Followed::Held { found, .. } => Ok(found),
@@ -328,10 +330,10 @@ pub(crate) async fn intention_json(graph: &ProjectGraph, record: &(PlacementView
         "speaker": speaker.to_base64(),
         "speaker_handle": ops::handle_of(graph, speaker).await?,
         "edited_by": edited_by.map(|by| by.to_base64()),
-        "edited_by_handle": handle_of(graph, edited_by).await?,
+        "edited_by_handle": optional_handle(graph, edited_by).await?,
         "edited": edit.as_ref().map(LastEditView::edited).transpose()?,
         "closed_by": closed_by.map(|by| by.to_base64()),
-        "closed_by_handle": handle_of(graph, closed_by).await?,
+        "closed_by_handle": optional_handle(graph, closed_by).await?,
         "closed": closure.as_ref().map(ClosureView::closed).transpose()?.flatten(),
         "closed_reason": closure.as_ref().map(ClosureView::reason).transpose()?.flatten(),
     });
@@ -341,8 +343,8 @@ pub(crate) async fn intention_json(graph: &ProjectGraph, record: &(PlacementView
     Ok(v)
 }
 
-/// The name of the principal `id` names, when it names one.
-async fn handle_of(graph: &ProjectGraph, id: Option<EntityId>) -> Result<Option<String>> {
+/// The name of the principal `id` names, as [`ops::handle_of`] gives it, when there is an `id`.
+async fn optional_handle(graph: &ProjectGraph, id: Option<EntityId>) -> Result<Option<String>> {
     Ok(match id {
         Some(id) => Some(ops::handle_of(graph, id).await?),
         None => None,
@@ -397,7 +399,7 @@ pub(crate) async fn spoken(
         Some(edit) => edit.edited_by()?.map(|by| *by),
         None => Some(*creation.created_by()?),
     };
-    let writer = handle_of(graph, written_by.filter(|by| *by != speaker)).await?;
+    let writer = optional_handle(graph, written_by.filter(|by| *by != speaker)).await?;
     Ok((ops::handle_of(graph, speaker).await?, date(written), writer))
 }
 

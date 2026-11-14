@@ -73,8 +73,8 @@ use uuid::Uuid;
 
 mod placed;
 
-/// A model whose records each name their project: the nine models of a project's work, and
-/// [`FormerId`].
+/// A model whose records each name their project: the nine models of a project's work,
+/// [`FormerId`], and [`Placement`], which places a record built on the Commons' models.
 pub trait InProject: Model {
     /// The project the record names.
     fn project_id(&self) -> EntityId;
