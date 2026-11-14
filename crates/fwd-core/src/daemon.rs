@@ -21,7 +21,7 @@
 //! ([`Client::while_writing`]).
 //!
 //! A daemon that holds the lifetime lock but that no command reaches is named by the record it
-//! writes into the lock, with the line that ends it ([`holder`]).
+//! writes into the lock, with the line that ends it ([`find`]).
 
 mod find;
 mod holder;

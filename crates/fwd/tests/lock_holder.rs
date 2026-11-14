@@ -187,6 +187,36 @@ async fn a_process_that_holds_the_lock_naming_no_daemon_is_not_taken_for_none() 
     Ok(())
 }
 
+/// While another command holds the bootstrap lock, starting the daemon or looking for it, and no
+/// record names a daemon, `fwd daemon status` says so at once and exits 7, and `fwd daemon stop` and
+/// a command run with `--no-autostart` fail saying so, rather than that no daemon runs.
+#[tokio::test]
+async fn another_command_holding_the_bootstrap_lock_is_reported_as_such() -> Result<()> {
+    let dir = Scratch::new()?;
+    let paths = dir.paths("run", "data");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo)?;
+    project::init(&paths, &repo, project::InitOptions { name: Some("busy"), ..Default::default() })?;
+    std::fs::File::create(paths.lifetime_lock())?;
+    let _bootstrap = daemon::try_lock(&paths.bootstrap_lock())?.ok_or_else(|| anyhow!("the bootstrap lock is held"))?;
+    let busy = "another fwd command is starting the daemon, or looking for it as this one is; ask again";
+
+    let status = fwd(&repo, &paths, &["daemon", "status"]).output().await?;
+    assert_eq!((status.status.code(), String::from_utf8(status.stderr)?), (Some(7), format!("{busy}\n")));
+    let stopped = fwd(&repo, &paths, &["daemon", "stop"]).output().await?;
+    let stderr = String::from_utf8(stopped.stderr)?;
+    assert_eq!(
+        (stopped.status.code(), stderr),
+        (Some(1), format!("Error: `fwd daemon stop` stopped nothing: {busy}\n"))
+    );
+    let listed = fwd(&repo, &paths, &["--no-autostart", "task", "list"]).output().await?;
+    assert_eq!(
+        (listed.status.code(), String::from_utf8(listed.stderr)?),
+        (Some(1), format!("Error: no daemon answers yet and autostart is off: {busy}\n"))
+    );
+    Ok(())
+}
+
 /// A daemon stuck before it listens is named as one that has not begun to listen, since it names
 /// itself in the lock before it reads its settings; ended with SIGTERM, as the printed line does,
 /// it lets the next command start a fresh daemon that answers. Here its settings file is a pipe this

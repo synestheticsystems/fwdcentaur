@@ -40,6 +40,28 @@ async fn a_launcher_at_its_deadline_names_a_lock_held_by_a_process_that_names_no
     assert!(matches!(error.downcast_ref::<NotStarted>(), Some(NotStarted::Unnamed { .. })), "{error:#}");
 }
 
+/// A launcher that gives up waiting for the bootstrap lock with no record naming a daemon says that
+/// another command held that lock throughout.
+#[tokio::test]
+async fn a_launcher_that_gives_up_on_the_bootstrap_lock_with_no_daemon_named_says_another_command_held_it() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let paths = paths(dir.path());
+    let _bootstrap = try_lock(&paths.bootstrap_lock()).expect("the bootstrap lock").expect("free");
+    let error = ensure_running(&paths, &a_launcher()).await.expect_err("no daemon answers");
+    assert!(matches!(error.downcast_ref::<NotStarted>(), Some(NotStarted::BootstrapHeld { .. })), "{error:#}");
+}
+
+/// A launcher whose daemon ends before it answers says so at its deadline: here the daemon it
+/// spawns is a program that exits at once.
+#[tokio::test]
+async fn a_launcher_whose_daemon_ended_before_it_answered_says_so() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let paths = paths(dir.path());
+    let exits = Autostart::Spawn { daemon_bin: "/usr/bin/true".into() };
+    let error = ensure_running(&paths, &exits).await.expect_err("no daemon answers");
+    assert!(matches!(error.downcast_ref::<NotStarted>(), Some(NotStarted::Ended { .. })), "{error:#}");
+}
+
 /// A daemon found answering that then stops answering, with the lock still held by it, is not
 /// reported as none: here the daemon `stop` was given is this process, whose record holds the lock
 /// and whose port file names a port nothing listens on any more.
@@ -58,7 +80,11 @@ async fn stop_on_a_daemon_that_stopped_answering_after_it_was_found_stops_nothin
     let error = stop_running(&paths, &found).await.expect_err("nothing was stopped");
     match error.downcast_ref::<StoppedNothing>() {
         Some(StoppedNothing::Unreached(daemon)) => {
-            assert!(matches!(daemon.why, Unreached::NoValidAnswer { port: p, .. } if p == port), "{error:#}")
+            assert_eq!(
+                daemon.why,
+                Unreached::NoValidAnswer { port, why: format!("nothing is listening on port {port}") },
+                "{error:#}"
+            )
         }
         _ => panic!("{error:#}"),
     }
