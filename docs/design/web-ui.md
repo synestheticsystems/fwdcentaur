@@ -4,7 +4,7 @@ Draft, 2026-09-25; the inbox revised 2026-09-26; the four modes, a task's steps,
 
 ## What it is for
 
-Seeing an inbox and the task graph without a terminal or an editor, and acting on them with exactly the rules the CLI runs. Daniel: "I really want a web UI hosted by the daemon" (R, 2026-09-25); Leptos, taking cues from Ankurah's community chat app for the Leptos idioms and from simplikeys and properlydone for the React-era patterns that transfer (R).
+Seeing an inbox and the intention graph without a terminal or an editor, and acting on them with exactly the rules the CLI runs. Daniel: "I really want a web UI hosted by the daemon" (R, 2026-09-25); Leptos, taking cues from Ankurah's community chat app for the Leptos idioms and from simplikeys and properlydone for the React-era patterns that transfer (R).
 
 ## Shape (P)
 

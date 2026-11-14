@@ -502,7 +502,10 @@ fn the_inbox_hooks_act_for_the_agent_whose_hook_fired() -> Result<()> {
 
     // The session's own thread, which has no agent id in the hook's JSON, is the lead.
     let primed = hook("fwd prime --format hook", "SessionStart", None)?;
-    assert!(primed.starts_with("fwdcentaur context for lead-main:") && primed.contains("for the lead"), "{primed}");
+    assert!(
+        primed.starts_with("fwdcentaur context for lead-main (lead)") && primed.contains("for the lead"),
+        "{primed}"
+    );
     assert!(
         primed.contains("no agent serves the whole project, so no triage agent answers"),
         "the lead is told how to create one: {primed}"
@@ -525,7 +528,10 @@ fn the_inbox_hooks_act_for_the_agent_whose_hook_fired() -> Result<()> {
         scratch.hook(line, &event_input(other, event, agent), fwd_as).map_err(|e| anyhow!(e))
     };
     let primed = hook_in("fwd prime --format hook", "SessionStart", None, Some("tester"))?;
-    assert!(primed.starts_with("fwdcentaur context for tester:") && primed.contains("for the person"), "{primed}");
+    assert!(
+        primed.starts_with("fwdcentaur context for tester (person)") && primed.contains("for the person"),
+        "{primed}"
+    );
     let stop: Value = serde_json::from_str(&hook_in(stop_check, "Stop", None, Some("tester"))?)?;
     let reason = stop["reason"].as_str().expect("the reason");
     assert!(reason.contains("for tester") && reason.contains("for the person"), "{reason}");

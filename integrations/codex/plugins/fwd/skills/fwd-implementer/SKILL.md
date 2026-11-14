@@ -1,6 +1,6 @@
 ---
 name: fwd-implementer
-description: Work as a fwdcentaur implementing agent in Codex through the fwd plugin's tools - work in a scope, take ready tasks from the shared task graph, act on inbox notifications mid-task, file discovered work as proposed tasks, and submit with evidence. Use when a Codex thread or subagent is asked to implement tasks from fwdcentaur, when a lead hands it a task, or when the user says "take the next task".
+description: Work as a fwdcentaur implementing agent in Codex through the fwd plugin's tools - work in a scope, take ready tasks from the shared intention graph, act on inbox notifications mid-task, file discovered work as proposed tasks, and submit with evidence. Use when a Codex thread or subagent is asked to implement tasks from fwdcentaur, when a lead hands it a task, or when the user says "take the next task".
 ---
 
 # fwdcentaur implementer (Codex)
@@ -21,7 +21,7 @@ The fwd plugin's tools are the fwd CLI's commands, served by the fwd daemon on t
 A user of your own exists so that the graph says which agent wrote what and routes your notifications to you. A subagent that only reports to its lead needs none (D123, "A subagent retires its own user when its job ends"), so it calls no tool that acts as it: no write, and none of the reads about the caller (`prime`, `inbox`, `inbox pop`, `task next`, `task list --mine`), each of which gives the calling thread a principal of its own.
 
 1. `whoami` first, which shows who your thread is and makes no one. With `principal` null, name yourself, before anything else: `principal add <your name> --role implementer`, with a name no other principal of this project has (`principal list --all` lists the names taken), such as the name your lead launched you under. It binds that principal to your thread. A thread whose first call needed someone to act as already has one, an implementer named `codex-` and part of the thread's id: take your name with `principal rename <your name>`, which keeps your id, your work and your inbox. If you carry on the work of an implementer that stopped, name yourself as its successor instead, `principal add <your name> --succeeds <its name>`: its role and its mail come to you, and you may correct a message it wrote (`message edit`).
-2. `prime`: your intention, the ready tasks, the unread notifications. Tasks you have started are not ready, so they are not in it; `task list --mine` lists the tasks assigned to you.
+2. `prime`: what you hold in every project, the questions asked of you and those you asked, the tasks assigned to you, your unread notifications, then the ready tasks of the project you call it for, each section with its records and how many it shows of how many.
 
 ## The loop
 

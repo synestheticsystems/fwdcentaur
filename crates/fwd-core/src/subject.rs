@@ -164,8 +164,13 @@ pub fn of_same_session<'a>(principals: &'a [PrincipalView], subject: &str) -> Ve
 /// add`s of one agent at once), the one that is not retired; two that are not are refused, listed
 /// by id, for the agent to retire the one it does not mean.
 pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<PrincipalView>> {
-    let principals = ops::principals(graph).await?;
-    let bound = bound_to(&principals, subject);
+    principal_among(&ops::principals(graph).await?, subject)
+}
+
+/// The principal of `principals`, those of one project, bound to `subject`, as [`principal_of`]
+/// reads it, for a reader that holds them already.
+pub fn principal_among(principals: &[PrincipalView], subject: &str) -> Result<Option<PrincipalView>> {
+    let bound = bound_to(principals, subject);
     let active: Vec<&PrincipalView> = bound.iter().copied().filter(|p| p.active().unwrap_or(false)).collect();
     let one = match (bound.as_slice(), active.as_slice()) {
         ([], _) => return Ok(None),

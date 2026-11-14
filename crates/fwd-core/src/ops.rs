@@ -2240,7 +2240,8 @@ pub const ASSIGNED_BY_KEY: &str = "assigned_by";
 pub const MIGRATED: &str = "migration";
 
 /// The frontier: ready tasks, highest priority first, those assigned to `me` before unassigned
-/// ones. Tasks assigned to someone else are left out.
+/// ones, then oldest first, then by id, so that an unchanged frontier is listed the same each time.
+/// Tasks assigned to someone else are left out.
 pub async fn ready_tasks(graph: &ProjectGraph, me: Option<EntityId>) -> Result<Vec<TaskView>> {
     let open: Vec<TaskView> = graph.fetch("status = 'open'").await?;
     let mut ranked: Vec<(u8, i64, TaskView)> = Vec::new();
@@ -2255,7 +2256,7 @@ pub async fn ready_tasks(graph: &ProjectGraph, me: Option<EntityId>) -> Result<V
         };
         ranked.push((rank, t.priority()?.unwrap_or(9), t));
     }
-    ranked.sort_by_key(|(rank, prio, t)| (*rank, *prio, t.created().unwrap_or(0)));
+    ranked.sort_by_key(|(rank, prio, t)| (*rank, *prio, t.created().unwrap_or(0), t.id()));
     Ok(ranked.into_iter().map(|(_, _, t)| t).collect())
 }
 
@@ -4039,7 +4040,8 @@ pub fn notification_time(n: &NotificationView) -> i64 {
 }
 
 /// The simplikeys query: everything for a recipient that is not dismissed, unread first, then
-/// by priority, then oldest first (by [`notification_time`]).
+/// by priority, then oldest first (by [`notification_time`]), then by id, so that an unchanged inbox
+/// is listed the same each time.
 pub async fn inbox(graph: &ProjectGraph, recipient: EntityId, unread_only: bool) -> Result<Vec<NotificationView>> {
     let pred =
         if unread_only { "recipient = ? AND status = 'unread'" } else { "recipient = ? AND status != 'dismissed'" };
@@ -4054,7 +4056,7 @@ pub async fn inbox(graph: &ProjectGraph, recipient: EntityId, unread_only: bool)
             Priority::Next => 1,
             Priority::Later => 2,
         };
-        (status_rank, prio_rank, notification_time(n))
+        (status_rank, prio_rank, notification_time(n), n.id())
     });
     Ok(found)
 }

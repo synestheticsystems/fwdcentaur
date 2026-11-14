@@ -166,7 +166,7 @@ pub fn switch_project(id: &str) {
 fn address(id: &str, hash: &str) -> Option<String> {
     let w = window()?;
     let params = web_sys::UrlSearchParams::new_with_str(&w.location().search().unwrap_or_default()).ok()?;
-    params.set("p", id);
+    params.set(fwd_core::route::PROJECT_PARAM, id);
     params.delete("as");
     let path = w.location().pathname().unwrap_or_else(|_| "/".into());
     let query: String = params.to_string().into();
@@ -218,7 +218,8 @@ pub async fn boot() -> Result<(), String> {
         Ok(build) => BOOTED_ON.set(build).map_err(|_| booted_twice())?,
         Err(why) => tracing::warn!("{why}; the page cannot tell when the daemon restarts on another build"),
     }
-    let project = choose(&projects, query_param("p").as_deref(), remembered.as_deref(), locked)?;
+    let project =
+        choose(&projects, query_param(fwd_core::route::PROJECT_PARAM).as_deref(), remembered.as_deref(), locked)?;
     if let Some(error) = &project.error {
         return Err(format!(
             "The daemon could not open the project {}: {error}. `fwd daemon logs` shows why.",

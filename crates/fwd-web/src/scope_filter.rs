@@ -30,66 +30,7 @@ use fwd_core::ops;
 use leptos::prelude::*;
 use std::sync::OnceLock;
 
-/// What the scope filter keeps, by the scopes of the work each thing is part of: a task's scopes
-/// are those it is worked in, a question's those it is about, a ruling's the one it governs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ScopeChoice {
-    /// Everything, whatever scopes it is part of, if any.
-    All,
-    /// What is part of no scope: the tasks worked in none, for one.
-    NoScope,
-    /// What is part of this scope, among others or alone: the tasks worked in it, for one.
-    Scope(EntityId),
-}
-
-/// How "all scopes" and "no scope" are written in a route and in the select: words no scope's id
-/// can be.
-const ALL: &str = "all";
-const NONE: &str = "none";
-/// How a route wrote "no scope" until 2026-10-03, which still reads as it, so that a link made
-/// before then opens on what it named.
-const UNASSIGNED: &str = "unassigned";
-
-impl ScopeChoice {
-    /// Whether the filter keeps what is part of `scopes`, none for what is part of no scope: a
-    /// scope keeps it when it is one of them, so that a task worked in several scopes is listed
-    /// under each. (The Decisions page keeps the rulings that govern the whole project whatever the
-    /// choice.)
-    pub fn keeps(self, scopes: &[EntityId]) -> bool {
-        match self {
-            ScopeChoice::All => true,
-            ScopeChoice::NoScope => scopes.is_empty(),
-            ScopeChoice::Scope(chosen) => scopes.contains(&chosen),
-        }
-    }
-
-    /// The scope chosen, when the choice is one scope.
-    pub fn scope(self) -> Option<EntityId> {
-        match self {
-            ScopeChoice::Scope(id) => Some(id),
-            ScopeChoice::All | ScopeChoice::NoScope => None,
-        }
-    }
-
-    /// The choice as a route's `?scope=` and the select's options write it: the scope's id, or
-    /// "all" or "none".
-    pub fn token(self) -> String {
-        match self {
-            ScopeChoice::All => ALL.into(),
-            ScopeChoice::NoScope => NONE.into(),
-            ScopeChoice::Scope(id) => id.to_base64(),
-        }
-    }
-
-    /// The choice `token` wrote, or wrote before 2026-10-03, or none for anything else.
-    pub fn parse(token: &str) -> Option<ScopeChoice> {
-        match token {
-            ALL => Some(ScopeChoice::All),
-            NONE | UNASSIGNED => Some(ScopeChoice::NoScope),
-            id => id.parse().ok().map(ScopeChoice::Scope),
-        }
-    }
-}
+pub use fwd_core::route::ScopeChoice;
 
 /// What the page showing keeps by the filter, which the select says on hover.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -204,8 +145,8 @@ pub fn HeaderScope(chosen: Memo<Option<ScopeChoice>>) -> impl IntoView {
             <label class="field scope-filter" title=hint>
                 "scope "
                 <select node_ref=select on:change=on_change>
-                    <option value=ALL selected=is(ScopeChoice::All)>{name(ScopeChoice::All, "")}</option>
-                    <option value=NONE selected=is(ScopeChoice::NoScope)>
+                    <option value=ScopeChoice::All.token() selected=is(ScopeChoice::All)>{name(ScopeChoice::All, "")}</option>
+                    <option value=ScopeChoice::NoScope.token() selected=is(ScopeChoice::NoScope)>
                         {name(ScopeChoice::NoScope, "")}
                     </option>
                     {options}

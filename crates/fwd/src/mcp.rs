@@ -1,10 +1,11 @@
 //! The daemon's MCP endpoint: fwd's commands as Model Context Protocol tools, served over
 //! Streamable HTTP at `/mcp` on the daemon's own listener (crates/fwd/src/serve.rs), so that a
-//! Codex thread works in the task graph without a shell (task jDv1EY7K). It is the CLI by another
-//! door, not a second fwd API: each tool is a CLI command (`tools`), whose arguments are parsed by
-//! the CLI's own parser and run by the CLI's own dispatcher (`crate::run`) over the daemon's durable
-//! node, with the CLI's refusals before it (`crate::refuse_by_identity`) and its bookkeeping after
-//! it (`crate::run_as_caller`), its answer captured rather than printed (`crate::Output`).
+//! Codex thread works in the intention graph without a shell (task jDv1EY7K). It is the CLI by
+//! another door, not a second fwd API: each tool is a CLI command (`tools`), whose arguments are
+//! parsed by the CLI's own parser and run by the CLI's own dispatcher (`crate::run`) over the
+//! daemon's durable node, with the CLI's refusals before it (`crate::refuse_by_identity`) and its
+//! bookkeeping after it (`crate::run_as_caller`), its answer captured rather than printed
+//! (`crate::Output`).
 //!
 //! Who calls is never an argument. The transport says it ([`caller::Caller`], from the metadata
 //! Codex attaches to each tool call), and the operations ([`Operations`]) take it as given, so that
