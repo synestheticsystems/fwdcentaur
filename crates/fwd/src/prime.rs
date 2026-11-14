@@ -18,7 +18,7 @@ use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph};
 use fwd_core::route::page_path;
 use fwd_core::rules::{short_id, ScopeHere};
 use fwd_core::subject;
-use fwd_core::working_set::{self, Holder, Holding, Reading, Record, SectionKind};
+use fwd_core::working_set::{self, Addressee, Asking, Extent, Holder, Holding, Record, RecordKind, SectionKind};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::io::Write;
@@ -74,13 +74,13 @@ pub(crate) async fn for_agent(
     let read = async {
         let graph = &client.graph;
         let here = resolved.as_ref().map(|_| graph.record());
-        let reading = reading(include, here);
-        let mut holdings = working_set::read(graph, Holder::Agent(agent), &reading).await?;
+        let extent = extent(include, here);
+        let mut holdings = working_set::read(graph, Holder::Agent(agent), &extent).await?;
         if let (true, Some(_)) = (holdings.is_empty(), here) {
             if let Some(Some(stand_in)) = thread_hook_stand_in(cli, graph, agent, thread_hook).await? {
                 // A retired principal acts for no one, as every hook of it does.
                 if graph.get::<PrincipalView>(stand_in).await?.active()? {
-                    holdings = working_set::read(graph, Holder::Principal(stand_in), &reading).await?;
+                    holdings = working_set::read(graph, Holder::Principal(stand_in), &extent).await?;
                 }
             }
         }
@@ -128,7 +128,7 @@ pub(crate) async fn for_app(app: &App, max_chars: Option<usize>, include: &[Sect
         Some(agent) => Holder::Agent(agent),
         None => Holder::Principal(app.me),
     };
-    let holdings = working_set::read(graph, holder, &reading(include, Some(graph.record()))).await?;
+    let holdings = working_set::read(graph, holder, &extent(include, Some(graph.record()))).await?;
     let notices = Notices::to(graph, app.me, app.scope).await?;
     // An MCP call runs in the daemon, whose directory is no caller's.
     let directory = match app.out {
@@ -158,7 +158,7 @@ pub(crate) async fn for_app(app: &App, max_chars: Option<usize>, include: &[Sect
 
 /// What a working set is read for `include` (every section when it names none), with the ready
 /// tasks of `here`, the project the command runs in, by its record.
-fn reading(include: &[Section], here: Option<EntityId>) -> Reading {
+fn extent(include: &[Section], here: Option<EntityId>) -> Extent {
     let selected = |kind: &SectionKind| {
         include.contains(&match kind {
             SectionKind::AskedOfYou | SectionKind::YouAsked => Section::Questions,
@@ -167,7 +167,7 @@ fn reading(include: &[Section], here: Option<EntityId>) -> Reading {
             SectionKind::Ready => Section::Ready,
         })
     };
-    Reading {
+    Extent {
         sections: SectionKind::ALL.into_iter().filter(|kind| include.is_empty() || selected(kind)).collect(),
         ready_in: here,
         ready: PRIMED_READY,
@@ -312,6 +312,7 @@ impl Primer {
         // Counted as printed, its last newline with it.
         let size = |out: &str| out.chars().count() + 1;
         match format {
+            Format::Pane => unreachable!("run_cli refuses --format pane for every command but reply"),
             Format::Json => {
                 let shown = self.fit(budget, |shown| size(&pretty(&self.json(shown))));
                 let json = self.json(&shown);
@@ -387,7 +388,7 @@ impl Primer {
             for (section, &n) in h.sections.iter().zip(counts) {
                 if n > 0 {
                     lines.push(format!("{} ({}):", header(section.kind), section.total));
-                    lines.extend(section.records[..n].iter().map(|r| record_line(h, r)));
+                    lines.extend(section.records[..n].iter().map(|r| record_line(h, section.kind, r)));
                 }
                 if let Some(first) = section.unreadable.iter().min() {
                     lines.push(format!(
@@ -440,7 +441,7 @@ impl Primer {
                     .iter()
                     .zip(counts)
                     .map(|(s, &n)| {
-                        let records: Vec<Value> = s.records[..n].iter().map(|r| record_json(h, r)).collect();
+                        let records: Vec<Value> = s.records[..n].iter().map(|r| record_json(h, s.kind, r)).collect();
                         let unreadable = s
                             .unreadable
                             .iter()
@@ -521,27 +522,44 @@ impl Primer {
     }
 }
 
-/// A record of `h`'s as one line: its short id, the form the page shows and every command takes,
-/// its title, and the project it is in when that is not `h`'s.
-fn record_line(h: &Holding, r: &Record) -> String {
+/// A record of `h`'s section `kind` as one line: its short id, the form the page shows and every
+/// command takes, its title ([`primed_title`]), and the project it is in when that is not `h`'s.
+fn record_line(h: &Holding, kind: SectionKind, r: &Record) -> String {
     let elsewhere =
         if r.project.record == h.project.record { String::new() } else { format!(" in {}", r.project.name) };
-    format!("{} {}{elsewhere}", short_id(&r.id), r.title)
+    format!("{} {}{elsewhere}", short_id(&r.id), primed_title(kind, r))
 }
 
-/// A record of `h`'s as the JSON gives it: its whole id, its kind, its title, its path on the page
-/// (null where the page has no route of its own for it), and the project it is in when that is not
-/// `h`'s (null otherwise).
-fn record_json(h: &Holding, r: &Record) -> Value {
+/// A record of `h`'s section `kind` as the JSON gives it: its whole id, its kind, its title as its
+/// line has it ([`primed_title`]), its path on the page (null where the page has no route of its own
+/// for it), and the project it is in when that is not `h`'s (null otherwise).
+fn record_json(h: &Holding, kind: SectionKind, r: &Record) -> Value {
     let project = (r.project.record != h.project.record)
         .then(|| json!({"id": r.project.uuid.to_string(), "name": r.project.name}));
     json!({
         "id": r.id.to_base64(),
         "kind": r.kind.to_string(),
-        "title": r.title,
+        "title": primed_title(kind, r),
         "path": r.route.as_ref().map(|route| page_path(r.project.uuid, route)),
         "project": project,
     })
+}
+
+/// What a record's line says of it after its id, in the section `kind`: a question asked of the
+/// agent by whom it is from, one it asked by whom it asks, each before its first words; a task
+/// assigned to it with its status in brackets, and a ready task by its title alone; a notification
+/// by its sentence. Its whitespace is collapsed once it is composed, so that a name or a text that
+/// holds newlines, or no text at all, makes one line with no space left at its end.
+fn primed_title(kind: SectionKind, r: &Record) -> String {
+    let line = match &r.kind {
+        RecordKind::Ask(Asking::Of { from }) => format!("from @{}: {}", from.handle, r.title),
+        RecordKind::Ask(Asking::By { to: Addressee::Principal(to) }) => format!("to @{}: {}", to.handle, r.title),
+        RecordKind::Ask(Asking::By { to: Addressee::Name(name) }) => format!("to @{name}: {}", r.title),
+        RecordKind::Ask(Asking::By { to: Addressee::NoOne }) => format!("to no one in particular: {}", r.title),
+        RecordKind::Task { status: Some(status) } if kind == SectionKind::Assigned => format!("{} [{status}]", r.title),
+        RecordKind::Task { .. } | RecordKind::Notification => r.title.clone(),
+    };
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `value` as `--format json` prints it.
@@ -686,7 +704,7 @@ mod tests {
     use super::*;
     use fwd_core::project_graph::ProjectRecord;
     use fwd_core::route::Route;
-    use fwd_core::working_set::{RecordKind, Section};
+    use fwd_core::working_set::Section;
 
     fn project(n: u8) -> ProjectRecord {
         let name = ["alpha", "beta"][usize::from(n)].to_string();
@@ -706,8 +724,10 @@ mod tests {
                 records: (0..records)
                     .map(|i| Record {
                         id: EntityId::from_bytes([i as u8; 32]),
-                        kind: RecordKind::Task,
+                        kind: RecordKind::Task { status: Some(TaskStatus::Open) },
                         title: format!("{kind} {i}"),
+                        text: None,
+                        created: None,
                         project: project(project_n),
                         route: Some(Route::task(EntityId::from_bytes([i as u8; 32]))),
                     })
@@ -720,6 +740,7 @@ mod tests {
             handle: "impl-a".into(),
             kind: PrincipalKind::Agent,
             role: Some(AgentRole::Implementer),
+            subject: None,
             sections,
         }
     }
@@ -790,7 +811,7 @@ mod tests {
         );
         let mut held = primer(vec![holding(0, &[(AskedOfYou, 1, 1), (Assigned, 1, 1)])]);
         let text = held.text(&held.fit(None, |_| 0), &[], None);
-        assert!(text.lines().last().is_some_and(|line| line.ends_with("assigned 0")), "{text}");
+        assert!(text.lines().last().is_some_and(|line| line.ends_with("assigned 0 [open]")), "{text}");
 
         held.holdings = vec![holding(0, &[(AskedOfYou, 1, 1), (YouAsked, 1, 1), (Unread, 20, 31), (Ready, 10, 60)])];
         held.holdings[0].sections[3].listed_elsewhere = 2;
@@ -854,7 +875,7 @@ mod tests {
         let shown = p.fit(None, |_| 0);
         let text = p.text(&shown, &[], None);
         let id = EntityId::from_bytes([0; 32]);
-        assert!(text.contains(&format!("{} assigned 0 in beta\n", short_id(&id))), "{text}");
+        assert!(text.contains(&format!("{} assigned 0 [open] in beta\n", short_id(&id))), "{text}");
         assert!(
             text.contains(&format!(
                 "2 tasks assigned to you could not be read, the first {}",
