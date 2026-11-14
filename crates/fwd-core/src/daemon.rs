@@ -23,10 +23,14 @@
 //! A daemon that holds the lifetime lock but that no command reaches is named by the record it
 //! writes into the lock, with the line that ends it ([`holder`]).
 
+mod find;
 mod holder;
+#[cfg(test)]
+mod tests;
 
-use holder::not_answering;
-pub use holder::{find, lock_holder, Found, LockHolder, NotAnswering, StoppedNothing, Unnamed, Unreached};
+use find::{classify, not_answering, LockHeld};
+pub use find::{find, Busy, Found, NotAnswering, StoppedNothing, Unnamed, Unreached};
+pub use holder::{lock_holder, LockHolder};
 
 use crate::daemon_socket;
 use crate::project::{Checkout, NamedProject, Paths};
@@ -500,37 +504,40 @@ pub async fn ensure_daemon(paths: &Paths, project: &NamedProject, autostart: Aut
     connect(paths, &running.pf, project, CONNECT_TIMEOUT).await
 }
 
-/// The daemon answering, spawned first when none is. Serializes launchers on the bootstrap
-/// lock; whoever wins spawns, everyone else waits for the same daemon.
+/// The daemon answering, spawned first when none is and autostart is on. Serializes launchers on
+/// the bootstrap lock; whoever wins spawns, everyone else waits for the same daemon. With autostart
+/// off, it reports what [`find`] finds.
 pub async fn ensure_running(paths: &Paths, autostart: &Autostart) -> Result<Running> {
     paths.ensure()?;
-    if let Some(running) = answering(paths).await? {
-        return Ok(running);
-    }
     let Autostart::Spawn { daemon_bin } = autostart else {
-        if let Some(daemon) = not_answering(paths)? {
-            return Err(daemon.into());
-        }
-        bail!("no daemon is running and autostart is off");
+        return match find(paths).await? {
+            Found::Answering(running) => Ok(running),
+            Found::Unreached(daemon) => Err(daemon.into()),
+            Found::Unnamed => Err(Unnamed.into()),
+            Found::Busy => Err(NotStarted::BusyAndAutostartOff.into()),
+            Found::Absent => Err(NotStarted::AutostartOff.into()),
+        };
     };
-    let _bootstrap = take_bootstrap(paths).await?;
-    if let Some(running) = answering(paths).await? {
+    if let Probe::Answering(running) = probe(paths).await? {
         return Ok(running);
     }
+    let Some(bootstrap) = wait_for_lock(&paths.bootstrap_lock(), START_DEADLINE).await? else {
+        return gave_up_on_bootstrap(paths).await;
+    };
     // Holding the lifetime lock is the proof that no daemon runs: only then may the stale port
     // file go, and only then is spawning right. A daemon that holds the lock but does not answer
     // is starting (it opens every project before it listens), exiting (it holds the lock until
     // its process ends), or wedged; spawning another would only make the newcomer exit, so this
     // waits, and spawns once the lock comes free without an answer. It spawns at most once, so a
-    // daemon that fails at start is reported rather than retried. A daemon that still holds the
-    // lock at the deadline is named, with why no command reaches it ([`NotAnswering`]). Pids are
-    // never killed on the strength of a file.
+    // daemon that fails at start is reported rather than retried. At the deadline it reports who
+    // holds the lock ([`classify`]). Pids are never killed on the strength of a file.
     let mut spawned = false;
     let deadline = Instant::now() + START_DEADLINE;
     loop {
-        if let Some(running) = answering(paths).await? {
-            return Ok(running);
-        }
+        let unanswered = match probe(paths).await? {
+            Probe::Answering(running) => return Ok(running),
+            Probe::Unanswered(unanswered) => unanswered,
+        };
         if !spawned {
             if let Some(lock) = try_lock(&paths.lifetime_lock())? {
                 let _ = std::fs::remove_file(paths.port_file());
@@ -540,36 +547,93 @@ pub async fn ensure_running(paths: &Paths, autostart: &Autostart) -> Result<Runn
             }
         }
         if Instant::now() >= deadline {
-            if let Some(daemon) = not_answering(paths)? {
-                return Err(daemon.into());
-            }
-            bail!(
-                "no daemon answered within {}s (one may still be opening its projects, or be stuck before it listens); see {}",
-                START_DEADLINE.as_secs(),
-                paths.log_path().display()
-            );
+            let log = paths.log_path();
+            return Err(match classify(paths, &bootstrap, &unanswered)? {
+                LockHeld::Named(daemon) => daemon.into(),
+                LockHeld::Unnamed => NotStarted::Unnamed { log }.into(),
+                LockHeld::Free if spawned => NotStarted::Ended { log }.into(),
+                LockHeld::Free => anyhow!(
+                    "no daemon answered within {}s (one may still be opening its projects, or be stuck before it listens); see {}",
+                    START_DEADLINE.as_secs(),
+                    log.display()
+                ),
+            });
         }
         tokio::time::sleep(POLL).await;
     }
 }
 
-/// The daemon the port file names, when the process on the file's port is that daemon (its
-/// `/health` carries the file's instance id and pid) and lists its projects. Anything short of
-/// that counts as no daemon: no file, nothing listening, or, after a crash left the file behind,
-/// another program or another daemon (a scratch one, another user's) on that port now.
-async fn answering(paths: &Paths) -> Result<Option<Running>> {
-    let Some(pf) = read_port_file(&paths.port_file())? else { return Ok(None) };
+/// What a launcher that waited the whole start deadline for the bootstrap lock reports: the
+/// daemon, should one answer now; else the daemon the lifetime lock's record names, behind a probe
+/// that has just failed; else that another command has held the bootstrap lock all along.
+async fn gave_up_on_bootstrap(paths: &Paths) -> Result<Running> {
+    let unanswered = match probe(paths).await? {
+        Probe::Answering(running) => return Ok(running),
+        Probe::Unanswered(unanswered) => unanswered,
+    };
+    Err(match not_answering(paths, &unanswered)? {
+        Some(daemon) => daemon.into(),
+        None => NotStarted::BootstrapHeld { path: paths.bootstrap_lock() }.into(),
+    })
+}
+
+/// Why a command found no daemon answering and has none to work with.
+#[derive(Debug, thiserror::Error)]
+pub enum NotStarted {
+    /// Autostart is off, and no daemon runs.
+    #[error("no daemon is running and autostart is off")]
+    AutostartOff,
+    /// Autostart is off, and another command is starting the daemon or looking for it.
+    #[error("no daemon answers yet and autostart is off: {}", Busy)]
+    BusyAndAutostartOff,
+    /// At the start deadline, a process that names no daemon holds the lifetime lock.
+    #[error("{}; see {}", Unnamed, .log.display())]
+    Unnamed { log: PathBuf },
+    /// The daemon this command started ended before it answered.
+    #[error("the daemon this command started ended before it answered; see {}", .log.display())]
+    Ended { log: PathBuf },
+    /// Another command held the bootstrap lock for the whole start deadline.
+    #[error("another fwd command has held the bootstrap lock at {} for all of {}s, starting the daemon or looking for it; ask again", .path.display(), START_DEADLINE.as_secs())]
+    BootstrapHeld { path: PathBuf },
+}
+
+/// What asking the daemon the port file names found.
+pub(super) enum Probe {
+    Answering(Running),
+    Unanswered(Unanswered),
+}
+
+/// No daemon answered as the port file names it.
+#[derive(Debug)]
+pub(super) enum Unanswered {
+    /// There is no port file.
+    NoPortFile,
+    /// The port file names a daemon that gave no valid answer, for `why`.
+    Failed { pf: PortFile, why: String },
+}
+
+/// Asks the daemon the port file names who it is (its `/health` must carry the file's instance id
+/// and pid) and for its projects. Anything short of both is no daemon answering, with the reason:
+/// no file, nothing listening, or, after a crash left the file behind, another program or another
+/// daemon (a scratch one, another user's) on that port now.
+async fn probe(paths: &Paths) -> Result<Probe> {
+    let Some(pf) = read_port_file(&paths.port_file())? else { return Ok(Probe::Unanswered(Unanswered::NoPortFile)) };
     let answer = async {
         let health = identify(&pf).await?;
         Ok::<_, anyhow::Error>((health.build, hosted_projects(&pf).await?))
     };
-    match answer.await {
-        Ok((build, projects)) => Ok(Some(Running { pf, projects, build })),
-        Err(e) => {
-            tracing::debug!(port = pf.port, error = %e, "port file present but its daemon did not answer");
-            Ok(None)
-        }
-    }
+    Ok(match answer.await {
+        Ok((build, projects)) => Probe::Answering(Running { pf, projects, build }),
+        Err(e) => Probe::Unanswered(Unanswered::Failed { why: format!("{e:#}"), pf }),
+    })
+}
+
+/// The daemon the port file names, when it answers ([`probe`]).
+async fn answering(paths: &Paths) -> Result<Option<Running>> {
+    Ok(match probe(paths).await? {
+        Probe::Answering(running) => Some(running),
+        Probe::Unanswered(_) => None,
+    })
 }
 
 /// What a daemon says about itself on `/health`: enough to tell the daemon a port file names
@@ -635,20 +699,6 @@ pub async fn host(pf: &PortFile, project: &NamedProject) -> Result<()> {
     }
 }
 
-/// The bootstrap lock, waited for up to the start deadline. A launcher that holds it that long is
-/// waiting on the daemon that holds the lifetime lock, so at the deadline, when the lifetime lock
-/// names that daemon and no command reaches it, the error is that daemon's ([`NotAnswering`]),
-/// as the launcher holding the bootstrap lock gives it, and not the wait's.
-async fn take_bootstrap(paths: &Paths) -> Result<File> {
-    if let Some(lock) = wait_for_lock(&paths.bootstrap_lock(), START_DEADLINE).await? {
-        return Ok(lock);
-    }
-    if let Some(daemon) = not_answering(paths)? {
-        return Err(daemon.into());
-    }
-    bail!("timed out waiting for the bootstrap lock at {}", paths.bootstrap_lock().display())
-}
-
 /// The lock at `path`, once it is free; `None` once `deadline` has passed without it.
 async fn wait_for_lock(path: &Path, deadline: Duration) -> Result<Option<File>> {
     let until = Instant::now() + deadline;
@@ -696,13 +746,27 @@ pub async fn status(paths: &Paths) -> Result<Option<Running>> {
     answering(paths).await
 }
 
-/// Asks the running daemon to stop listening and exit; returns false when none answered, whether
-/// none runs or another process holds the lifetime lock ([`find`]). Waits for its process to end,
-/// not for the lifetime lock to come free: the moment the lock is free, another command may start a
-/// successor that takes it, and probing the lock could take it from a daemon that is starting.
+/// Stops this runtime directory's daemon, as [`find`] finds it: true once it has stopped, false
+/// when none runs, and an error, stopping nothing, while a process holds the lifetime lock that no
+/// command reaches or that takes no stop ([`StoppedNothing`]).
 pub async fn stop(paths: &Paths) -> Result<bool> {
-    let Some(Running { pf, .. }) = answering(paths).await? else { return Ok(false) };
-    let Some((status, body)) = http(&pf, "POST", "/stop", None, CONNECT_TIMEOUT).await? else { return Ok(false) };
+    match find(paths).await? {
+        Found::Answering(running) => stop_running(paths, &running).await,
+        found => StoppedNothing::for_found(found),
+    }
+}
+
+/// Asks `running`, a daemon found answering, to stop listening and exit, and waits for its process
+/// to end, not for the lifetime lock to come free: the moment the lock is free, another command may
+/// start a successor that takes it. When the request reaches no daemon, it finds the daemon again
+/// and reports by that ([`StoppedNothing::for_found`]).
+async fn stop_running(paths: &Paths, running: &Running) -> Result<bool> {
+    let pf = &running.pf;
+    let answer = match http(pf, "POST", "/stop", None, CONNECT_TIMEOUT).await {
+        Err(e) if e.is::<NoAnswer>() => None,
+        answer => answer?,
+    };
+    let Some((status, body)) = answer else { return StoppedNothing::for_found(find(paths).await?) };
     if status != 200 {
         bail!("the daemon refused to stop: {}", first_line(&body));
     }
@@ -754,12 +818,12 @@ pub async fn set_bind(paths: &Paths, bind: Bind, autostart: &Autostart) -> Resul
         DaemonConfig::update(paths, |config| config.bind = bind)?;
     }
     let mut stopped = match status(paths).await? {
-        Some(running) if running.pf.bind != bind => stop(paths).await?,
+        Some(running) if running.pf.bind != bind => stop_running(paths, &running).await?,
         _ => false,
     };
     let mut running = ensure_running(paths, autostart).await?;
     if running.pf.bind != bind {
-        stopped |= stop(paths).await?;
+        stopped |= stop_running(paths, &running).await?;
         running = ensure_running(paths, autostart).await?;
         if running.pf.bind != bind {
             bail!(
@@ -850,8 +914,9 @@ struct NoAnswer {
 /// One HTTP/1.1 request on the daemon's listener over loopback, without an HTTP client crate:
 /// the routes besides the Ankurah sockets are local control, not data. The Host carries the
 /// port (the daemon checks it), and the request comes from loopback, which the control routes
-/// require. `None` when nothing is listening; a `NoAnswer` error when the answer does not
-/// arrive within `timeout`.
+/// require. `None` when nothing is listening; a `NoAnswer` error when the connection, the request
+/// and the whole answer do not get through within `timeout`, so that a daemon whose queue of
+/// connections is full, or that never answers, ends the wait as one that does not answer.
 async fn http(
     pf: &PortFile,
     method: &str,
@@ -860,20 +925,23 @@ async fn http(
     timeout: Duration,
 ) -> Result<Option<(u16, String)>> {
     let port = pf.port;
-    let mut stream = match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-        Ok(s) => s,
-        Err(_) => return Ok(None),
-    };
     let body = body.unwrap_or("");
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(request.as_bytes()).await?;
-    let mut response = Vec::new();
-    if tokio::time::timeout(timeout, stream.read_to_end(&mut response)).await.is_err() {
-        return Err(NoAnswer { method: method.into(), path: path.into(), port, timeout }.into());
-    }
+    let exchange = async {
+        let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else { return Ok(None) };
+        stream.write_all(request.as_bytes()).await?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+        Ok::<_, std::io::Error>(Some(response))
+    };
+    let response = match tokio::time::timeout(timeout, exchange).await {
+        Err(_) => return Err(NoAnswer { method: method.into(), path: path.into(), port, timeout }.into()),
+        Ok(response) => response.with_context(|| format!("{method} {path} on port {port}"))?,
+    };
+    let Some(response) = response else { return Ok(None) };
     let text = String::from_utf8_lossy(&response).into_owned();
     let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();

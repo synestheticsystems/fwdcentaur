@@ -2577,6 +2577,7 @@ async fn run_cli() -> Result<()> {
                         }
                         daemon::Found::Unreached(daemon) => daemon.to_string(),
                         daemon::Found::Unnamed => daemon::Unnamed.to_string(),
+                        daemon::Found::Busy => daemon::Busy.to_string(),
                         daemon::Found::Absent => "no daemon is answering".to_string(),
                     };
                     eprintln!("{said}");
@@ -2614,14 +2615,7 @@ async fn run_cli() -> Result<()> {
                     Ok(())
                 }
                 DaemonCommand::Stop => {
-                    let said = match daemon::find(&paths).await? {
-                        daemon::Found::Answering(_) if daemon::stop(&paths).await? => "stopped",
-                        daemon::Found::Answering(_) | daemon::Found::Absent => "no daemon was running",
-                        daemon::Found::Unreached(daemon) => {
-                            return Err(daemon::StoppedNothing::Unreached(daemon).into())
-                        }
-                        daemon::Found::Unnamed => return Err(daemon::StoppedNothing::Unnamed(daemon::Unnamed).into()),
-                    };
+                    let said = if daemon::stop(&paths).await? { "stopped" } else { "no daemon was running" };
                     println!("{said}");
                     Ok(())
                 }

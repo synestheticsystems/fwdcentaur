@@ -65,7 +65,7 @@ async fn a_daemon_whose_port_file_is_gone_is_named_with_the_line_that_ends_it() 
     std::fs::remove_file(paths.port_file())?;
     let kill = format!("  kill {}", pf.pid);
     let named = format!(
-        "no command reaches the daemon (pid {}), which holds the daemon lock: it has listened on port {}, but its port file is gone; end it, and the next command starts a daemon that answers:\n{kill}\n",
+        "no command reaches the daemon (pid {}), which holds the daemon lock: it has listened on port {}, but its port file is gone; ending it lets the next command start a fresh daemon:\n{kill}\n",
         pf.pid, pf.port
     );
     let status = fwd(&repo, &paths, &["daemon", "status"]).output().await?;
@@ -114,22 +114,27 @@ impl Drop for EndsUnreached {
 
 /// A process that holds the daemon lock and names no daemon there, as a daemon of an earlier build
 /// does, is not taken for no daemon: `fwd daemon status` says so and exits 7, and `fwd daemon stop`
-/// stops nothing and fails saying so, rather than that no daemon was running. This test's process
+/// stops nothing and fails saying so, rather than that no daemon was running, and so does a command
+/// run with `--no-autostart`. This test's process
 /// plays that daemon, holding the lock with no record in it, which the commands it runs find held.
 #[tokio::test]
 async fn a_process_that_holds_the_lock_naming_no_daemon_is_not_taken_for_none() -> Result<()> {
     let dir = Scratch::new()?;
     let paths = dir.paths("run", "data");
-    paths.ensure()?;
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo)?;
+    project::init(&paths, &repo, project::InitOptions { name: Some("unnamed"), ..Default::default() })?;
     let _held = daemon::try_lock(&paths.lifetime_lock())?.ok_or_else(|| anyhow!("the daemon lock is held"))?;
-    let unnamed = "a process holds the daemon lock but names no daemon there that runs: a daemon of an earlier build of fwd, one that has only just taken the lock, or `fwd admin restore`; `pgrep -fl 'fwd daemon serve'` lists the daemons that run";
+    let unnamed = "a process holds the daemon lock but names no daemon there that runs: a daemon of an earlier build of fwd, one that has only just taken the lock or cannot name itself, or `fwd admin restore`; `pgrep -fl 'fwd daemon serve'` lists the daemons that run";
 
-    let status = fwd(dir.path(), &paths, &["daemon", "status"]).output().await?;
+    let status = fwd(&repo, &paths, &["daemon", "status"]).output().await?;
     assert_eq!((status.status.code(), String::from_utf8(status.stderr)?), (Some(7), format!("{unnamed}\n")));
-    let stopped = fwd(dir.path(), &paths, &["daemon", "stop"]).output().await?;
+    let stopped = fwd(&repo, &paths, &["daemon", "stop"]).output().await?;
     let stderr = String::from_utf8(stopped.stderr)?;
     assert_eq!(stopped.status.code(), Some(1), "fwd daemon stop said:\n{stderr}");
     assert_eq!(stderr, format!("Error: `fwd daemon stop` stopped nothing: {unnamed}\n"));
+    let listed = fwd(&repo, &paths, &["--no-autostart", "task", "list"]).output().await?;
+    assert_eq!((listed.status.code(), String::from_utf8(listed.stderr)?), (Some(1), format!("Error: {unnamed}\n")));
     Ok(())
 }
 
@@ -167,7 +172,7 @@ async fn a_daemon_stuck_before_it_listens_is_named() -> Result<()> {
     let status = fwd(dir.path(), &paths, &["daemon", "status"]).output().await?;
     assert_eq!(
         (status.status.code(), String::from_utf8(status.stderr)?),
-        (Some(7), format!("no command reaches the daemon (pid {pid}), which holds the daemon lock: it has not begun to listen: it is still opening its projects, or stuck before it listens; end it, and the next command starts a daemon that answers:\n  kill {pid}\n"))
+        (Some(7), format!("no command reaches the daemon (pid {pid}), which holds the daemon lock: it has not begun to listen: it is still opening its projects, or stuck before it listens; ending it lets the next command start a fresh daemon:\n  kill {pid}\n"))
     );
     stuck.kill().await?;
     Ok(())
