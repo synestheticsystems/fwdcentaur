@@ -350,10 +350,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let never_made = Paths { runtime_dir: dir.path().join("never made"), data_dir: dir.path().join("data") };
         assert!(matches!(find(&never_made).await.expect("found"), Found::Absent), "no runtime folder, so no lock");
-        let paths = paths(dir.path());
-        drop(try_lock(&paths.lifetime_lock()).expect("the lock").expect("free"));
-        assert!(matches!(find(&paths).await.expect("found"), Found::Absent), "a lock no one holds");
+        // Made, never locked: a lock this process has let go of can stay held for a moment by a
+        // child another test is spawning, which starts with a copy of this process's open files.
+        let free = paths(&dir.path().join("free"));
+        std::fs::File::create(free.lifetime_lock()).expect("the lock file");
+        assert!(matches!(find(&free).await.expect("found"), Found::Absent), "a lock no one holds");
 
+        let paths = paths(&dir.path().join("held"));
         let lock = try_lock(&paths.lifetime_lock()).expect("the lock").expect("free");
         assert!(matches!(find(&paths).await.expect("found"), Found::Unnamed), "a held lock with no record");
         let this = LockHolder::this_process().expect("this process");
@@ -374,7 +377,7 @@ mod tests {
     async fn the_lifetime_lock_is_tried_only_under_the_bootstrap_lock() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let paths = paths(dir.path());
-        drop(try_lock(&paths.lifetime_lock()).expect("the lock").expect("free"));
+        std::fs::File::create(paths.lifetime_lock()).expect("the lock file");
         let _bootstrap = try_lock(&paths.bootstrap_lock()).expect("the bootstrap lock").expect("free");
         let error = find(&paths).await.expect_err("the bootstrap lock stays held");
         assert!(error.to_string().starts_with("timed out waiting for the bootstrap lock"), "{error:#}");
