@@ -1,11 +1,13 @@
 //! Intention records (`fwd_core::intentions`) on one store in memory holding two projects, alpha
-//! and beta: an intention records whose words it holds, and only they change them.
+//! and beta: an intention holds the words of whoever it was written down for, and only they change
+//! them or end it.
 
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::IntentionStatus;
+use ankurah_commons::intention_graph::{Intention, IntentionStatus};
+use ankurah_commons::records::{AttributionView, ClosureView, LastEditView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
-use fwd_core::intentions::{self, NewIntention};
+use fwd_core::intentions::{self, Parts};
 use fwd_core::model::*;
 use fwd_core::ops;
 use fwd_core::project_graph::ProjectGraph;
@@ -14,7 +16,6 @@ use std::sync::Arc;
 /// alpha's people, Ines and Omar, and its agent impl-tide; beta's agent impl-reef.
 struct World {
     alpha: ProjectGraph,
-    beta: ProjectGraph,
     ines: EntityId,
     omar: EntityId,
     tide: EntityId,
@@ -31,14 +32,20 @@ async fn world() -> Result<World> {
     let agent = |graph, handle: &'static str| ops::ensure_principal(graph, handle, handle, PrincipalKind::Agent, None);
     let (ines, omar) = (person(&alpha, "ines").await?, person(&alpha, "omar").await?);
     let (tide, reef) = (agent(&alpha, "impl-tide").await?, agent(&beta, "impl-reef").await?);
-    Ok(World { alpha, beta, ines, omar, tide, reef })
+    Ok(World { alpha, ines, omar, tide, reef })
 }
 
-/// An intention titled `title` that `by` records in `graph`'s project, in `said_by`'s words.
-async fn intention(graph: &ProjectGraph, by: EntityId, title: &str, said_by: Option<EntityId>) -> Result<EntityId> {
+/// A committed intention titled `title` that `by` records in alpha, in `said_by`'s words.
+async fn intention(w: &World, by: EntityId, title: &str, said_by: Option<EntityId>) -> Result<(PlacementView, Parts)> {
     let words = format!("{title}, in the speaker's words");
-    let new = NewIntention { title: title.into(), words, said_by, status: IntentionStatus::Committed };
-    intentions::create(graph, by, new).await
+    let new = Intention { title: title.into(), words, status: IntentionStatus::Committed };
+    intentions::create(&w.alpha, by, new, said_by).await
+}
+
+/// Whose words the intention `record` holds.
+async fn speaker(w: &World, (placement, (_, creation)): &(PlacementView, Parts)) -> Result<EntityId> {
+    let attribution = w.alpha.component_of::<AttributionView>(placement).await?;
+    Ok(intentions::speaker(creation, attribution.as_ref())?)
 }
 
 /// The error `result` failed with, as text.
@@ -47,47 +54,58 @@ fn refusal<T: std::fmt::Debug>(result: Result<T>) -> String {
 }
 
 #[tokio::test]
-async fn an_intention_records_whose_words_it_holds_and_only_they_change_or_close_it() -> Result<()> {
+async fn an_intention_written_down_for_a_person_holds_their_words_and_an_agent_is_never_named_its_speaker() -> Result<()>
+{
     let w = world().await?;
-    let theirs = intention(&w.alpha, w.tide, "Readers keep their place", Some(w.ines)).await?;
-    let own = intention(&w.alpha, w.tide, "Builds stay under a minute", None).await?;
-    let read = intentions::intention(&w.alpha, theirs).await?;
-    assert_eq!((read.authorship.written_by, read.authorship.speaker), (w.tide, w.ines), "written down for Ines");
-    assert_eq!(intentions::intention(&w.alpha, own).await?.authorship.speaker, w.tide, "in its writer's words");
-    let said_by_an_agent = NewIntention {
-        title: "t".into(),
-        words: String::new(),
-        said_by: Some(w.reef),
-        status: IntentionStatus::Wished,
-    };
-    assert!(refusal(intentions::create(&w.alpha, w.tide, said_by_an_agent).await).contains("is an agent"));
+    let theirs = intention(&w, w.tide, "Readers keep their place", Some(w.ines)).await?;
+    let (_, (made, creation)) = &theirs;
+    assert_eq!(made.title()?, "Readers keep their place", "the views of the record made");
+    assert_eq!((*creation.created_by()?, speaker(&w, &theirs).await?), (w.tide, w.ines), "written down for Ines");
+    let own = intention(&w, w.tide, "Builds stay under a minute", None).await?;
+    assert_eq!(speaker(&w, &own).await?, w.tide, "in its writer's words");
 
-    let same = (Some(read.title.as_str()), Some(read.words.as_str()));
-    assert!(!intentions::reword(&w.alpha, w.ines, theirs, same.0, same.1, None).await?, "nothing changed");
-    let words = Some("the list stays where I left it");
-    assert!(refusal(intentions::reword(&w.alpha, w.tide, theirs, None, words, None).await).contains("only they change"));
-    assert!(intentions::reword(&w.alpha, w.tide, theirs, None, words, Some(w.ines)).await?, "in her words");
-    let reworded = intentions::intention(&w.alpha, theirs).await?;
-    assert_eq!(reworded.words, "the list stays where I left it");
-    assert_eq!(reworded.authorship.edited.and_then(|e| e.by), Some(w.tide), "who wrote the change down");
-    intentions::reword(&w.alpha, w.ines, theirs, Some("Readers keep their places"), None, None).await?;
-    assert_eq!(intentions::intention(&w.alpha, theirs).await?.title, "Readers keep their places", "its title too");
+    let for_an_agent = Intention { title: "t".into(), words: String::new(), status: IntentionStatus::Wished };
+    assert!(refusal(intentions::create(&w.alpha, w.tide, for_an_agent, Some(w.reef)).await).contains("is an agent"));
+    Ok(())
+}
 
-    let withdrawn = intentions::close(&w.alpha, w.ines, theirs, IntentionStatus::Withdrawn, None, None).await;
-    assert!(refusal(withdrawn).contains("--reason"));
-    let by_omar = intentions::close(&w.alpha, w.omar, theirs, IntentionStatus::Fulfilled, None, None).await;
+#[tokio::test]
+async fn only_the_speaker_or_someone_writing_down_their_words_rewords_or_closes_an_intention() -> Result<()> {
+    let w = world().await?;
+    let theirs = intention(&w, w.tide, "Readers keep their place", Some(w.ines)).await?;
+    let (placement, (it, _)) = &theirs;
+    let (title, words) = (it.title()?, it.words()?);
+    let same = intentions::reword(&w.alpha, w.ines, &theirs, Some(&title), Some(&words), None).await?;
+    assert!(!same, "nothing changed");
+    assert!(w.alpha.component_of::<LastEditView>(placement).await?.is_none(), "and nothing was written");
+
+    let new_words = Some("the list stays where I left it");
+    let by_tide = intentions::reword(&w.alpha, w.tide, &theirs, None, new_words, None).await;
+    assert!(refusal(by_tide).contains("only they change"));
+    assert!(intentions::reword(&w.alpha, w.tide, &theirs, None, new_words, Some(w.ines)).await?, "in her words");
+    assert_eq!(it.words()?, "the list stays where I left it", "the view handed in reads the change");
+    let edit = w.alpha.component_of::<LastEditView>(placement).await?.expect("reworded");
+    assert_eq!(edit.edited_by()?.map(|by| *by), Some(w.tide), "who wrote the change down");
+
+    let by_omar = intentions::close(&w.alpha, w.omar, &theirs, IntentionStatus::Fulfilled, None, None).await;
     assert!(refusal(by_omar).contains("only they change"));
-    intentions::close(&w.alpha, w.ines, theirs, IntentionStatus::Fulfilled, Some("shipped".into()), None).await?;
-    let closed = intentions::intention(&w.alpha, theirs).await?;
-    assert_eq!(
-        (closed.status, closed.closed.and_then(|c| c.reason)),
-        (IntentionStatus::Fulfilled, Some("shipped".into()))
-    );
-    let again = intentions::close(&w.alpha, w.ines, theirs, IntentionStatus::Withdrawn, Some("no".into()), None).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_ended_intention_is_neither_reworded_nor_ended_again_and_a_withdrawal_says_why() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w, w.ines, "Readers keep their place", None).await?;
+    let withdrawn = intentions::close(&w.alpha, w.ines, &it, IntentionStatus::Withdrawn, None, None).await;
+    assert!(refusal(withdrawn).contains("--reason"));
+
+    intentions::close(&w.alpha, w.ines, &it, IntentionStatus::Fulfilled, Some("shipped".into()), None).await?;
+    let (placement, (view, _)) = &it;
+    let closure = w.alpha.component_of::<ClosureView>(placement).await?.expect("closed");
+    assert_eq!((view.status()?, closure.reason()?), (IntentionStatus::Fulfilled, Some("shipped".into())));
+    let again = intentions::close(&w.alpha, w.ines, &it, IntentionStatus::Withdrawn, Some("no".into()), None).await;
     assert!(refusal(again).contains("fulfilled already"));
-    assert!(
-        refusal(intentions::reword(&w.alpha, w.ines, theirs, None, Some("more"), None).await).contains("not reworded")
-    );
-    assert!(intentions::intentions(&w.beta).await?.is_empty(), "beta's list holds beta's alone");
+    let reworded = intentions::reword(&w.alpha, w.ines, &it, None, Some("more"), None).await;
+    assert!(refusal(reworded).contains("not reworded"));
     Ok(())
 }

@@ -5,10 +5,10 @@
 //! changed in the project that made it, whichever projects its ends are in.
 
 use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::IntentionStatus;
+use ankurah_commons::intention_graph::{Intention, IntentionStatus};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
-use fwd_core::intentions::{self, NewIntention};
+use fwd_core::intentions;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateScope, CreateTask, Kind, MessageContext};
 use fwd_core::project_graph::{ProjectGraph, ProjectGraphError, Whose};
@@ -326,15 +326,11 @@ async fn a_start_of_an_id_names_a_record_of_the_commands_project_before_one_of_a
     Ok(())
 }
 
-/// An intention titled `title` that `by` records in `graph`'s project, in its own words.
+/// The id of an intention titled `title` that `by` records in `graph`'s project, in its own words.
 async fn intention(graph: &ProjectGraph, by: EntityId, title: &str) -> Result<EntityId> {
     let words = format!("{title}, in the speaker's words");
-    intentions::create(
-        graph,
-        by,
-        NewIntention { title: title.into(), words, said_by: None, status: IntentionStatus::Committed },
-    )
-    .await
+    let new = Intention { title: title.into(), words, status: IntentionStatus::Committed };
+    Ok(intentions::create(graph, by, new, None).await?.0.id())
 }
 
 /// An intention, a record placed in a project rather than fwd's own, is named by the first eight
