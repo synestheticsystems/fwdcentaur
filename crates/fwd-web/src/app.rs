@@ -254,7 +254,7 @@ pub fn BootError(reason: String) -> impl IntoView {
                             "Other projects: "
                             {others
                                 .into_iter()
-                                .map(|p| view! { <a href=format!("?p={}", p.id)>{p.name}</a> " " })
+                                .map(|p| view! { <a href=format!("?{}={}", fwd_core::route::PROJECT_PARAM, p.id)>{p.name}</a> " " })
                                 .collect::<Vec<_>>()}
                         </p>
                     }

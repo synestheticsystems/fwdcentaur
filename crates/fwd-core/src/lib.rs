@@ -37,6 +37,7 @@ pub mod project_graph;
 pub mod query;
 pub mod reason;
 pub mod references;
+pub mod route;
 pub mod routing;
 pub mod rules;
 #[cfg(feature = "native")]
@@ -44,6 +45,7 @@ pub mod sidecar;
 pub mod subject;
 #[cfg(feature = "native")]
 pub mod task_move;
+pub mod working_set;
 
 /// Milliseconds since the Unix epoch, wall clock. Informational only: Ankurah's causal ordering
 /// decides merges, not these timestamps.

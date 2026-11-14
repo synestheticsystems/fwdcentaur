@@ -26,6 +26,15 @@ pub fn with_string(predicate: &str, s: &str) -> Result<Selection<Parsed>> {
     Ok(selection)
 }
 
+/// `predicate` with each `?` bound, in order, to a string literal of `values`, whatever characters
+/// each holds.
+pub fn with_strings(predicate: &str, values: &[&str]) -> Result<Selection<Parsed>> {
+    let mut selection = parse_selection(predicate)?;
+    selection.predicate =
+        selection.predicate.populate(values.iter().map(|s| Expr::Literal(Value::String(s.to_string()))))?;
+    Ok(selection)
+}
+
 /// A string literal safe to splice into a predicate: only the characters handles, statuses and
 /// base64 ids use are allowed, so no quoting is needed.
 pub fn literal(s: &str) -> Result<String> {
