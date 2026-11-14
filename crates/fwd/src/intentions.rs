@@ -361,9 +361,9 @@ fn short(v: &Value) -> String {
     text(v, "id").chars().take(8).collect()
 }
 
-/// `words` indented under a line, each of its lines.
+/// `words` on the lines after a heading, each indented; nothing for no words.
 fn indented(words: &str) -> String {
-    words.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+    words.lines().map(|l| format!("\n    {l}")).collect()
 }
 
 /// Who wrote a record's words down, whose they are, and when, as a line: `@ines, written down by
@@ -384,7 +384,7 @@ fn written_line(v: &Value) -> String {
 fn intention_text(v: &Value) -> String {
     let project = v["project"].as_str().map(|p| format!(" in {p}")).unwrap_or_default();
     let mut out = format!(
-        "{} {} [{}]{project}\n  {}:\n{}",
+        "{} {} [{}]{project}\n  {}:{}",
         short(v),
         text(v, "title"),
         text(v, "status"),
@@ -403,7 +403,7 @@ fn reading_text(v: &Value) -> String {
     let of: String = text(v, "of").chars().take(8).collect();
     let (stance, revision) = (text(v, "stance"), text(v, "revision"));
     format!(
-        "{} {stance}, reading {of}: {}, revision {revision}\n{}",
+        "{} {stance}, reading {of}: {}, revision {revision}:{}",
         short(v),
         written_line(v),
         indented(text(v, "words"))
@@ -422,7 +422,7 @@ fn works_under_text(v: &Value) -> String {
             Some(_) => {
                 let r = &w["reading"];
                 block.push_str(&format!(
-                    "\n  your reading {} ({}, revision {}):\n{}",
+                    "\n  your reading {} ({}, revision {}):{}",
                     short(r),
                     text(r, "stance"),
                     text(r, "revision"),
