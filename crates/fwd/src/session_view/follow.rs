@@ -19,7 +19,7 @@ use super::{join, line_of, page, write_line, Viewing};
 use crate::BUILD;
 use ankurah::signals::{Subscribe, SubscriptionGuard};
 use ankurah_websocket_client::ConnectionState;
-use anyhow::Result;
+use anyhow::{anyhow, Context as _, Result};
 use fwd_core::daemon::{self, Autostart, Client, Lost};
 use fwd_core::live_read::{Listening, LiveRead};
 use fwd_core::project::{NamedProject, Paths};
@@ -47,14 +47,17 @@ pub(super) async fn run(viewing: Viewing, paths: Paths, autostart: Autostart) ->
     let mut following = Following { viewing, paths, changed: Arc::new(Notify::new()), printed: Printed::default() };
     let mut joined = match join(&following.paths, &autostart).await {
         Ok(client) => Some(following.joined(client)),
-        Err(_) => None,
+        Err(error) => {
+            eprintln!("fwd: the daemon could not be joined ({error:#}); the view follows it once it answers");
+            None
+        }
     };
     loop {
         let session = match joined.take() {
             Some(session) => session,
             None => {
                 following.printed.document(following.printed.last().out_of_reach())?;
-                following.rejoin().await?
+                following.rejoin().await
             }
         };
         following.while_joined(session).await?;
@@ -125,6 +128,7 @@ impl Following {
                     Ok(())
                 };
                 tokio::select! {
+                    // Waiting fails only when the daemon is out of reach.
                     waited = session.client.while_connected(changed) => match waited {
                         Ok(()) => break,
                         Err(_) => return Ok(()),
@@ -160,22 +164,26 @@ impl Following {
 
     /// Joins the daemon again once it answers, never starting one: one stopped on purpose, to
     /// install a new build say, stays stopped until something else starts it.
-    async fn rejoin(&self) -> Result<Joined> {
+    async fn rejoin(&self) -> Joined {
         let mut wait = FIRST_RETRY;
         loop {
             tokio::time::sleep(wait).await;
-            if let Ok(Some(running)) = daemon::status(&self.paths).await {
-                ends_on_another_build(running.build.as_deref());
-                let hosted = running.projects.into_iter().find(|p| p.error.is_none());
-                if let Some(project) = hosted {
-                    let project = NamedProject { id: project.id, name: project.name };
-                    if let Ok(client) = daemon::ensure_daemon(&self.paths, &project, Autostart::Never).await {
-                        return Ok(self.joined(client));
-                    }
-                }
+            match self.answering().await {
+                Ok(client) => return self.joined(client),
+                Err(error) => tracing::debug!(error = format!("{error:#}"), "the view could not join the daemon"),
             }
             wait = (wait * 2).min(MAX_RETRY);
         }
+    }
+
+    /// A client of the daemon, when one answers, through the first project it hosts; it ends the
+    /// process when that daemon runs another build ([`ends_on_another_build`]).
+    async fn answering(&self) -> Result<Client> {
+        let running = daemon::status(&self.paths).await?.ok_or_else(|| anyhow!("no daemon answers"))?;
+        ends_on_another_build(running.build.as_deref());
+        let hosted = running.projects.into_iter().find(|p| p.error.is_none()).context("the daemon hosts no project")?;
+        let project = NamedProject { id: hosted.id, name: hosted.name };
+        daemon::ensure_daemon(&self.paths, &project, Autostart::Never).await
     }
 }
 

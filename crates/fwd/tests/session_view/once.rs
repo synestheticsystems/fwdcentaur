@@ -2,19 +2,22 @@
 
 use super::*;
 
-/// The session's own thread names itself `lead-sam` in alpha and in beta, and a subagent names
-/// itself `impl-sam` in alpha. In alpha, lead-sam asks the person something, asks impl-sam
-/// something and asks no one in particular something, works a task the person gave it, and is asked
-/// something by the person; impl-sam asks the person something; in beta, lead-sam holds a task. The
-/// view lists the own thread's groups first, by project, then the subagent's, each with what waits
-/// on the person, what it holds and what waits on others, the unread notifications counted on the
-/// group, and the subagent's group open since something in it waits on the person.
+/// The session's own thread names itself `lead-sam` in alpha and in beta, a subagent names itself
+/// `impl-sam` in alpha, and another subagent names itself and retires there. In alpha, lead-sam
+/// asks the person something, asks impl-sam something and asks no one in particular something,
+/// works a task the person gave it, and is asked something by the person; impl-sam asks the person
+/// something; in beta, lead-sam holds a task. The view lists the own thread's groups first, by
+/// project, then the subagent at work's, each with what waits on the person, what it holds and what
+/// waits on others, the unread notifications counted on the group, and the subagent's group open
+/// since something in it waits on the person.
 #[test]
 fn the_view_lists_each_principal_of_the_session_with_what_waits_on_the_person_first() -> Result<()> {
     let s = Scratch::new()?;
     s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
     s.json(&s.beta, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
     s.json(&s.alpha, Some("a1"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    s.json(&s.alpha, Some("a2"), &["principal", "add", "impl-done", "--role", "implementer"])?;
+    s.json(&s.alpha, Some("a2"), &["principal", "retire", "impl-done"])?;
     let what = "When the daemon restarts, a command in flight fails.\n\nRetry it once the daemon answers.";
     let task = s.made(&s.alpha, None, &["task", "create", "Retry on disconnect", "--what", what])?;
     s.json(&s.alpha, None, &["task", "assign", &task, "lead-sam"])?;

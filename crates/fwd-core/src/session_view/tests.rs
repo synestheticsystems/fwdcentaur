@@ -245,6 +245,57 @@ fn a_title_that_holds_the_whole_text_is_not_said_again_beneath_it() {
     );
 }
 
+/// Records that could not be read are said in the list they would stand in, by count, with no id:
+/// the questions asked of the principal and its tasks in what it holds, and the questions it asked,
+/// whose addressee is not known, in what waits on others, which then stands with no rows.
+#[test]
+fn records_that_could_not_be_read_are_said_in_their_list() {
+    let mut asked_of = section(SectionKind::AskedOfYou, Vec::new());
+    asked_of.unreadable = vec![id(40), id(41)];
+    let mut assigned = section(SectionKind::Assigned, vec![task(17, TaskStatus::Open, "", 0)]);
+    assigned.unreadable = vec![id(42)];
+    let mut asked = section(SectionKind::YouAsked, Vec::new());
+    asked.unreadable = vec![id(43)];
+    let view = held(vec![holding(20, "lead-sam", "main", vec![asked, asked_of, assigned], 0)], person(&[]));
+    let json = printed(&view.document(PAGE));
+    let lists: Vec<(&Value, &Value)> =
+        json["principals"][0]["sections"].as_array().unwrap().iter().map(|s| (&s["section"], &s["lines"])).collect();
+    assert_eq!(
+        lists,
+        [
+            (
+                &json!("holds"),
+                &json!([
+                    "fwd could not read 2 of the questions asked of it.",
+                    "fwd could not read 1 of the tasks assigned to it."
+                ])
+            ),
+            (
+                &json!("waits_on_others"),
+                &json!(["fwd could not read 1 of the questions it asked, so whom they ask is not known."])
+            ),
+        ]
+    );
+}
+
+/// What waits on the person, cut to keep the document short, gives the person's own Questions page
+/// in the principal's project, where every question asked of them is listed.
+#[test]
+fn what_waits_on_the_person_cut_short_gives_their_questions_page() {
+    let asked: Vec<Record> = (0..80)
+        .map(|n| {
+            let mut question = ask(n, "lead-sam", to(1, "tester"), 0);
+            question.text = "word ".repeat(400);
+            question
+        })
+        .collect();
+    let view = held(vec![holding(20, "lead-sam", "main", vec![section(SectionKind::YouAsked, asked)], 0)], person(&[]));
+    let document = view.document(PAGE);
+    let waits = &document.principals[0].sections[0];
+    assert!(waits.shown < waits.of, "{} of {}", waits.shown, waits.of);
+    assert_eq!(waits.more, Some(format!("?p={}#/questions?for=tester", project(0).uuid)));
+}
+
 /// A session no principal is bound to says so in one line; with the daemon out of reach, the last
 /// principals stay, with no page and a line saying so; a read that failed says why, and keeps them
 /// too.

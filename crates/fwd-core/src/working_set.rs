@@ -28,9 +28,9 @@ pub enum Holder<'a> {
     /// Every principal bound to the agent this subject names (`subject`), in every project of the
     /// node, as a command the agent runs acts as each of them in its project.
     Agent(&'a str),
-    /// Every principal bound to an agent of the Claude Code session this id names, in every project
-    /// of the node: those of its own thread first, then its subagents', each by its project's name,
-    /// then by its own name, then by id. What the person's view of a session shows
+    /// Every active principal bound to an agent of the Claude Code session this id names, in every
+    /// project of the node: those of its own thread first, then its subagents', each in the order
+    /// of their projects, then by name, then by id. What the person's view of a session shows
     /// (`session_view`).
     Session(&'a str),
     /// One principal of the graph's project, for a command that names a principal rather than an
@@ -192,13 +192,11 @@ pub enum Addressee {
 
 /// The working set of `holder`, read through `graph`, as `extent` says: one [`Holding`] per
 /// principal, the graph's own project first and the others by name, then by id, since two may
-/// share a name (a session's in the order [`Holder::Session`] says); none for an agent no active
-/// principal is bound to.
+/// share a name (a session's own thread's before its subagents', as [`Holder::Session`] says); none
+/// for an agent no active principal is bound to.
 pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> Result<Vec<Holding>> {
     let mut projects = graph.projects().await?;
-    // A session's view is the same whichever project the reader joined the daemon through.
-    let first = |p: &ProjectRecord| !matches!(holder, Holder::Session(_)) && p.record == graph.record();
-    projects.sort_by_key(|p| (!first(p), p.name.clone(), p.uuid));
+    projects.sort_by_key(|p| (p.record != graph.record(), p.name.clone(), p.uuid));
     let mut read = Read { projects: &projects, extent, handles: HashMap::new() };
     let mut held = Vec::new();
     match holder {
@@ -219,7 +217,7 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> 
                 let there = graph.graph_of_project(project);
                 let principals = ops::principals(&there).await?;
                 let mut bound: Vec<&PrincipalView> = subject::of_session(&principals, session);
-                bound.sort_by_key(|p| (p.handle().unwrap_or_default(), p.id()));
+                bound.sort_by_key(|p| (p.handle().ok(), p.id()));
                 for p in bound {
                     if !p.active()? {
                         continue;
@@ -532,13 +530,13 @@ struct TaskFacts {
 }
 
 fn task_facts(t: &TaskView) -> Result<TaskFacts> {
-    // A task made with a title alone may have no what stored at all, which says the same as an
-    // empty one.
-    let what = match t.what() {
-        Err(ankurah::property::PropertyError::Missing) => String::new(),
-        read => read?,
-    };
-    Ok(TaskFacts { title: t.title()?, what, status: t.status()?, priority: t.priority()?, created: t.created()? })
+    Ok(TaskFacts {
+        title: t.title()?,
+        what: ops::text(t.what())?,
+        status: t.status()?,
+        priority: t.priority()?,
+        created: t.created()?,
+    })
 }
 
 /// What a record says of itself, from which [`Read::record`] makes it.

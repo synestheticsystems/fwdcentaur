@@ -6144,7 +6144,7 @@ mod tests {
             ("anchor show".into(), vec![A, "--against", "HEAD"], vec![("id", id(A)), ("against", id("HEAD"))]),
             ("anchor resolve".into(), vec![A], vec![("id", id(A))]),
             ("ask".into(), vec!["--about", A, "why?"], vec![("about", some(A)), ("text", id("why?"))]),
-            ("reply".into(), vec![A, "done"], vec![("id", id(A)), ("text", id("done"))]),
+            ("reply".into(), vec![A, "done"], vec![("id", id(A)), ("text", some("done"))]),
             ("forward".into(), vec![A, "--to", "impl-bob"], vec![("id", id(A)), ("to", some("impl-bob"))]),
             ("message list".into(), vec!["--on", A, "--open"], vec![("on", some(A)), ("open", "true".into())]),
             ("message show".into(), vec![A], vec![("id", id(A))]),
@@ -6202,7 +6202,7 @@ mod tests {
             (
                 "reply".into(),
                 vec![A, "- done\n- tested", "--format", "json"],
-                vec![("text", id("- done\n- tested")), ("format", "Some(Json)".into())],
+                vec![("text", some("- done\n- tested")), ("format", "Some(Json)".into())],
             ),
             (
                 "forward".into(),
