@@ -19,7 +19,8 @@
 //! build than this process (at the first join, at each join again, and when the socket comes back
 //! on the same port, a check that could not be made being made again until it is), so that
 //! whatever runs it starts the build now installed; and its reader is gone (a write that finds its
-//! standard output closed, or, at each tick of its timers, the process that started it gone).
+//! standard output closed, or, at an empty line's tick or a wait before joining again, the process
+//! that started it gone).
 
 use super::{join, line_of, page, Viewing};
 use crate::BUILD;
@@ -153,7 +154,6 @@ impl Stream {
                     reading = Some(Box::pin(viewing.read(&client)));
                 }
                 () = sleep_until(failing.map(|(_, at)| at)), if reading.is_none() && failing.is_some() => {
-                    self.parent_here()?;
                     reading = Some(Box::pin(viewing.read(&client)));
                 }
                 _ = heartbeat.tick() => {

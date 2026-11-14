@@ -1,6 +1,6 @@
 //! The person the view is for, resolved once in every project and strictly, so that what waits on
 //! them and the Answer they press act as one principal the view checked, never as a name resolved
-//! again later. In each project the person is the one active person (a principal of kind human)
+//! again later. In each project the person is the one person (a principal of kind human)
 //! with their name; where two have it, the view says so and offers nothing to answer there, rather
 //! than taking either.
 
@@ -79,11 +79,7 @@ impl Person {
                 person.principals.insert(record, principal);
                 continue;
             }
-            let people: Vec<&PrincipalView> = naming::by_name(all, &handle, Some(PrincipalKind::Human))
-                .into_iter()
-                .filter(|p| p.active().unwrap_or(false))
-                .collect();
-            match people.as_slice() {
+            match naming::by_name(all, &handle, Some(PrincipalKind::Human)).as_slice() {
                 [] => {}
                 [one] => {
                     person.principals.insert(project.record, one.id());

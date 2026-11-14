@@ -101,8 +101,8 @@ fn the_view_lists_each_principal_of_the_session_with_what_waits_on_the_person_fi
 /// Answer replies to the question in the person's words, exactly as the pane writes them on
 /// standard input, a leading hyphen and several lines included, run from any directory with no
 /// session in its environment, and prints nothing; the question then leaves what waits on the
-/// person. A press that fails says why in one line on standard error and exits non-zero, and
-/// prints nothing on standard output.
+/// person. A press that fails before its write says why in one line on standard error, exits 1,
+/// writes nothing, and prints nothing on standard output.
 #[test]
 fn answer_replies_in_the_persons_words_and_a_failed_press_says_why_in_one_line() -> Result<()> {
     let s = Scratch::new()?;
@@ -148,9 +148,13 @@ fn answer_replies_in_the_persons_words_and_a_failed_press_says_why_in_one_line()
     gone[7] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
     let failed = s.press(&gone, "too late")?;
     let said = String::from_utf8(failed.stderr)?;
-    assert!(!failed.status.success() && failed.stdout.is_empty(), "{said}");
+    assert_eq!(failed.status.code(), Some(1), "a failure before the post wrote nothing: {said}");
+    assert!(failed.stdout.is_empty(), "{said}");
     assert_eq!(said.lines().count(), 1, "{said}");
     assert!(said.ends_with('\n') && !said.starts_with("Error"), "{said}");
+    let messages = s.json(&s.alpha, None, &["message", "list"])?;
+    let replies = messages.as_array().into_iter().flatten().filter(|m| m["content"] == "too late").count();
+    assert_eq!(replies, 0, "{messages}");
     Ok(())
 }
 

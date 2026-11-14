@@ -381,14 +381,22 @@ fn a_reader_gone_ends_the_stream_quietly_at_its_next_write() -> Result<()> {
     Ok(())
 }
 
-/// A stream whose parent process is gone while the daemon is out of reach, so that it has nothing
-/// to write, ends at its next attempt to join the daemon again, closing what it wrote to.
+/// A stream whose parent process is gone ends, though its output is still read: while connected,
+/// at its next empty line's tick; while the daemon is out of reach, so that it has nothing to write,
+/// at its next attempt to join the daemon again. Each closes what it wrote to.
 #[test]
-fn a_stream_whose_parent_is_gone_during_an_outage_ends() -> Result<()> {
+fn a_stream_whose_parent_is_gone_ends() -> Result<()> {
     let s = Scratch::new()?;
     s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
     let script = r#""$0" session view "$1" --follow 2> /dev/null & wait"#;
     let words = ["-c", script, env!("CARGO_BIN_EXE_fwd"), SESSION];
+    let mut connected = Stream::of(s.command_of(Path::new("bash"), s.dir.path(), None, &words))?;
+    connected.document(SOON)?;
+    connected.child.kill()?;
+    connected.child.wait()?;
+    let rest = connected.rest(Duration::from_secs(45))?;
+    assert!(rest.iter().all(String::is_empty), "{rest:?}");
+
     let mut parent = Stream::of(s.command_of(Path::new("bash"), s.dir.path(), None, &words))?;
     parent.document(SOON)?;
     stop(&s)?;

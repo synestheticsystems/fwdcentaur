@@ -1,9 +1,11 @@
 //! What in a record's own Markdown could act or mislead, shown as the text it is: an image, which a
-//! renderer would fetch; raw HTML; and a link whose address is not `http:` or `https:` (a `file:`
-//! link, which the pane's renderer opens, or a `javascript:` one), whether inline, an autolink or a
-//! reference definition. Code spans and fenced blocks are left as they are, since nothing in them
-//! renders. This is the cheap part of a safe subset, by escaping: the schemes a drawn link may have
-//! are still the drawer's to enforce (docs/design/cli.md, "The person's view of a session").
+//! renderer would fetch; raw HTML, and with it every autolink; and every link whose address does not
+//! start, as written, with `http://` or `https://` (a `file:` link, which the pane's renderer opens,
+//! a `javascript:` one, a relative one), inline or a reference definition. Nothing is decoded before
+//! the test, so that an address spelled with character references or escapes (`&#102;ile:`,
+//! `fi\le:`) never becomes a link. Code spans and fenced blocks are left as they are, since nothing in
+//! them renders. It works by escaping, and is what fwd guarantees of a link a pane draws
+//! (docs/design/cli.md, "The person's view of a session").
 
 use crate::references::code_ranges;
 use std::collections::BTreeSet;
@@ -91,13 +93,10 @@ fn closing(text: &str, open: usize, code: &[Range<usize>]) -> Option<usize> {
     None
 }
 
-/// The address of an inline link, from just after its `(`: within angle brackets, or up to the
-/// first whitespace or the `)` that balances it.
+/// The address of an inline link, from just after its `(`, as written: up to the first whitespace or
+/// the `)` that balances it, angle brackets and all.
 fn inline_address(after: &str) -> &str {
     let after = after.trim_start_matches([' ', '\t']);
-    if let Some(inside) = after.strip_prefix('<') {
-        return inside.split('>').next().unwrap_or("");
-    }
     let mut depth = 0usize;
     for (at, c) in after.char_indices() {
         match c {
@@ -111,10 +110,9 @@ fn inline_address(after: &str) -> &str {
     after
 }
 
-/// The address of a link reference definition, from just after its `:`.
+/// The address of a link reference definition, from just after its `:`, as written.
 fn defined_address(after: &str) -> &str {
-    let address = after.split_whitespace().next().unwrap_or("");
-    address.strip_prefix('<').map_or(address, |inside| inside.split('>').next().unwrap_or(""))
+    after.split_whitespace().next().unwrap_or("")
 }
 
 /// Whether the `[` at `at` opens its line, as a reference definition's does, after at most three
@@ -125,11 +123,11 @@ fn opens_line(text: &str, at: usize) -> bool {
     indent.len() <= 3 && indent.bytes().all(|b| b == b' ')
 }
 
-/// Whether `address` is on the web, its scheme `http` or `https`.
+/// Whether `address`, as written, starts with `http://` or `https://`, in any letter case.
 fn on_the_web(address: &str) -> bool {
-    address
-        .split_once(':')
-        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+    ["http://", "https://"]
+        .iter()
+        .any(|start| address.get(..start.len()).is_some_and(|written| written.eq_ignore_ascii_case(start)))
 }
 
 #[cfg(test)]
@@ -150,6 +148,11 @@ mod tests {
             ("![cat](https://example.com/cat.png)", r"\!\[cat](https://example.com/cat.png)"),
             ("[ref]: file:///etc/hosts\n\nSee [ref].", "\\[ref\\]: file:///etc/hosts\n\nSee [ref]."),
             ("[ref]: https://example.com\n\nSee [ref].", "[ref]: https://example.com\n\nSee [ref]."),
+            ("[up](HTTPS://Example.com)", "[up](HTTPS://Example.com)"),
+            ("[open](&#102;ile:///etc/hosts)", r"\[open\](&#102;ile:///etc/hosts)"),
+            (r"[open](fi\le:///etc/hosts)", r"\[open\](fi\le:///etc/hosts)"),
+            ("[odd](https:example.com)", r"\[odd\](https:example.com)"),
+            ("[angled](<https://example.com>)", r"\[angled\](\<https://example.com>)"),
             (
                 "Run `[x](file:///a)` or\n```\n<b>![i](file:///b)</b>\n```",
                 "Run `[x](file:///a)` or\n```\n<b>![i](file:///b)</b>\n```",

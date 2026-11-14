@@ -215,10 +215,12 @@ fn each_record_stands_in_the_list_of_whom_it_waits_on() {
 
 /// A question asked of the person, now in a project where they have no principal of their own,
 /// still waits on them but has no Answer, a line saying why; one where their name is shared says
-/// that instead, and the document says the name is shared there.
+/// that instead, and the document says the name is shared there; one that asks their name where
+/// they have no principal asks someone else.
 #[test]
 fn a_question_where_the_person_has_no_principal_of_their_own_has_no_answer_and_says_why() {
-    let sections = vec![section(SectionKind::YouAsked, vec![ask(10, by(to(1)), 2), ask(11, by(to(1)), 1)])];
+    let by_name = ask(12, by(Addressee::Name("tester".into())), 2);
+    let sections = vec![section(SectionKind::YouAsked, vec![ask(10, by(to(1)), 2), ask(11, by(to(1)), 1), by_name])];
     let mut shared = person(&[]);
     shared.principals.remove(&project(1).record);
     shared.shared.push(project(1));
@@ -240,6 +242,8 @@ fn a_question_where_the_person_has_no_principal_of_their_own_has_no_answer_and_s
         json["lines"],
         json!(["More than one person is named tester in beta: what they are asked there is not counted as waiting on you, and none of it can be answered here."])
     );
+    // By their name, in a project where the name is no principal of theirs, it asks someone else.
+    assert_eq!(json["principals"][0]["sections"][1]["records"][0]["tags"][0]["text"], "to tester");
 }
 
 /// The session's own thread comes first and stands open; a subagent's group is folded unless

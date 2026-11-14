@@ -138,7 +138,9 @@ enum Format {
     Hook,
     /// What an action of `fwd session view` prints, which a pane runs when the person presses it:
     /// nothing when the command succeeds, since the view shows what changed, and when it fails one
-    /// plain line on standard error saying why, and a non-zero exit. Only `reply` takes it.
+    /// plain line on standard error saying why. Exit 0: the daemon acknowledged the write; 7: the
+    /// daemon went away while it was made, so it may or may not exist; any other: nothing was
+    /// written. Only `reply` takes it.
     Pane,
 }
 
@@ -2319,10 +2321,16 @@ fn fail(error: anyhow::Error, code: i32) -> ! {
 
 /// Ends a command given `--format pane` after an error, as [`fail`] does, with the error as one
 /// plain line, its causes after it on the same line, which a pane shows under the row whose action
-/// failed, with no control character in it; exit 7 for a daemon that went away, 1 for anything else.
+/// failed, with no control character in it: exit 7 when the daemon went away while a write was
+/// made, so that whether it was made is not known ([`pressed`]), and 1 for anything else, which
+/// wrote nothing.
 fn fail_in_one_line(error: anyhow::Error) -> ! {
     use std::io::Write;
-    let code = if error.is::<daemon::Lost>() { 7 } else { 1 };
+    let unknown = matches!(
+        error.downcast_ref::<daemon::Lost>(),
+        Some(daemon::Lost::Unconfirmed { .. } | daemon::Lost::Unfinished { .. })
+    );
+    let code = if unknown { 7 } else { 1 };
     let said = fwd_core::session_view::one_line(&format!("{error:#}"));
     let mut err = std::io::stderr().lock();
     let _ = writeln!(err, "{said}").and_then(|()| err.flush());
@@ -2783,6 +2791,9 @@ async fn run_cli() -> Result<()> {
             // The watch ends the process itself, after its last line or an error (`watch::run`).
             match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
         }
+        if let (Format::Pane, Command::Reply { id, text }) = (app.format, &cli.command) {
+            return pressed(&app, id, text.clone(), joining, stamping).await;
+        }
         let command = cli.command;
         let body = run_as_caller(&app, command, joining, stamping);
         // A command whose daemon goes away while it runs ends within a bound and says so, rather than
@@ -2810,6 +2821,38 @@ async fn run_cli() -> Result<()> {
     }
     .await;
     ran.map_err(|error| ran_in.failure(error))
+}
+
+/// `fwd reply` pressed in a pane (`--format pane`), whose exit status tells the pane whether the
+/// reply was written. A failure before the post wrote nothing, and ends with exit 1. The post is
+/// the one write whose fate can be unknown: a daemon that goes away while it is made fails it as
+/// `Lost::Unconfirmed` (`Client::while_writing`), exit 7. Once the daemon has acknowledged it, the
+/// command succeeds: what follows, making the writer belong to the project and stamping when it
+/// last wrote, can neither fail it nor print. Nothing is read back or printed, since the view shows
+/// the reply.
+async fn pressed(app: &App, id: &str, text: String, joining: bool, stamping: bool) -> Result<()> {
+    let client = app.client.as_ref().expect("the CLI connected through its client");
+    let text = given_text(app, text)?;
+    if joining {
+        refuse_without_role(app.graph(), app.me).await?;
+    }
+    let (reply_to, notification) = client.while_connected(message_behind(app, id, true)).await?;
+    let reply = MessageContext { reply_to: Some(reply_to), ..Default::default() };
+    let post = ops::post_settling(app.graph(), app.me, &text, Priority::Next, reply, notification);
+    let files_in = app.checkout_root().ok().map(Path::to_path_buf);
+    client.while_writing(fwd_core::file_mention::reading_files_in(files_in, post)).await?;
+    let recorded = async {
+        if joining {
+            ops::join(app.graph(), app.me).await?;
+        }
+        match app.acting.filter(|_| stamping) {
+            Some(acting) => dormancy::wrote(app.graph(), acting).await,
+            None => Ok(()),
+        }
+    };
+    // The reply stands whatever becomes of these.
+    let _ = client.while_connected(recorded).await;
+    Ok(())
 }
 
 /// Refuses, before anything is read or written, a command the CLI refuses for its arguments alone:
