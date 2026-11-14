@@ -819,3 +819,59 @@ async fn sparse_records_prime_as_they_did() -> Result<()> {
     assert!(!text.contains("could not be read"), "{text}");
     Ok(())
 }
+
+/// What a reset gives back first: the hook prints the agent's active intentions before everything
+/// else, each in its speaker's words with the day they were written down, one of another project
+/// named with it, and one since fulfilled in one line with the command that takes it off; an
+/// unassigned one is gone; and the JSON gives them as records of kind `intention`.
+#[test]
+fn the_hook_prints_the_agents_active_intentions_first_in_their_speakers_words() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let create =
+        |dir: &Path, title: &str, words: &str| s.made(dir, None, &["intention", "create", title, "--words", words]);
+    let ours = create(&s.alpha, "Readers keep their place", "the list stays\nwhere I left it")?;
+    let theirs = create(&s.beta, "Builds stay under a minute", "release builds")?;
+    let done = create(&s.alpha, "Name the page", "a short name")?;
+    let dropped = create(&s.alpha, "Draw the panel", "")?;
+    for id in [&ours, &theirs, &done, &dropped] {
+        s.json(&s.alpha, Some("main"), &["intention", "assign", id])?;
+    }
+    s.json(&s.alpha, None, &["intention", "fulfil", &done])?;
+    s.json(&s.alpha, Some("main"), &["intention", "unassign", &dropped])?;
+    let shown = s.json(&s.alpha, None, &["intention", "show", &ours])?;
+    let day = fwd_core::decision_log::date(shown["created"].as_i64().ok_or_else(|| anyhow!("no created"))?);
+    let short = |id: &String| short_id(&id.parse::<EntityId>().expect("an id"));
+
+    let hook = s.text(&s.alpha, Some("main"), &["prime", "--format", "hook"])?;
+    let expected = format!(
+        "Active Intentions (2):
+{} Readers keep their place
+  @tester, {day}:
+    the list stays
+    where I left it
+{} Builds stay under a minute in beta
+  @tester in beta, {day}:
+    release builds
+{} Name the page [fulfilled]: still assigned to you; `fwd intention unassign {}` takes it off
+fwdcentaur context for impl-sam (implementer) in alpha",
+        short(&ours),
+        short(&theirs),
+        short(&done),
+        short(&done)
+    );
+    assert!(hook.starts_with(&expected), "{hook}");
+    assert!(!hook.contains("Draw the panel"), "unassigned: {hook}");
+
+    let json = s.json(&s.alpha, Some("main"), &["prime"])?;
+    let section = &json["sections"][0];
+    assert_eq!(section["section"], "active_intentions", "{json}");
+    let records = section["records"].as_array().ok_or_else(|| anyhow!("no records in {json}"))?;
+    let kinds: Vec<&Value> = records.iter().map(|r| &r["kind"]).collect();
+    assert_eq!(kinds, [&json!("intention"); 3]);
+    assert_eq!(
+        (&records[0]["words"], &records[1]["project"]["name"]),
+        (&json!("the list stays\nwhere I left it"), &json!("beta"))
+    );
+    Ok(())
+}

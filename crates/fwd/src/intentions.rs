@@ -304,7 +304,7 @@ async fn other_project(graph: &ProjectGraph, project: EntityId) -> Result<Option
 
 /// An intention as JSON: the fields of its components, each principal by its id with its name
 /// beside it, whose words they are (`speaker`), and its project when that is not `graph`'s.
-async fn intention_json(graph: &ProjectGraph, record: &(PlacementView, Parts)) -> Result<Value> {
+pub(crate) async fn intention_json(graph: &ProjectGraph, record: &(PlacementView, Parts)) -> Result<Value> {
     let (placement, (intention, creation)) = record;
     let attribution = graph.component_of::<AttributionView>(placement).await?;
     let edit = graph.component_of::<LastEditView>(placement).await?;
@@ -387,7 +387,10 @@ async fn elsewhere(graph: &ProjectGraph, placement: &PlacementView) -> Result<St
 /// Whose words an intention holds, by name; the day they were written down, the day of their last
 /// rewording when they were reworded; and the name of whoever wrote them down, when that was not
 /// their speaker.
-async fn spoken(graph: &ProjectGraph, record: &(PlacementView, Parts)) -> Result<(String, String, Option<String>)> {
+pub(crate) async fn spoken(
+    graph: &ProjectGraph,
+    record: &(PlacementView, Parts),
+) -> Result<(String, String, Option<String>)> {
     let (placement, (_, creation)) = record;
     let attribution = graph.component_of::<AttributionView>(placement).await?;
     let speaker = intentions::speaker(creation, attribution.as_ref())?;
@@ -401,7 +404,7 @@ async fn spoken(graph: &ProjectGraph, record: &(PlacementView, Parts)) -> Result
 
 /// `words` after the line that says whose they are: a colon, then each of their lines indented;
 /// nothing for no words.
-fn words_after(words: &str) -> String {
+pub(crate) fn words_after(words: &str) -> String {
     if words.is_empty() {
         return String::new();
     }
