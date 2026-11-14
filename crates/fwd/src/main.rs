@@ -1594,8 +1594,10 @@ enum SessionCommand {
     /// For each principal: the questions it asked the person that the person has not answered,
     /// what it holds (the questions asked of it, then the tasks assigned to it), and the questions
     /// it asked anyone else or no one in particular; its unread notifications are counted. It reads
-    /// for the person this machine's identity names (`fwd init --handle`), or the principal --as or
-    /// FWD_AS names, from any directory, and writes nothing.
+    /// for the person this machine's identity file names (`fwd init --handle`), or the person --as or
+    /// FWD_AS names by a name or a principal's id, from any directory, and writes no record of the
+    /// project's work. No visible text holds an id, and an action acts as the person's principal it
+    /// names by its id.
     View {
         /// The Claude Code session's id.
         session: String,
@@ -1603,7 +1605,8 @@ enum SessionCommand {
         /// live queries tell of a change, never on a timer, until the process is stopped; an empty
         /// line every 30 seconds while the connection to the daemon is healthy; while the daemon
         /// is out of reach, the last document saying so, and the fresh one when it answers again.
-        /// It ends by itself, with exit 0, only when the daemon answers running another build.
+        /// It ends by itself, with exit 0, when the daemon answers running another build, and when
+        /// its reader, or the process that started it, is gone.
         #[arg(long)]
         follow: bool,
     },
@@ -2267,19 +2270,39 @@ fn joins(matches: &ArgMatches) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let parsed = Cli::try_parse().ok();
+    let pane = parsed.as_ref().is_some_and(|cli| cli.format == Some(Format::Pane));
+    // A pane runs only the commands the view's actions name, and the others print outside it; so
+    // it is refused before anything runs, a hook's command and a deadline's included.
+    if parsed.is_some_and(|cli| pane && !matches!(cli.command, Command::Reply { .. })) {
+        fail_in_one_line(anyhow!(
+            "--format pane is for the commands a session view's actions run, `reply` alone; leave it off"
+        ))
+    }
     if let Some(deadline) = prime::deadline() {
         prime::within(deadline, run_cli()).await
     }
-    let pane = Cli::try_parse().is_ok_and(|cli| cli.format == Some(Format::Pane));
     match run_cli().await {
+        Err(error) if pane => fail_in_one_line(error),
+        Err(error) if error.is::<session_view::Ended>() => ended(error),
         // A command whose daemon went away while it ran ends at once, with the exit of a command
         // that finds no daemon (docs/design/cli.md, the exit codes), and not through the runtime's
         // shutdown: its node, left without the daemon, can leave a thread stuck inside Ankurah,
         // which the shutdown would wait for (`watch::end` says how).
-        Err(error) if pane => fail_in_one_line(error),
         Err(error) if error.is::<daemon::Lost>() => fail(error, 7),
         ran => ran,
     }
+}
+
+/// Ends `fwd session view --follow` as it ended by itself ([`session_view::Ended`]), with exit 0
+/// at once, as [`fail`] ends a command: when the daemon runs another build, saying so on standard
+/// error; when its reader is gone, quietly.
+fn ended(error: anyhow::Error) -> ! {
+    use std::io::Write;
+    if let Some(another @ session_view::Ended::AnotherBuild { .. }) = error.downcast_ref() {
+        let _ = writeln!(std::io::stderr(), "{another}");
+    }
+    std::process::exit(0)
 }
 
 /// Ends the process after an error as returning it from `main` would (`Error: ` and the error with
@@ -2296,11 +2319,11 @@ fn fail(error: anyhow::Error, code: i32) -> ! {
 
 /// Ends a command given `--format pane` after an error, as [`fail`] does, with the error as one
 /// plain line, its causes after it on the same line, which a pane shows under the row whose action
-/// failed; exit 7 for a daemon that went away, 1 for anything else.
+/// failed, with no control character in it; exit 7 for a daemon that went away, 1 for anything else.
 fn fail_in_one_line(error: anyhow::Error) -> ! {
     use std::io::Write;
     let code = if error.is::<daemon::Lost>() { 7 } else { 1 };
-    let said = format!("{error:#}").split_whitespace().collect::<Vec<_>>().join(" ");
+    let said = fwd_core::session_view::one_line(&format!("{error:#}"));
     let mut err = std::io::stderr().lock();
     let _ = writeln!(err, "{said}").and_then(|()| err.flush());
     std::process::exit(code)
@@ -2360,10 +2383,6 @@ async fn run_cli() -> Result<()> {
         .init();
     let paths = Paths::from_env()?;
     let format = format_of(&cli);
-    // A pane runs only the commands the view's actions name, and the others print outside it.
-    if cli.format == Some(Format::Pane) && !matches!(cli.command, Command::Reply { .. }) {
-        bail!("--format pane is for the commands a session view's actions run, `reply` alone; leave it off");
-    }
 
     match &cli.command {
         command if refuse_before_running(command).is_err() => return refuse_before_running(command),

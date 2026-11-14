@@ -18,7 +18,7 @@ use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph};
 use fwd_core::route::page_path;
 use fwd_core::rules::{short_id, ScopeHere};
 use fwd_core::subject;
-use fwd_core::working_set::{self, Addressee, Extent, Holder, Holding, Record, RecordKind, SectionKind};
+use fwd_core::working_set::{self, Addressee, Asking, Extent, Holder, Holding, Record, RecordKind, SectionKind};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::io::Write;
@@ -548,16 +548,18 @@ fn record_json(h: &Holding, kind: SectionKind, r: &Record) -> Value {
 /// What a record's line says of it after its id, in the section `kind`: a question asked of the
 /// agent by whom it is from, one it asked by whom it asks, each before its first words; a task
 /// assigned to it with its status in brackets, and a ready task by its title alone; a notification
-/// by its sentence.
+/// by its sentence. Its whitespace is collapsed once it is composed, so that a name or a text that
+/// holds newlines, or no text at all, makes one line with no space left at its end.
 fn primed_title(kind: SectionKind, r: &Record) -> String {
-    match &r.kind {
-        RecordKind::Ask { from, .. } if kind == SectionKind::AskedOfYou => format!("from @{from}: {}", r.title),
-        RecordKind::Ask { to: Addressee::Principal { handle, .. }, .. } => format!("to @{handle}: {}", r.title),
-        RecordKind::Ask { to: Addressee::Name(name), .. } => format!("to @{name}: {}", r.title),
-        RecordKind::Ask { to: Addressee::NoOne, .. } => format!("to no one in particular: {}", r.title),
-        RecordKind::Task { status } if kind == SectionKind::Assigned => format!("{} [{status}]", r.title),
+    let line = match &r.kind {
+        RecordKind::Ask(Asking::Of { from }) => format!("from @{}: {}", from.handle, r.title),
+        RecordKind::Ask(Asking::By { to: Addressee::Principal(to) }) => format!("to @{}: {}", to.handle, r.title),
+        RecordKind::Ask(Asking::By { to: Addressee::Name(name) }) => format!("to @{name}: {}", r.title),
+        RecordKind::Ask(Asking::By { to: Addressee::NoOne }) => format!("to no one in particular: {}", r.title),
+        RecordKind::Task { status: Some(status) } if kind == SectionKind::Assigned => format!("{} [{status}]", r.title),
         RecordKind::Task { .. } | RecordKind::Notification => r.title.clone(),
-    }
+    };
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `value` as `--format json` prints it.
@@ -722,10 +724,10 @@ mod tests {
                 records: (0..records)
                     .map(|i| Record {
                         id: EntityId::from_bytes([i as u8; 32]),
-                        kind: RecordKind::Task { status: TaskStatus::Open },
+                        kind: RecordKind::Task { status: Some(TaskStatus::Open) },
                         title: format!("{kind} {i}"),
-                        text: String::new(),
-                        created: 0,
+                        text: None,
+                        created: None,
                         project: project(project_n),
                         route: Some(Route::task(EntityId::from_bytes([i as u8; 32]))),
                     })

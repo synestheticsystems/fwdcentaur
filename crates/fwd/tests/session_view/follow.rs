@@ -1,7 +1,11 @@
 //! `fwd session view --follow`: the document again whenever what it shows changes, an empty line
-//! while the stream is healthy, the daemon lost and found again, and the end when the daemon runs
-//! another build. The tests read the stream line by line, each line within a deadline of the
-//! test's own, so that what they wait for is ordered by the stream itself, never by a sleep.
+//! while the stream is healthy, the daemon lost and found again, a read that fails tried again,
+//! and the ends: another build, and a reader gone. The tests read the stream line by line, each line
+//! within a deadline of the test's own, so that what they wait for is ordered by the stream itself,
+//! never by a sleep. One limit: a first document is no barrier for the first results of every live
+//! read the stream opens, so a late first result can read the view again after a change a test
+//! made and stand in for a live read that did not hear it; each test that follows a part of the
+//! view changes it alone, by a writer whose writes reach no other live read.
 
 use super::*;
 use std::io::{BufRead, BufReader, Read};
@@ -10,8 +14,8 @@ use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
-/// A running `fwd session view --follow`, its standard output read line by line by a thread of its
-/// own. It is killed when the test ends.
+/// A running `fwd session view --follow`, or a shell that runs one, its standard output read line
+/// by line by a thread of its own. It is killed when the test ends.
 struct Stream {
     child: Child,
     lines: Receiver<String>,
@@ -19,8 +23,11 @@ struct Stream {
 
 impl Stream {
     fn start(s: &Scratch) -> Result<Stream> {
-        let mut command = s.command(s.dir.path(), None, &["session", "view", SESSION, "--follow"]);
-        let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        Stream::of(s.command(s.dir.path(), None, &["session", "view", SESSION, "--follow"]))
+    }
+
+    fn of(mut command: Command) -> Result<Stream> {
+        let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let out = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let (sent, lines) = mpsc::channel();
         std::thread::spawn(move || {
@@ -51,25 +58,31 @@ impl Stream {
         }
     }
 
-    /// The stream's exit, once its standard output closes within `limit`, and what it said on
-    /// standard error.
-    fn exit(mut self, limit: Duration) -> Result<(ExitStatus, String)> {
+    /// The lines left, once standard output closes within `limit`.
+    fn rest(&self, limit: Duration) -> Result<Vec<String>> {
         let until = std::time::Instant::now() + limit;
+        let mut rest = Vec::new();
         loop {
             match self.lines.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
-                Ok(_) => continue,
-                Err(RecvTimeoutError::Disconnected) => break,
+                Ok(line) => rest.push(line),
+                Err(RecvTimeoutError::Disconnected) => return Ok(rest),
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(anyhow!("the stream had not ended {}s on", limit.as_secs()))
+                    return Err(anyhow!("the stream had not ended {}s on: {rest:?}", limit.as_secs()))
                 }
             }
         }
+    }
+
+    /// The stream's exit, once its standard output closes within `limit`, the lines it printed
+    /// before, and what it said on standard error.
+    fn exit(mut self, limit: Duration) -> Result<(ExitStatus, Vec<String>, String)> {
+        let rest = self.rest(limit)?;
         let status = self.child.wait()?;
         let mut said = String::new();
         if let Some(mut err) = self.child.stderr.take() {
             err.read_to_string(&mut said)?;
         }
-        Ok((status, said))
+        Ok((status, rest, said))
     }
 }
 
@@ -78,6 +91,42 @@ impl Drop for Stream {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// A copy of this build of fwd that says it is another, its build's name changed by one character
+/// wherever the binary holds it, and signed again where the system asks a binary to be; with this
+/// build's name and the copy's.
+fn another_build(s: &Scratch) -> Result<(PathBuf, String, String)> {
+    let version = String::from_utf8(s.command(s.dir.path(), None, &["--version"]).output()?.stdout)?;
+    let ours = version.trim().strip_prefix("fwd ").ok_or_else(|| anyhow!("no build in {version:?}"))?.to_string();
+    let mut theirs = ours.clone();
+    let last = theirs.pop().ok_or_else(|| anyhow!("an empty build"))?;
+    theirs.push(if last == '0' { '1' } else { '0' });
+    let mut bytes = std::fs::read(env!("CARGO_BIN_EXE_fwd"))?;
+    let mut found = 0;
+    let mut at = 0;
+    while let Some(start) = bytes[at..].windows(ours.len()).position(|w| w == ours.as_bytes()) {
+        let start = at + start;
+        bytes[start..start + ours.len()].copy_from_slice(theirs.as_bytes());
+        found += 1;
+        at = start + ours.len();
+    }
+    assert!(found > 0, "the binary holds its build's name");
+    let path = s.dir.path().join("fwd-another-build");
+    std::fs::write(&path, bytes)?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    if cfg!(target_os = "macos") {
+        let signed = Command::new("codesign").args(["--force", "--sign", "-"]).arg(&path).output()?;
+        assert!(signed.status.success(), "{}", String::from_utf8_lossy(&signed.stderr));
+    }
+    Ok((path, ours, theirs))
+}
+
+/// The port the scratch daemon listens on.
+fn port(s: &Scratch) -> Result<u64> {
+    let status = s.command(s.dir.path(), None, &["daemon", "status"]).output()?;
+    let status: Value = serde_json::from_slice(&status.stdout)?;
+    status["port"].as_u64().ok_or_else(|| anyhow!("no port in {status}"))
 }
 
 const SOON: Duration = Duration::from_secs(30);
@@ -218,8 +267,9 @@ fn the_stream_beats_while_healthy_and_follows_the_daemon_out_of_reach_and_back()
     Ok(())
 }
 
-/// A daemon that answers again running another build than the stream ends the stream, with exit 0
-/// and a line saying why, so that whatever runs it starts the build now on the machine.
+/// A daemon that answers again, after it was out of reach, running another build than the stream
+/// ends the stream, with exit 0 and a line saying why, so that whatever runs it starts the build
+/// now on the machine.
 #[test]
 fn a_daemon_that_answers_running_another_build_ends_the_stream() -> Result<()> {
     let s = Scratch::new()?;
@@ -257,10 +307,124 @@ fn a_daemon_that_answers_running_another_build_ends_the_stream() -> Result<()> {
         json!({"port": port, "pid": std::process::id(), "instance_id": instance, "started": 0, "bind": "loopback"});
     std::fs::write(s.dir.path().join("run").join("daemon.ws"), port_file.to_string())?;
 
-    let (status, said) = stream.exit(Duration::from_secs(60))?;
+    let (status, _, said) = stream.exit(Duration::from_secs(60))?;
     assert_eq!(status.code(), Some(0), "{said}");
     assert!(said.contains("the daemon now runs build 0.0.1-1.gfeedbee"), "{said}");
     std::fs::remove_file(s.dir.path().join("run").join("daemon.ws"))?;
+    Ok(())
+}
+
+/// The first join checks the build: a stream of another build than the daemon's ends at once, with
+/// exit 0 and the line saying so, having printed nothing.
+#[test]
+fn a_stream_of_another_build_than_the_daemons_ends_at_its_first_join() -> Result<()> {
+    let s = Scratch::new()?;
+    let (other, ours, theirs) = another_build(&s)?;
+    let stream = Stream::of(s.command_of(&other, s.dir.path(), None, &["session", "view", SESSION, "--follow"]))?;
+    let (status, printed, said) = stream.exit(SOON)?;
+    assert_eq!((status.code(), printed.len()), (Some(0), 0), "{said}");
+    assert_eq!(
+        said,
+        format!("fwd: the daemon now runs build {ours}, not this view's {theirs}; start `fwd session view --follow` again\n")
+    );
+    Ok(())
+}
+
+/// The common case of an install: the daemon restarts on the port it had, as another build, and
+/// the socket comes back before the daemon counts as lost. The stream ends then, with exit 0 and the
+/// line saying so, having printed no document saying the daemon was out of reach.
+#[test]
+fn a_daemon_restarted_on_its_port_as_another_build_ends_the_stream() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    let (other, ours, theirs) = another_build(&s)?;
+    stop(&s)?;
+    let started = s.command_of(&other, s.dir.path(), None, &["daemon", "start"]).output()?;
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    let before = port(&s)?;
+    let stream = Stream::of(s.command_of(&other, s.dir.path(), None, &["session", "view", SESSION, "--follow"]))?;
+    stream.document(SOON)?;
+    stop(&s)?;
+    let restarted = s.command(s.dir.path(), None, &["daemon", "start"]).output()?;
+    assert!(restarted.status.success(), "{}", String::from_utf8_lossy(&restarted.stderr));
+    assert_eq!(port(&s)?, before, "the daemon came back on its port");
+    let (status, printed, said) = stream.exit(SOON)?;
+    assert_eq!(status.code(), Some(0), "{said}");
+    assert!(said.contains(&format!("fwd: the daemon now runs build {ours}, not this view's {theirs}")), "{said}");
+    assert!(printed.iter().all(|line| !line.contains("out of reach")), "{printed:?}");
+    Ok(())
+}
+
+/// A reader gone ends the stream quietly, with exit 0 and nothing on standard error, at its next
+/// write: a document after a change, or an empty line at the heartbeat.
+#[test]
+fn a_reader_gone_ends_the_stream_quietly_at_its_next_write() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    let script = r#""$0" session view "$1" --follow 2> "$2" | head -n 1; echo "exit ${PIPESTATUS[0]}""#;
+    let piped = |n: usize| -> Result<(Stream, PathBuf)> {
+        let said = s.dir.path().join(format!("said-{n}"));
+        let words = ["-c", script, env!("CARGO_BIN_EXE_fwd"), SESSION, said.to_str().unwrap_or_default()];
+        Ok((Stream::of(s.command_of(Path::new("bash"), s.dir.path(), None, &words))?, said))
+    };
+    // A document: the reader takes the first and is gone, and a change makes another.
+    let (document, said) = piped(0)?;
+    document.document(SOON)?;
+    s.made(&s.alpha, Some("main"), &["ask", "--to", "tester", "Should the primer name the page?"])?;
+    assert_eq!(document.line(SOON)?, "exit 0");
+    assert_eq!(std::fs::read_to_string(&said)?, "");
+    // An empty line: nothing changes, and the heartbeat finds no reader.
+    let (beat, said) = piped(1)?;
+    beat.document(SOON)?;
+    assert_eq!(beat.line(Duration::from_secs(45))?, "exit 0");
+    assert_eq!(std::fs::read_to_string(&said)?, "");
+    Ok(())
+}
+
+/// A stream whose parent process is gone while the daemon is out of reach, so that it has nothing
+/// to write, ends at its next attempt to join the daemon again, closing what it wrote to.
+#[test]
+fn a_stream_whose_parent_is_gone_during_an_outage_ends() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    let script = r#""$0" session view "$1" --follow 2> /dev/null & wait"#;
+    let words = ["-c", script, env!("CARGO_BIN_EXE_fwd"), SESSION];
+    let mut parent = Stream::of(s.command_of(Path::new("bash"), s.dir.path(), None, &words))?;
+    parent.document(SOON)?;
+    stop(&s)?;
+    while !parent.document(SOON)?["page"].is_null() {}
+    parent.child.kill()?;
+    parent.child.wait()?;
+    // The stream alone holds the pipe now: its end is the pipe's.
+    parent.rest(Duration::from_secs(60))?;
+    Ok(())
+}
+
+/// A read that fails with the daemon in reach is said, with no id, and tried again after waits that
+/// double, with no empty line while it fails; mended, the view comes again. Here a project's record
+/// that cannot be read fails it.
+#[tokio::test]
+async fn a_read_that_fails_is_tried_again_and_the_stream_is_not_healthy_meanwhile() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    let client = s.client(&s.alpha).await?;
+    let ctx = client.node.context_async(ankurah::policy::DEFAULT_CONTEXT).await?;
+    let trx = ctx.begin();
+    let broken = trx.create(&fwd_core::model::Project { uuid: "not a uuid".into(), name: "broken".into() }).await?.id();
+    trx.commit().await?;
+    let stream = Stream::start(&s)?;
+    let failed = stream.document(SOON)?;
+    assert_eq!(
+        failed["lines"],
+        json!(["fwd could not read what this session holds: a field of a record it reads could not be read. This is what it last read; it tries again."])
+    );
+    assert!(stream.line(Duration::from_secs(35)).is_err(), "no empty line, and no other document, while it fails");
+    let record: fwd_core::model::ProjectView = ctx.get(broken).await?;
+    let trx = ctx.begin();
+    record.edit(&trx)?.uuid()?.replace(&uuid::Uuid::new_v4().to_string())?;
+    trx.commit().await?;
+    let mended = stream.document(SOON)?;
+    assert_eq!(mended["principals"][0]["title"], "lead-sam", "{mended}");
     Ok(())
 }
 

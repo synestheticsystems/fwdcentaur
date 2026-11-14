@@ -45,7 +45,13 @@ impl Scratch {
     /// that would choose another project, principal or agent; stamped, as the fwd plugin stamps a
     /// command, with the session's agent `agent` (`main` for its own thread) when one is given.
     fn command(&self, dir: &Path, agent: Option<&str>, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_fwd"));
+        self.command_of(Path::new(env!("CARGO_BIN_EXE_fwd")), dir, agent, args)
+    }
+
+    /// `program <args>` in `dir`, with the environment [`Scratch::command`] gives fwd: another fwd
+    /// build, or a shell that runs fwd.
+    fn command_of(&self, program: &Path, dir: &Path, agent: Option<&str>, args: &[&str]) -> Command {
+        let mut command = Command::new(program);
         command
             .current_dir(dir)
             .env("FWD_RUNTIME_DIR", self.dir.path().join("run"))
@@ -127,6 +133,27 @@ impl Scratch {
             .spawn()?;
         child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?.write_all(input.as_bytes())?;
         Ok(child.wait_with_output()?)
+    }
+
+    /// A client of the project whose checkout is `dir`, holding its graph, for what the CLI cannot
+    /// make: records it would refuse.
+    async fn client(&self, dir: &Path) -> Result<fwd_core::daemon::Client> {
+        let shown = self.json(dir, None, &["project", "show"])?;
+        let project = fwd_core::project::NamedProject {
+            id: shown["id"].as_str().ok_or_else(|| anyhow!("no id in {shown}"))?.parse()?,
+            name: shown["name"].as_str().unwrap_or_default().to_string(),
+        };
+        let paths = fwd_core::project::Paths {
+            runtime_dir: self.dir.path().join("run"),
+            data_dir: self.dir.path().join("data"),
+        };
+        fwd_core::daemon::ensure_daemon(&paths, &project, fwd_core::daemon::Autostart::Never).await
+    }
+
+    /// The id of the person `tester`'s principal in `dir`'s project.
+    fn person_id(&self, dir: &Path) -> Result<String> {
+        let me = self.json(dir, None, &["whoami"])?;
+        Ok(me["principal"]["id"].as_str().ok_or_else(|| anyhow!("no principal in {me}"))?.to_string())
     }
 
     fn project_id(&self, dir: &Path) -> Result<String> {

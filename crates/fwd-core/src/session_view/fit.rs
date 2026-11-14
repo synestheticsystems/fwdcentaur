@@ -1,26 +1,32 @@
 //! Keeping the view's document well under 100,000 characters, as the pane that reads it line by
-//! line expects: past a budget, rows are left out from the least important end, and each list that
-//! lost rows says so, with the page's own list of them where there is one.
+//! line expects: past a budget, rows are left out from the least important end, each list that lost
+//! rows saying so, with the page's own list of them where there is one; and should the groups alone
+//! still pass it, the last groups are left out, the document saying how many. Every other string is
+//! capped where it is made (`text`), so the budget holds whatever the records hold.
 
-use super::{Group, ListKind};
+use super::text::{plain, LINE_LIMIT};
+use super::{Document, ListKind};
 
-/// The most bytes the principals of a document take, rows and all; the rest of a document is a
-/// few hundred. Bytes are never fewer than characters, so it bounds those too.
+/// The most bytes a document takes, as it is printed. Bytes are never fewer than characters, so it
+/// bounds those too.
 pub(super) const BUDGET: usize = 60_000;
 
-/// Leaves rows out of `groups` until they take [`BUDGET`] bytes or fewer: from the end of the least
-/// important list with any left, waiting on others before holds before waiting on you, the last
-/// group's before the first's. Each list that lost rows says how many it shows of how many, and
-/// gives `more(group, list)`, the page's own list of them, where there is one.
-pub(super) fn within_budget(groups: &mut [Group], more: impl Fn(usize, ListKind) -> Option<String>) {
-    let mut total = json_len(&groups);
+/// Leaves rows out of `document` until it takes [`BUDGET`] bytes or fewer: from the end of the
+/// least important list with any left, waiting on others before holds before waiting on you, the
+/// last group's before the first's. Each list that lost rows says how many it shows of how many,
+/// and gives `more(group, list)`, the page's own list of them, where there is one. Should the
+/// document still pass the budget with no rows, groups are left out from the end, and a line says
+/// how many.
+pub(super) fn within_budget(document: &mut Document, more: impl Fn(usize, ListKind) -> Option<String>) {
+    let mut total = json_len(document);
     if total <= BUDGET {
         return;
     }
     let order: Vec<(usize, usize)> = [ListKind::WaitsOnOthers, ListKind::Holds, ListKind::WaitsOnYou]
         .into_iter()
         .flat_map(|kind| {
-            groups
+            document
+                .principals
                 .iter()
                 .enumerate()
                 .rev()
@@ -29,7 +35,7 @@ pub(super) fn within_budget(groups: &mut [Group], more: impl Fn(usize, ListKind)
         })
         .collect();
     for (g, s) in order {
-        let list = &mut groups[g].sections[s];
+        let list = &mut document.principals[g].sections[s];
         let more = more(g, list.section);
         while total > BUDGET {
             let Some(row) = list.records.pop() else { break };
@@ -47,6 +53,21 @@ pub(super) fn within_budget(groups: &mut [Group], more: impl Fn(usize, ListKind)
             list.lines.push(cut_line(list.shown, list.of, &more));
             list.more = more;
         }
+    }
+    let groups = document.principals.len();
+    let mut said = false;
+    while json_len(document) > BUDGET && !document.principals.is_empty() {
+        document.principals.pop();
+        let left_out = groups - document.principals.len();
+        let line = plain(
+            &format!("{left_out} more principals of this session are left out to keep this view short."),
+            LINE_LIMIT,
+        );
+        if said {
+            document.lines.pop();
+        }
+        document.lines.push(line);
+        said = true;
     }
 }
 
@@ -66,7 +87,7 @@ fn json_len(value: &impl serde::Serialize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{List, Row, RowKind};
+    use super::super::{Group, List, Row, RowKind, TITLE};
     use super::*;
 
     fn row(n: usize, words: usize) -> Row {
@@ -104,17 +125,22 @@ mod tests {
         }
     }
 
+    fn document(principals: Vec<Group>) -> Document {
+        Document { title: TITLE.into(), page: Some("http://127.0.0.1:1/".into()), lines: Vec::new(), principals }
+    }
+
     /// Past the budget the least important rows go first, the last group's before the first's, and
     /// only as many as the budget needs; each list that lost rows says so, with the page's list of
-    /// them where there is one, and one that lost none says nothing.
+    /// them where there is one, and one that lost none says nothing. The whole printed document,
+    /// its root with it, stays within the budget.
     #[test]
     fn past_the_budget_the_least_important_rows_go_first_and_each_cut_list_says_so() {
         let lists = [(ListKind::WaitsOnYou, 20), (ListKind::Holds, 20), (ListKind::WaitsOnOthers, 20)];
-        let mut groups = vec![group(&lists), group(&lists)];
+        let mut doc = document(vec![group(&lists), group(&lists)]);
         let more = |g: usize, kind: ListKind| (kind == ListKind::WaitsOnYou).then(|| format!("#/questions?g={g}"));
-        within_budget(&mut groups, more);
-        assert!(serde_json::to_string(&groups).unwrap().len() <= BUDGET);
-        let shown = |g: usize| groups[g].sections.iter().map(|s| s.shown).collect::<Vec<_>>();
+        within_budget(&mut doc, more);
+        assert!(serde_json::to_string(&doc).unwrap().len() <= BUDGET);
+        let shown = |g: usize| doc.principals[g].sections.iter().map(|s| s.shown).collect::<Vec<_>>();
         // Every row of waiting on others and of the second group's holds goes before any of the
         // first group's holds, and nothing waiting on the person goes while anything else is left.
         assert_eq!(shown(1)[2], 0);
@@ -122,29 +148,46 @@ mod tests {
         assert_eq!(shown(1)[1], 0);
         assert!(shown(0)[1] > 0 && shown(0)[1] < 20, "{:?}", shown(0));
         assert_eq!((shown(0)[0], shown(1)[0]), (20, 20));
-        let holds = &groups[0].sections[1];
+        let holds = &doc.principals[0].sections[1];
         assert_eq!(
             holds.lines,
             [format!("{} of 20 shown; the rest are left out to keep this view short.", holds.shown)]
         );
         assert_eq!(holds.more, None);
-        assert!(groups[0].sections[0].lines.is_empty() && groups[0].sections[0].more.is_none());
+        assert!(doc.principals[0].sections[0].lines.is_empty() && doc.principals[0].sections[0].more.is_none());
 
         // Waiting on you, cut, gives the page's list of it.
-        let mut many = vec![group(&[(ListKind::WaitsOnYou, 80)])];
+        let mut many = document(vec![group(&[(ListKind::WaitsOnYou, 80)])]);
         within_budget(&mut many, more);
-        let waits = &many[0].sections[0];
+        let waits = &many.principals[0].sections[0];
         assert!(waits.shown < 80);
         assert_eq!(waits.more.as_deref(), Some("#/questions?g=0"));
         assert_eq!(waits.lines, [format!("{} of 80 shown; the page lists them all.", waits.shown)]);
     }
 
+    /// Groups that pass the budget with no rows left are left out from the end, and the document
+    /// says how many in one line.
+    #[test]
+    fn groups_past_the_budget_are_left_out_saying_how_many() {
+        let mut wide = group(&[]);
+        wide.lines = vec!["x".repeat(400)];
+        let mut doc = document(vec![wide; 400]);
+        within_budget(&mut doc, |_, _| None);
+        assert!(serde_json::to_string(&doc).unwrap().len() <= BUDGET);
+        let kept = doc.principals.len();
+        assert!(kept > 0 && kept < 400);
+        assert_eq!(
+            doc.lines,
+            [format!("{} more principals of this session are left out to keep this view short.", 400 - kept)]
+        );
+    }
+
     /// Within the budget nothing is left out, and nothing is said.
     #[test]
     fn within_the_budget_nothing_is_left_out() {
-        let mut groups = vec![group(&[(ListKind::Holds, 3)])];
-        let before = groups.clone();
-        within_budget(&mut groups, |_, _| Some("#/x".into()));
-        assert_eq!(groups, before);
+        let mut doc = document(vec![group(&[(ListKind::Holds, 3)])]);
+        let before = doc.clone();
+        within_budget(&mut doc, |_, _| Some("#/x".into()));
+        assert_eq!(doc, before);
     }
 }

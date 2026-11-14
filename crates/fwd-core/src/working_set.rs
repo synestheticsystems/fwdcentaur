@@ -28,11 +28,6 @@ pub enum Holder<'a> {
     /// Every principal bound to the agent this subject names (`subject`), in every project of the
     /// node, as a command the agent runs acts as each of them in its project.
     Agent(&'a str),
-    /// Every active principal bound to an agent of the Claude Code session this id names, in every
-    /// project of the node: those of its own thread first, then its subagents', each in the order
-    /// of their projects, then by name, then by id. What the person's view of a session shows
-    /// (`session_view`).
-    Session(&'a str),
     /// One principal of the graph's project, for a command that names a principal rather than an
     /// agent (`--as`, or the person).
     Principal(EntityId),
@@ -72,6 +67,35 @@ pub struct Holding {
 }
 
 impl Holding {
+    /// The questions asked of the principal, each with whom it is from.
+    pub fn asked_of(&self) -> impl Iterator<Item = (&Record, &Party)> {
+        self.records(SectionKind::AskedOfYou).filter_map(|r| match &r.kind {
+            RecordKind::Ask(Asking::Of { from }) => Some((r, from)),
+            _ => None,
+        })
+    }
+
+    /// The questions the principal asked, each with whom it asks.
+    pub fn asked_by(&self) -> impl Iterator<Item = (&Record, &Addressee)> {
+        self.records(SectionKind::YouAsked).filter_map(|r| match &r.kind {
+            RecordKind::Ask(Asking::By { to }) => Some((r, to)),
+            _ => None,
+        })
+    }
+
+    /// The tasks assigned to the principal, each with its status.
+    pub fn assigned(&self) -> impl Iterator<Item = (&Record, TaskStatus)> {
+        self.records(SectionKind::Assigned).filter_map(|r| match r.kind {
+            RecordKind::Task { status: Some(status) } => Some((r, status)),
+            _ => None,
+        })
+    }
+
+    /// The records of the section `kind`, none when it was not read.
+    fn records(&self, kind: SectionKind) -> impl Iterator<Item = &Record> {
+        self.sections.iter().filter(move |s| s.kind == kind).flat_map(|s| &s.records)
+    }
+
     /// The live queries whose changes can change what this holding's sections hold: the live form
     /// of each read the sections came from, given the principal's id, or in its project its name.
     /// The ready tasks have none, since the frontier is read across the project's whole graph.
@@ -153,10 +177,11 @@ pub struct Record {
     /// sentence.
     pub title: String,
     /// Its own text, whole: a task's what, a question's text; none for a notification, whose
-    /// sentence is its title.
-    pub text: String,
-    /// When it was made, in milliseconds since the epoch.
-    pub created: i64,
+    /// sentence is its title, and none where it could not be read.
+    pub text: Option<String>,
+    /// When it was made, in milliseconds since the epoch; none where it could not be read, where
+    /// nothing orders by it.
+    pub created: Option<i64>,
     /// The project the record is in, which a moved record has as another than its principal's.
     pub project: ProjectRecord,
     /// Where the page shows it; none where the page has no route of its own for it.
@@ -166,23 +191,34 @@ pub struct Record {
 #[derive(Debug, Clone, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum RecordKind {
-    /// A question: who asked it and whom it asks, each named as a reader in its principal's
-    /// project is shown them (`ops::handle_of`).
-    Ask {
-        from: String,
-        to: Addressee,
-    },
+    Ask(Asking),
+    /// A task, with its status: an assigned task's always, a ready task's where it could be read.
     Task {
-        status: TaskStatus,
+        status: Option<TaskStatus>,
     },
     Notification,
+}
+
+/// The other party to a question, as the list it stands in names it: who asked a question asked
+/// of the principal, whom a question the principal asked asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asking {
+    Of { from: Party },
+    By { to: Addressee },
+}
+
+/// A principal by its id, and its name as a reader in the principal's project is shown it
+/// (`ops::handle_of`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Party {
+    pub id: EntityId,
+    pub handle: String,
 }
 
 /// Whom a question asks, as its context says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addressee {
-    /// A principal by its id, and its name as a reader is shown it.
-    Principal { id: EntityId, handle: String },
+    Principal(Party),
     /// A name that is no principal's id, as the question was written: a principal's name, with or
     /// without the at-sign, which routing reads in the question's project.
     Name(String),
@@ -192,8 +228,7 @@ pub enum Addressee {
 
 /// The working set of `holder`, read through `graph`, as `extent` says: one [`Holding`] per
 /// principal, the graph's own project first and the others by name, then by id, since two may
-/// share a name (a session's own thread's before its subagents', as [`Holder::Session`] says); none
-/// for an agent no active principal is bound to.
+/// share a name; none for an agent no active principal is bound to.
 pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> Result<Vec<Holding>> {
     let mut projects = graph.projects().await?;
     projects.sort_by_key(|p| (p.record != graph.record(), p.name.clone(), p.uuid));
@@ -211,27 +246,6 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> 
                 }
             }
         }
-        Holder::Session(session) => {
-            let mut subagents = Vec::new();
-            for project in &projects {
-                let there = graph.graph_of_project(project);
-                let principals = ops::principals(&there).await?;
-                let mut bound: Vec<&PrincipalView> = subject::of_session(&principals, session);
-                bound.sort_by_key(|p| (p.handle().ok(), p.id()));
-                for p in bound {
-                    if !p.active()? {
-                        continue;
-                    }
-                    let holding = read.holding(&there, project, p, &principals).await?;
-                    if holding.subject.as_deref().is_some_and(subject::is_main_thread) {
-                        held.push(holding);
-                    } else {
-                        subagents.push(holding);
-                    }
-                }
-            }
-            held.extend(subagents);
-        }
         Holder::Principal(id) => {
             let project = projects
                 .iter()
@@ -242,6 +256,54 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> 
         }
     }
     Ok(held)
+}
+
+/// Every project of the node, by name, then by id, and each one's principals, read once for a
+/// reader that needs them for more than one working set.
+#[derive(Debug, Clone)]
+pub struct Known {
+    pub projects: Vec<(ProjectRecord, Vec<PrincipalView>)>,
+}
+
+impl Known {
+    pub async fn read(graph: &ProjectGraph) -> Result<Known> {
+        let mut projects = graph.projects().await?;
+        projects.sort_by_key(|p| (p.name.clone(), p.uuid));
+        let mut known = Vec::with_capacity(projects.len());
+        for project in projects {
+            let principals = ops::principals(&graph.graph_of_project(&project)).await?;
+            known.push((project, principals));
+        }
+        Ok(Known { projects: known })
+    }
+}
+
+/// The working set of every active principal bound to an agent of the Claude Code session
+/// `session`, in the projects `known` holds: those of its own thread first, then its subagents',
+/// each in `known`'s order of projects, then by name, then by id. What the person's view of a
+/// session shows (`session_view`).
+pub async fn read_session(graph: &ProjectGraph, known: &Known, session: &str, extent: &Extent) -> Result<Vec<Holding>> {
+    let projects: Vec<ProjectRecord> = known.projects.iter().map(|(project, _)| project.clone()).collect();
+    let mut read = Read { projects: &projects, extent, handles: HashMap::new() };
+    let (mut own, mut subagents) = (Vec::new(), Vec::new());
+    for (project, principals) in &known.projects {
+        let there = graph.graph_of_project(project);
+        let mut bound: Vec<&PrincipalView> = subject::of_session(principals, session);
+        bound.sort_by_key(|p| (p.handle().ok(), p.id()));
+        for p in bound {
+            if !p.active()? {
+                continue;
+            }
+            let holding = read.holding(&there, project, p, principals).await?;
+            if holding.subject.as_deref().is_some_and(subject::is_main_thread) {
+                own.push(holding);
+            } else {
+                subagents.push(holding);
+            }
+        }
+    }
+    own.extend(subagents);
+    Ok(own)
 }
 
 /// One read of a working set: what it reads, and what it has read once and names records by.
@@ -298,7 +360,8 @@ impl Read<'_> {
             handle: p.handle()?,
             kind: p.kind()?,
             role: ops::role_of(p),
-            subject: p.subject()?,
+            // Only the view tells a session's own thread from its subagents by it.
+            subject: p.subject().ok().flatten(),
             sections,
         })
     }
@@ -334,18 +397,19 @@ impl Read<'_> {
         }
         let wrote = graph.open_questions_by(me).await?;
         let mut you_asked = Listed::default();
-        self.questions_as_records(graph, asked, &mut asked_of_you).await?;
-        self.questions_as_records(graph, wrote, &mut you_asked).await?;
+        self.questions_as_records(graph, asked, true, &mut asked_of_you).await?;
+        self.questions_as_records(graph, wrote, false, &mut you_asked).await?;
         Ok((asked_of_you, you_asked))
     }
 
     /// `messages` as records in `listed`, each named by its first words, as a message is named
-    /// elsewhere (`reason::NAME_WORDS`), with whom it is from and whom it asks; one whose fields
-    /// cannot be read among `listed`'s unreadable.
+    /// elsewhere (`reason::NAME_WORDS`), with whom it is from (`asked_of`) or whom it asks; one
+    /// whose fields cannot be read among `listed`'s unreadable.
     async fn questions_as_records(
         &mut self,
         graph: &ProjectGraph,
         messages: Vec<MessageView>,
+        asked_of: bool,
         listed: &mut Listed,
     ) -> Result<()> {
         let mut keyed = Vec::new();
@@ -357,17 +421,21 @@ impl Read<'_> {
         }
         keyed.sort_by_key(|(f, m)| (f.priority, Reverse(f.created), m.id()));
         for (facts, m) in keyed {
-            let from = self.handle(graph, facts.author).await?;
-            let to = match facts.to.map(|to| (to.parse::<EntityId>(), to)) {
-                Some((Ok(id), _)) => Addressee::Principal { id, handle: self.handle(graph, id).await? },
-                Some((Err(_), name)) => Addressee::Name(name),
-                None => Addressee::NoOne,
+            let asking = if asked_of {
+                Asking::Of { from: Party { id: facts.author, handle: self.handle(graph, facts.author).await? } }
+            } else {
+                let to = match facts.to.map(|to| (to.parse::<EntityId>(), to)) {
+                    Some((Ok(id), _)) => Addressee::Principal(Party { id, handle: self.handle(graph, id).await? }),
+                    Some((Err(_), name)) => Addressee::Name(name),
+                    None => Addressee::NoOne,
+                };
+                Asking::By { to }
             };
             let title = reason::first_words(&facts.content, reason::NAME_WORDS);
             listed.records.push(self.record(
                 m.id(),
-                RecordKind::Ask { from, to },
-                Written { title: &title, text: facts.content, created: facts.created },
+                RecordKind::Ask(asking),
+                Written { title: &title, text: Some(facts.content), created: Some(facts.created) },
                 m.project_id()?,
                 Some(Route::question(m.id())),
             )?);
@@ -398,8 +466,8 @@ impl Read<'_> {
         for (facts, t) in keyed {
             listed.records.push(self.record(
                 t.id(),
-                RecordKind::Task { status: facts.status },
-                Written { title: &facts.title, text: facts.what, created: facts.created },
+                RecordKind::Task { status: Some(facts.status) },
+                Written { title: &facts.title, text: facts.what, created: Some(facts.created) },
                 t.project_id()?,
                 Some(Route::task(t.id())),
             )?);
@@ -414,7 +482,7 @@ impl Read<'_> {
         let mut records = Vec::new();
         for n in unread.iter().take(self.extent.unread) {
             let sentence = reason::plain(&reason::gather(graph, n, None).await?);
-            let written = Written { title: &sentence, text: String::new(), created: n.created()? };
+            let written = Written { title: &sentence, text: None, created: n.created().ok() };
             records.push(self.record(n.id(), RecordKind::Notification, written, project.record, None)?);
         }
         Ok(Section {
@@ -441,11 +509,12 @@ impl Read<'_> {
         let mut records = Vec::new();
         let mut unreadable = Vec::new();
         for t in ready.iter().take(self.extent.ready) {
-            match task_facts(t) {
-                Ok(facts) => records.push(self.record(
+            // Prime lists a ready task by its title; what else it is, a reader takes where it reads.
+            match t.title() {
+                Ok(title) => records.push(self.record(
                     t.id(),
-                    RecordKind::Task { status: facts.status },
-                    Written { title: &facts.title, text: facts.what, created: facts.created },
+                    RecordKind::Task { status: t.status().ok() },
+                    Written { title: &title, text: ops::text(t.what()).ok(), created: t.created().ok() },
                     project.record,
                     Some(Route::task(t.id())),
                 )?),
@@ -520,10 +589,10 @@ fn question_facts(m: &MessageView) -> Result<QuestionFacts> {
     })
 }
 
-/// What a task is listed by.
+/// What an assigned task is listed by: all of it but its what, which only the view shows.
 struct TaskFacts {
     title: String,
-    what: String,
+    what: Option<String>,
     status: TaskStatus,
     priority: Option<i64>,
     created: i64,
@@ -532,7 +601,7 @@ struct TaskFacts {
 fn task_facts(t: &TaskView) -> Result<TaskFacts> {
     Ok(TaskFacts {
         title: t.title()?,
-        what: ops::text(t.what())?,
+        what: ops::text(t.what()).ok(),
         status: t.status()?,
         priority: t.priority()?,
         created: t.created()?,
@@ -542,8 +611,8 @@ fn task_facts(t: &TaskView) -> Result<TaskFacts> {
 /// What a record says of itself, from which [`Read::record`] makes it.
 struct Written<'a> {
     title: &'a str,
-    text: String,
-    created: i64,
+    text: Option<String>,
+    created: Option<i64>,
 }
 
 /// The open questions of a project that ask the principal named `handle` by that name, with or

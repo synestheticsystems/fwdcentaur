@@ -85,12 +85,16 @@ fn the_view_lists_each_principal_of_the_session_with_what_waits_on_the_person_fi
     let short = &list(&groups[2], "waits_on_you").expect("waits on you")["records"][0];
     assert_eq!(short["lines"], json!([]), "a title that holds the whole text is not said again");
 
-    // Read for another principal with --as, what lead-sam asked it waits on it, and its Answer acts
-    // as it.
-    let theirs = s.view_with(&["--as", "impl-sam"])?;
-    let waiting = &list(&theirs["principals"][0], "waits_on_you").expect("waits on impl-sam")["records"][0];
-    assert_eq!(waiting["title"], "Does the retry cover the page too?", "{theirs}");
-    assert_eq!(waiting["actions"][0]["args"][3], "impl-sam");
+    // `--as` naming the person by their principal's id reads as their name does; naming an agent,
+    // it says so and nothing waits on anyone.
+    let tester = s.person_id(&s.alpha)?;
+    assert_eq!(s.view_with(&["--as", &tester])?["principals"], view["principals"]);
+    let agent = s.view_with(&["--as", "impl-sam"])?;
+    assert_eq!(
+        agent["lines"],
+        json!(["impl-sam names an agent, and the view is a person's, so nothing here waits on you and nothing can be answered."])
+    );
+    assert_eq!(list(&agent["principals"][0], "waits_on_you"), None);
     Ok(())
 }
 
@@ -112,7 +116,17 @@ fn answer_replies_in_the_persons_words_and_a_failed_press_says_why_in_one_line()
     let args: Vec<String> = serde_json::from_value(answer["args"].clone())?;
     assert_eq!(
         args,
-        ["--project", &s.project_id(&s.alpha)?, "--as", "tester", "--format", "pane", "reply", &question, "-"]
+        [
+            "--project",
+            &s.project_id(&s.alpha)?,
+            "--as",
+            &s.person_id(&s.alpha)?,
+            "--format",
+            "pane",
+            "reply",
+            &question,
+            "-"
+        ]
     );
 
     let words = "-- no: the pane links there.\n\nLeave the primer as it is.\n";
@@ -165,17 +179,34 @@ fn a_reply_takes_its_text_from_standard_input_whole_and_pane_is_for_actions_alon
         String::from_utf8_lossy(&moved.stderr)
     );
 
-    let other = s.command(&s.alpha, None, &["--format", "pane", "task", "list"]).output()?;
-    let said = String::from_utf8(other.stderr)?;
-    assert!(
-        !other.status.success() && said.contains("--format pane is for the commands a session view's actions run"),
-        "{said}"
-    );
+    // Refused before anything runs, a hook's command and a deadline's included, in one line.
+    let refused = [&["task", "list"][..], &["session", "stamp"], &["prime", "--timeout", "5"]];
+    for command in refused {
+        let mut run = s.command(&s.alpha, None, &[&["--format", "pane"][..], command].concat());
+        let out = run.stdin(Stdio::null()).output()?;
+        let said = String::from_utf8(out.stderr)?;
+        assert_eq!(
+            (out.status.code(), out.stdout.as_slice(), said.as_str()),
+            (
+                Some(1),
+                &b""[..],
+                "--format pane is for the commands a session view's actions run, `reply` alone; leave it off\n"
+            ),
+            "{command:?}"
+        );
+    }
+    // A failure's one line holds no control character, whatever its error quotes.
+    let args = ["--as", "tester", "--format", "pane", "--project", "alpha", "reply", "no\u{1b}[31mthing", "-"];
+    let failed = s.press(&args.map(str::to_string), "words")?;
+    let said = String::from_utf8(failed.stderr)?;
+    assert!(!failed.status.success() && said.lines().count() == 1, "{said}");
+    assert!(!said.trim_end().chars().any(char::is_control), "{said:?}");
     Ok(())
 }
 
 /// A session no principal is bound to says so in its one line, and the view is JSON alone: another
-/// `--format` is refused, as is an id that is no Claude Code session's.
+/// `--format` is refused, as is an id that is no Claude Code session's, and an identity file that is
+/// not there or cannot be read.
 #[test]
 fn a_session_no_principal_is_bound_to_says_so() -> Result<()> {
     let s = Scratch::new()?;
@@ -191,5 +222,23 @@ fn a_session_no_principal_is_bound_to_says_so() -> Result<()> {
     assert!(
         !wrong.status.success() && String::from_utf8_lossy(&wrong.stderr).contains("is not a Claude Code session id")
     );
+
+    // Without --as, the person is the one the identity file names: a file that is not there, or
+    // that cannot be read, is an error naming it, never the login name in its place.
+    let identity = s.dir.path().join("data").join("identity.toml");
+    let kept = std::fs::read(&identity)?;
+    std::fs::remove_file(&identity)?;
+    let missing = s.command(s.dir.path(), None, &["session", "view", SESSION]).env("USER", "someone-else").output()?;
+    let said = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        !missing.status.success() && said.contains(&identity.display().to_string()) && said.contains("does not exist"),
+        "{said}"
+    );
+    std::fs::write(&identity, "handle = [\"not a name\"]")?;
+    let garbled = s.command(s.dir.path(), None, &["session", "view", SESSION]).output()?;
+    let said = String::from_utf8_lossy(&garbled.stderr);
+    assert!(!garbled.status.success() && said.contains(&identity.display().to_string()), "{said}");
+    std::fs::write(&identity, kept)?;
+    assert_eq!(s.view()?["principals"], json!([]));
     Ok(())
 }
