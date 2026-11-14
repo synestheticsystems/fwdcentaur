@@ -154,6 +154,8 @@ fn an_agent_works_under_an_intention_of_another_project_and_a_text_reaches_a_com
     let held = only_one(&s)?;
     assert_eq!((&held["intention"]["project"], &held["intention"]["words"]), (&"beta".into(), &"".into()));
     assert_eq!(held["standing"], "unread");
+    let shown = s.json(&s.alpha, None, &["intention", "show", &theirs])?;
+    assert_eq!((&shown["from_project"], &shown["title"]), (&"beta".into(), &"Builds stay under a minute".into()));
 
     let asked = s.made(&s.alpha, Some("main"), &["ask", "--to", "tester", "which build?"], "")?;
     let text = "- the release build\n- not the debug one";
