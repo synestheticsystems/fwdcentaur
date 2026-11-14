@@ -1,13 +1,17 @@
 //! Reading the person's view of a session from a node (`session_view::read`), over two projects of
 //! one store in memory: whose groups it holds and in what order whichever project it is read
 //! through, the person it is for resolved once and strictly in each project, the questions they
-//! answered, and the records a text cites named, never shown by id. How a read becomes a document
-//! is tested beside it (src/session_view/tests.rs).
+//! answered, the records a text cites named, never shown by id, and the session's active
+//! intentions. How a read becomes a document is tested beside it (src/session_view/tests.rs).
 
 use ankurah::property::{Json, Ref};
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah_commons::intention_graph::IntentionStatus;
+use ankurah_commons::records::ClosureView;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::decision_log::date;
+use fwd_core::intentions;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateTask, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
@@ -25,6 +29,7 @@ struct Two {
     tester: EntityId,
     their_tester: EntityId,
     lead: EntityId,
+    subagent: EntityId,
 }
 
 async fn two() -> Result<Two> {
@@ -43,9 +48,17 @@ async fn two() -> Result<Two> {
     // In beta first, so that a read that kept the order things were made in would put beta first.
     agent(&beta, "lead-sam", "claude-code:s1/main").await?;
     let lead = agent(&alpha, "lead-sam", "claude-code:s1/main").await?;
-    ops::add_principal(&alpha, "impl-sam", Some(AgentRole::Implementer), None, None, None, Some("claude-code:s1/a1"))
-        .await?;
-    Ok(Two { alpha, beta, tester, their_tester, lead })
+    let subagent = ops::add_principal(
+        &alpha,
+        "impl-sam",
+        Some(AgentRole::Implementer),
+        None,
+        None,
+        None,
+        Some("claude-code:s1/a1"),
+    )
+    .await?;
+    Ok(Two { alpha, beta, tester, their_tester, lead, subagent })
 }
 
 /// The view of `s1` for `reader`, read through `graph`, as JSON.
@@ -243,5 +256,48 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
             "{shown}"
         );
     }
+    Ok(())
+}
+
+/// The session's active intentions are those assigned to the principals of its own thread, of any
+/// project: each titled by its title, its line its speaker's name and the day in bold before its
+/// words, another project's name a tag, and one since fulfilled saying so in a second line and a
+/// tag; no path and no action. What is assigned to its subagent is not among them.
+#[tokio::test]
+async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -> Result<()> {
+    let t = two().await?;
+    let ines = ops::ensure_principal(&t.alpha, "ines", "Ines Moreau", PrincipalKind::Human, None).await?;
+    let words = "The list stays where I left it.".to_string();
+    let ours = intentions::create(&t.alpha, t.lead, "Readers keep their place", words, Some(ines)).await?;
+    let theirs = intentions::create(&t.beta, t.their_tester, "Builds stay under a minute", String::new(), None).await?;
+    let done = intentions::create(&t.alpha, ines, "Name the page", "A short name.".into(), None).await?;
+    let subagents = intentions::create(&t.alpha, ines, "Draw the panel", String::new(), None).await?;
+    for it in [&ours, &theirs, &done] {
+        intentions::assign(&t.alpha, t.lead, it, t.lead).await?;
+    }
+    intentions::assign(&t.alpha, t.subagent, &subagents, t.subagent).await?;
+    intentions::close(&t.alpha, ines, &done, IntentionStatus::Fulfilled, None, None).await?;
+
+    let json = view(&t.alpha, Reader::Identity("tester")).await?;
+    let section = &json["sections"][0];
+    assert_eq!((&section["section"], &section["of"]), (&json!("active_intentions"), &json!(3)), "{json}");
+    let row = |record: &(PlacementView, intentions::Parts)| -> Value {
+        let id = json!(record.0.id().to_base64());
+        section["records"].as_array().into_iter().flatten().find(|r| r["id"] == id).cloned().unwrap_or(Value::Null)
+    };
+    let day = date(ours.1 .1.created()?);
+    assert_eq!(
+        row(&ours),
+        json!({
+            "id": ours.0.id().to_base64(), "kind": "intention", "title": "Readers keep their place", "tags": [],
+            "lines": [format!("**Ines Moreau, {day}:** The list stays where I left it.")], "path": null, "actions": [],
+        })
+    );
+    assert_eq!(row(&theirs)["tags"], json!([{"text": "beta", "tone": null, "at": null}]));
+    let closure = t.alpha.component_of::<ClosureView>(&done.0).await?.expect("closed");
+    let closed = date(closure.closed()?.expect("when it closed"));
+    assert_eq!(row(&done)["lines"][1], format!("fulfilled on {closed}"));
+    assert_eq!(row(&done)["tags"], json!([{"text": "fulfilled", "tone": null, "at": null}]));
+    assert_eq!(row(&subagents), Value::Null, "the subagent's is not the session's");
     Ok(())
 }

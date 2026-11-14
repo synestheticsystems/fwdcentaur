@@ -6,6 +6,7 @@
 //! its name, an intention by its title; in a Markdown block, as a link to its page where the page has
 //! one.
 
+use super::markdown;
 use crate::anchor_name::AnchorName;
 use crate::project_graph::{Followed, ProjectGraph, Referent, Whose};
 use crate::references::{self, Named};
@@ -70,7 +71,7 @@ impl Cited {
     /// `page`, where the page has one.
     pub(super) fn markdown(&self, text: &str, page: &str) -> String {
         references::render_named(text, |named| {
-            let label = escaped(&self.label(named));
+            let label = markdown::escaped(&self.label(named));
             Some(match self.place(named.id) {
                 Some(path) => format!("[{label}]({page}{path})"),
                 None => label,
@@ -112,16 +113,4 @@ impl Cited {
         };
         Some(page_path(found.project, &route))
     }
-}
-
-/// `label` with what Markdown reads as markup escaped, so that it shows as the words it is.
-fn escaped(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    for c in label.chars() {
-        if matches!(c, '\\' | '[' | ']' | '(' | ')' | '<' | '>' | '*' | '_' | '`' | '!' | '#') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }

@@ -1,5 +1,6 @@
 //! How what a session holds becomes the person's view: which list each record stands in, what its
-//! row says and what can be done from it, what is folded, the caps and the document's other states.
+//! row says and what can be done from it, how prominent each list is, the caps and the document's
+//! other states.
 //! Reading it from a node is tested in crates/fwd-core/tests/session_view.rs, and the command in
 //! crates/fwd/tests/session_view/.
 
@@ -105,6 +106,9 @@ fn held(holdings: Vec<Holding>, person: Person) -> Held {
         projects: vec![project(0), project(1), project(2)],
         names,
         cited: Cited::default(),
+        intentions: Vec::new(),
+        unreadable_intentions: 0,
+        assigned: Vec::new(),
     }
 }
 
@@ -201,16 +205,52 @@ fn each_record_stands_in_the_list_of_whom_it_waits_on() {
             assert_eq!(row["actions"].as_array().unwrap().is_empty(), !answerable, "{row}");
         }
     }
-    let folded: Vec<(&Value, &Value)> =
-        group["sections"].as_array().unwrap().iter().map(|s| (&s["section"], &s["folded"])).collect();
+    let headed: Vec<(&Value, &Value)> =
+        group["sections"].as_array().unwrap().iter().map(|s| (&s["title"], &s["prominence"])).collect();
+    let secondary = json!("secondary");
     assert_eq!(
-        folded,
+        headed,
         [
-            (&json!("waits_on_you"), &json!(false)),
-            (&json!("holds"), &json!(false)),
-            (&json!("waits_on_others"), &json!(true))
+            (&json!("Waiting on you"), &secondary),
+            (&json!("Working On"), &secondary),
+            (&json!("Waiting on others"), &secondary)
         ]
     );
+}
+
+/// The session's active intentions stand at the document's root, before its principals, above
+/// everything else; with none assigned the section is there all the same, saying so, and what could
+/// not be read is said by count.
+#[test]
+fn the_sessions_active_intentions_stand_first_and_say_so_when_there_are_none() {
+    let mut view = held(vec![holding(20, "lead-sam", "main", Vec::new(), 0)], person(&[]));
+    let none = printed(&view.document(PAGE));
+    assert_eq!(
+        none["sections"],
+        json!([{
+            "section": "active_intentions", "prominence": "primary", "title": "Active Intentions",
+            "lines": ["No active intentions recorded for this session yet."], "shown": 0, "of": 0, "more": null,
+            "records": [],
+        }])
+    );
+    let row = Row {
+        id: id(50).to_base64(),
+        kind: RowKind::Intention,
+        title: "Readers keep their place".into(),
+        tags: Vec::new(),
+        lines: vec!["**Tester, 2026-11-14:** The list stays where I left it.".into()],
+        path: None,
+        actions: Vec::new(),
+    };
+    view.intentions = vec![row];
+    view.unreadable_intentions = 1;
+    let one = printed(&view.document(PAGE));
+    let section = &one["sections"][0];
+    assert_eq!(
+        (&section["shown"], &section["of"], &section["records"][0]["kind"]),
+        (&json!(1), &json!(1), &json!("intention"))
+    );
+    assert_eq!(section["lines"], json!(["fwd could not read 1 of the intentions assigned to this session."]));
 }
 
 /// A question asked of the person, now in a project where they have no principal of their own,
@@ -246,12 +286,11 @@ fn a_question_where_the_person_has_no_principal_of_their_own_has_no_answer_and_s
     assert_eq!(json["principals"][0]["sections"][1]["records"][0]["tags"][0]["text"], "to tester");
 }
 
-/// The session's own thread comes first and stands open; a subagent's group is folded unless
-/// something in it waits on the person, and says what it is doing, the first task it has in
-/// progress; each group names the principal, its role and its project, and how many unread
-/// notifications it has; a list with nothing in it is not in the document.
+/// The session's own thread comes first; a subagent's group says what it is doing, the first task
+/// it has in progress; each group names the principal, its role and its project, and how many
+/// unread notifications it has; a list with nothing in it is not in the document.
 #[test]
-fn a_subagents_group_is_folded_unless_something_in_it_waits_on_the_person() {
+fn the_own_threads_group_comes_first_and_a_subagents_says_what_it_is_doing() {
     let doing = section(
         SectionKind::Assigned,
         vec![
@@ -270,20 +309,13 @@ fn a_subagents_group_is_folded_unless_something_in_it_waits_on_the_person() {
         0,
     );
     let json = printed(&held(vec![main, quiet, asking], person(&[])).document(PAGE));
-    let groups: Vec<(&Value, &Value, usize)> = json["principals"]
+    let groups: Vec<(&Value, usize)> = json["principals"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|g| (&g["title"], &g["folded"], g["sections"].as_array().unwrap().len()))
+        .map(|g| (&g["title"], g["sections"].as_array().unwrap().len()))
         .collect();
-    assert_eq!(
-        groups,
-        [
-            (&json!("lead-sam"), &json!(false), 1),
-            (&json!("impl-quiet"), &json!(true), 1),
-            (&json!("impl-asking"), &json!(false), 1)
-        ]
-    );
+    assert_eq!(groups, [(&json!("lead-sam"), 1), (&json!("impl-quiet"), 1), (&json!("impl-asking"), 1)]);
     assert_eq!(
         json["principals"][1]["tags"],
         json!([
@@ -376,11 +408,13 @@ fn the_document_has_the_contracts_keys_and_no_control_characters() {
         names.sort();
         names
     };
-    assert_eq!(keys(&json), expect(&["title", "page", "lines", "principals"]));
+    assert_eq!(keys(&json), expect(&["title", "page", "lines", "sections", "principals"]));
+    let list_keys = expect(&["section", "prominence", "title", "lines", "shown", "of", "more", "records"]);
+    assert_eq!(keys(&json["sections"][0]), list_keys);
     let group = &json["principals"][0];
-    assert_eq!(keys(group), expect(&["id", "title", "tags", "folded", "lines", "sections"]));
+    assert_eq!(keys(group), expect(&["id", "title", "tags", "lines", "sections"]));
     let list = &group["sections"][0];
-    assert_eq!(keys(list), expect(&["section", "title", "folded", "lines", "shown", "of", "more", "records"]));
+    assert_eq!(keys(list), list_keys);
     let row = &list["records"][0];
     assert_eq!(keys(row), expect(&["id", "kind", "title", "tags", "lines", "path", "actions"]));
     assert_eq!(keys(&row["tags"][0]), expect(&["text", "tone", "at"]));
@@ -428,12 +462,15 @@ fn every_string_is_capped_and_the_whole_document_stays_within_the_budget() {
 }
 
 /// What the view listens to: the projects, every project's principals of the session, each
-/// principal's working set, and the thread of each question that asks the person, answered or not.
+/// principal's working set, the thread of each question that asks the person, answered or not, the
+/// intentions assigned to the principal of the session's own thread, and each of those intentions,
+/// one that could not be read included.
 #[test]
 fn the_live_reads_cover_what_the_document_is_made_from() {
     let asked = vec![ask(10, by(to(1)), 0), ask(11, by(to(30)), 0)];
     let sections = vec![section(SectionKind::YouAsked, asked), section(SectionKind::Assigned, Vec::new())];
-    let view = held(vec![holding(20, "lead-sam", "main", sections, 0)], person(&[id(10)]));
+    let mut view = held(vec![holding(20, "lead-sam", "main", sections, 0)], person(&[id(10)]));
+    view.assigned = vec![id(50), id(51)];
     let session = |n| LiveRead::SessionPrincipals { project: project(n), session: "s1".into() };
     let expected = BTreeSet::from([
         LiveRead::Projects,
@@ -446,6 +483,9 @@ fn the_live_reads_cover_what_the_document_is_made_from() {
         LiveRead::TasksAssignedTo(id(20)),
         LiveRead::Unread { project: project(0), principal: id(20) },
         LiveRead::AnswersTo(id(10)),
+        LiveRead::IntentionsAssignedTo(id(20)),
+        LiveRead::AssignedIntention(id(50)),
+        LiveRead::AssignedIntention(id(51)),
     ]);
     assert_eq!(view.live_reads(), expected);
 }

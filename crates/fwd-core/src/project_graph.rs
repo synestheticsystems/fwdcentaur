@@ -442,6 +442,15 @@ impl ProjectGraph {
         self.ctx.fetch(touching("to_id", to, kind)).await
     }
 
+    /// A live query on what [`ProjectGraph::relations_to`] reads.
+    pub fn query_relations_to(
+        &self,
+        to: EntityId,
+        kind: Option<RelationKind>,
+    ) -> Result<LiveQuery<RelationView>, RetrievalError> {
+        self.ctx.query(touching("to_id", to, kind))
+    }
+
     /// The messages whose `field`, one of the fields that say what a message is about (`task`,
     /// `anchor`, `scope`, `decision`) or which thread it is in (`thread`, `reply_to`), holds the
     /// record `about`, whichever project wrote them: a message about a record is a connection to it,

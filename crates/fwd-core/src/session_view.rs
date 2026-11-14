@@ -7,12 +7,14 @@
 //! its title and tags, that opens into its lines and its actions (docs/design/cli.md, "The person's
 //! view of a session").
 //!
-//! It covers the principals bound to the session's own thread, in every project, then those bound
-//! to its subagents, each by project name, then by name, read by the one working-set read `fwd
-//! prime` makes (`working_set`), so that the two cannot disagree about what a session holds. For
-//! each principal, in this order: what waits on the person, the open questions it asked them that
-//! they have not answered in the question's thread, as the page's Waiting on you counts a question;
-//! what it holds, the questions asked of it and then the tasks assigned to it; and what waits on
+//! First, at its root, the session's active intentions: those assigned to the principals bound to
+//! its own thread, of any project, read as `fwd prime` reads them (`intentions::assigned_to`). Then
+//! the principals bound to the session's own thread, in every project, then those bound to its
+//! subagents, each by project name, then by name, read by the one working-set read `fwd prime`
+//! makes (`working_set`), so that the two cannot disagree about what a session holds. For each
+//! principal, in this order: what waits on the person, the open questions it asked them that they
+//! have not answered in the question's thread, as the page's Waiting on you counts a question; what
+//! it is working on, the questions asked of it and then the tasks assigned to it; and what waits on
 //! others, the open questions it asked of anyone else or of no one in particular. Its unread
 //! notifications are counted on its group, and the ready tasks are not in the view. No string of
 //! the document holds an id: a text's references are named (`cited`), and a principal is named by
@@ -27,24 +29,30 @@ mod text;
 pub use person::{Person, Reader};
 pub use text::one_line;
 
+use crate::decision_log::date;
+use crate::intentions::{self, Parts};
 use crate::live_read::LiveRead;
-use crate::model::{PrincipalKind, TaskStatus};
+use crate::model::{PlacementView, PrincipalKind, PrincipalView, TaskStatus};
 use crate::naming;
-use crate::project_graph::{ProjectGraph, ProjectGraphError, ProjectRecord};
+use crate::project_graph::{Followed, ProjectGraph, ProjectGraphError, ProjectRecord, Whose};
 use crate::reason;
 use crate::route::{page_path, Route};
 use crate::subject;
 use crate::working_set::{self, Addressee, Extent, Holding, Known, Party, Record, SectionKind};
 use ankurah::property::PropertyError;
 use ankurah::EntityId;
+use ankurah_commons::records::{AttributionView, ClosureView, LastEditView};
 use anyhow::{anyhow, Result};
 use cited::Cited;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
-use text::{block, plain, LINE_LIMIT, TAG_LIMIT, TITLE_LIMIT};
+use text::{block, plain, unpaged_block, LINE_LIMIT, TAG_LIMIT, TITLE_LIMIT};
 
 /// The document's title, the same in every state.
-const TITLE: &str = "fwd: what this session holds";
+const TITLE: &str = "fwd Current Session";
+
+/// What the section of the active intentions says when none is assigned to the session.
+const NO_INTENTIONS: &str = "No active intentions recorded for this session yet.";
 
 /// How a principal the view cannot find is named, without its id.
 const NOT_FOUND: &str = "someone fwd cannot find";
@@ -60,6 +68,8 @@ pub struct Document {
     /// daemon is out of reach or a read failed, what keeps the reader from answering, and groups
     /// left out.
     pub lines: Vec<String>,
+    /// The session's own sections, before its principals: its active intentions.
+    pub sections: Vec<List>,
     pub principals: Vec<Group>,
 }
 
@@ -73,19 +83,17 @@ pub struct Group {
     /// Its role, its project, for a subagent the task it has in progress, and how many unread
     /// notifications it has, when it has any.
     pub tags: Vec<Tag>,
-    /// A subagent's group is folded unless something in it waits on the person.
-    pub folded: bool,
     pub lines: Vec<String>,
     /// Those with records or lines, in [`ListKind`]'s order.
     pub sections: Vec<List>,
 }
 
-/// One section of a principal's group: a headed list of rows.
+/// One section of the view, of the session's own or of a principal's group: a headed list of rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct List {
     pub section: ListKind,
+    pub prominence: Prominence,
     pub title: String,
-    pub folded: bool,
     /// What is said of the list: records left out, and records that could not be read.
     pub lines: Vec<String>,
     /// How many rows it shows, of how many it holds.
@@ -97,16 +105,27 @@ pub struct List {
     pub records: Vec<Row>,
 }
 
-/// The sections of a principal's group, in the order they stand.
+/// The sections of the view, in the order they stand: the session's own, then a principal's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListKind {
+    /// The intentions assigned to the principals of the session's own thread that it holds.
+    ActiveIntentions,
     /// The open questions the principal asked the person that the person has not answered.
     WaitsOnYou,
     /// The questions asked of the principal, then the tasks assigned to it.
     Holds,
     /// The open questions it asked of anyone else, or of no one in particular.
     WaitsOnOthers,
+}
+
+/// How a section is drawn beside the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Prominence {
+    /// Above everything else: the session's active intentions.
+    Primary,
+    Secondary,
 }
 
 /// A record, as a row that opens into its lines and its actions.
@@ -132,6 +151,7 @@ pub struct Row {
 pub enum RowKind {
     Ask,
     Task,
+    Intention,
 }
 
 /// A short label beside a title.
@@ -148,7 +168,7 @@ pub struct Tag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tone {
-    /// It waits on the person: neither it nor what holds it is ever folded.
+    /// It waits on the person.
     Attention,
 }
 
@@ -186,6 +206,13 @@ pub struct Held {
     /// question.
     names: HashMap<EntityId, String>,
     cited: Cited,
+    /// The session's active intentions as rows, made as they are read, since no address enters
+    /// them; then how many assigned intentions could not be read.
+    intentions: Vec<Row>,
+    unreadable_intentions: usize,
+    /// The intentions assigned to the principals of the session's own thread, by id, read or not,
+    /// whose changes the view listens to.
+    assigned: Vec<EntityId>,
 }
 
 /// What a working set is read for the view: no ready tasks, and the unread notifications counted
@@ -227,7 +254,85 @@ pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Re
     let names =
         known.projects.iter().flat_map(|(_, all)| all).filter_map(|p| Some((p.id(), p.handle().ok()?))).collect();
     let projects = known.projects.into_iter().map(|(project, _)| project).collect();
-    Ok(Held { session: session.to_string(), holdings, person, projects, names, cited })
+    let (mut intentions, mut unreadable_intentions, mut assigned) = (Vec::new(), 0, Vec::new());
+    let own_thread = holdings.iter().filter(|h| h.subject.as_deref().is_some_and(subject::is_main_thread));
+    for h in own_thread {
+        let there = graph.graph_of_project(&h.project);
+        for (id, followed) in intentions::assigned_to(&there, h.principal).await? {
+            if assigned.contains(&id) {
+                continue;
+            }
+            assigned.push(id);
+            let row = match followed {
+                Followed::Held { project, found, .. } => intention_row(&there, &project, &found).await.ok(),
+                Followed::NotHeld => None,
+            };
+            match row {
+                Some(row) => intentions.push(row),
+                // Said by count in the section, as a list says what of it could not be read.
+                None => unreadable_intentions += 1,
+            }
+        }
+    }
+    Ok(Held {
+        session: session.to_string(),
+        holdings,
+        person,
+        projects,
+        names,
+        cited,
+        intentions,
+        unreadable_intentions,
+        assigned,
+    })
+}
+
+/// An intention assigned to a principal of the session's own thread, read in `there`, that
+/// principal's project's graph, where `project` says whose it is, as a row: titled by its title;
+/// its line, in bold, whose words they are, by their speaker's name, and the day its words were
+/// last written down, then the words; for one since fulfilled or withdrawn, a second line saying so
+/// and when, and a tag; its project's name as a tag when that is not its principal's; no path,
+/// since the page has none for an intention yet, and no action.
+async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(PlacementView, Parts)) -> Result<Row> {
+    let (placement, (intention, creation)) = record;
+    let attribution = there.component_of::<AttributionView>(placement).await?;
+    let speaker = intentions::speaker(creation, attribution.as_ref())?;
+    let name = match there.follow::<PrincipalView>(speaker).await? {
+        Followed::Held { found, .. } => found.display_name()?,
+        Followed::NotHeld => NOT_FOUND.into(),
+    };
+    let written = match there.component_of::<LastEditView>(placement).await? {
+        Some(edit) => edit.edited()?,
+        None => creation.created()?,
+    };
+    let name = markdown::escaped(&plain(&name, TITLE_LIMIT));
+    let mut lines: Vec<String> =
+        unpaged_block(&format!("**{name}, {}:** {}", date(written), intention.words()?)).into_iter().collect();
+    let mut tags = Vec::new();
+    if let Whose::Other(p) = project {
+        tags.push(Tag::plain(&p.name));
+    }
+    let status = intention.status()?;
+    if intentions::ended(status) {
+        let closed = match there.component_of::<ClosureView>(placement).await? {
+            Some(closure) => closure.closed()?,
+            None => None,
+        };
+        lines.push(match closed {
+            Some(at) => format!("{status} on {}", date(at)),
+            None => status.to_string(),
+        });
+        tags.push(Tag::plain(&status.to_string()));
+    }
+    Ok(Row {
+        id: placement.id().to_base64(),
+        kind: RowKind::Intention,
+        title: plain(&intention.title()?, TITLE_LIMIT),
+        tags,
+        lines,
+        path: None,
+        actions: Vec::new(),
+    })
 }
 
 /// The other party of a question, as the list it stands in names it.
@@ -243,8 +348,9 @@ enum Asked<'a> {
 
 impl Held {
     /// The live queries whose changes can change the view: the projects, each project's principals
-    /// bound to the session, each principal's working set, and the threads of the questions asked
-    /// of the person.
+    /// bound to the session, each principal's working set, the threads of the questions asked of
+    /// the person, the intentions assigned to the principals of the session's own thread, and each
+    /// of those intentions.
     pub fn live_reads(&self) -> BTreeSet<LiveRead> {
         let mut reads = BTreeSet::from([LiveRead::Projects]);
         let session = |project: &ProjectRecord| LiveRead::SessionPrincipals {
@@ -257,22 +363,54 @@ impl Held {
             reads.extend(
                 h.asked_by().filter(|(r, to)| self.person.asked(r, to)).map(|(r, _)| LiveRead::AnswersTo(r.id)),
             );
+            if h.subject.as_deref().is_some_and(subject::is_main_thread) {
+                reads.insert(LiveRead::IntentionsAssignedTo(h.principal));
+            }
         }
+        reads.extend(self.assigned.iter().map(|id| LiveRead::AssignedIntention(*id)));
         reads
     }
 
     /// The document, its rows' paths following `page`, the page's address.
     pub fn document(&self, page: &str) -> Document {
         let mut lines = self.person.lines();
+        let sections = vec![self.active_intentions()];
         if self.holdings.is_empty() {
             let unbound = "No fwd principal is bound to this session yet. Its agent names itself with `fwd principal add <name> --role <role>`.";
             lines.insert(0, unbound.into());
-            return Document { title: TITLE.into(), page: Some(page.into()), lines, principals: Vec::new() };
+            return Document { title: TITLE.into(), page: Some(page.into()), lines, sections, principals: Vec::new() };
         }
         let principals = self.holdings.iter().map(|h| self.group(h, page)).collect();
-        let mut document = Document { title: TITLE.into(), page: Some(page.into()), lines, principals };
+        let mut document = Document { title: TITLE.into(), page: Some(page.into()), lines, sections, principals };
         fit::within_budget(&mut document, |g, kind| self.more(&self.holdings[g], kind));
         document
+    }
+
+    /// The section of the session's active intentions, shown whether or not it holds any: its rows,
+    /// or the line saying there are none, and how many could not be read.
+    fn active_intentions(&self) -> List {
+        let mut lines = Vec::new();
+        if self.intentions.is_empty() && self.unreadable_intentions == 0 {
+            lines.push(NO_INTENTIONS.into());
+        }
+        if self.unreadable_intentions > 0 {
+            let n = self.unreadable_intentions;
+            lines.push(plain(
+                &format!("fwd could not read {n} of the intentions assigned to this session."),
+                LINE_LIMIT,
+            ));
+        }
+        let kind = ListKind::ActiveIntentions;
+        List {
+            section: kind,
+            prominence: kind.prominence(),
+            title: kind.title().into(),
+            lines,
+            shown: self.intentions.len(),
+            of: self.intentions.len(),
+            more: None,
+            records: self.intentions.clone(),
+        }
     }
 
     /// The page's own list of what the list `kind` of `h` holds, where the page has one that lists
@@ -335,8 +473,8 @@ impl Held {
             .filter(|(_, rows, lines)| !rows.is_empty() || !lines.is_empty())
             .map(|(kind, records, lines)| List {
                 section: kind,
+                prominence: kind.prominence(),
                 title: kind.title().into(),
-                folded: kind == ListKind::WaitsOnOthers,
                 lines,
                 shown: records.len(),
                 of: records.len(),
@@ -345,12 +483,10 @@ impl Held {
             })
             .collect();
         let own_thread = h.subject.as_deref().is_some_and(subject::is_main_thread);
-        let waits = sections.iter().any(|s| s.section == ListKind::WaitsOnYou);
         Group {
             id: h.principal.to_base64(),
             title: plain(&h.handle, TITLE_LIMIT),
             tags: self.group_tags(h, own_thread),
-            folded: !own_thread && !waits,
             lines: Vec::new(),
             sections,
         }
@@ -464,9 +600,17 @@ fn answer(question: &Record, me: EntityId) -> Action {
 impl ListKind {
     fn title(self) -> &'static str {
         match self {
+            ListKind::ActiveIntentions => "Active Intentions",
             ListKind::WaitsOnYou => "Waiting on you",
-            ListKind::Holds => "Holds",
+            ListKind::Holds => "Working On",
             ListKind::WaitsOnOthers => "Waiting on others",
+        }
+    }
+
+    fn prominence(self) -> Prominence {
+        match self {
+            ListKind::ActiveIntentions => Prominence::Primary,
+            ListKind::WaitsOnYou | ListKind::Holds | ListKind::WaitsOnOthers => Prominence::Secondary,
         }
     }
 }
@@ -492,7 +636,13 @@ impl Document {
     pub fn out_of_reach(&self) -> Document {
         let said =
             "fwd's daemon is out of reach; this is what it last said, and it will show again when the daemon answers.";
-        Document { title: TITLE.into(), page: None, lines: vec![said.into()], principals: self.principals.clone() }
+        Document {
+            title: TITLE.into(),
+            page: None,
+            lines: vec![said.into()],
+            sections: self.sections.clone(),
+            principals: self.principals.clone(),
+        }
     }
 
     /// The document after a read that failed with the daemon in reach: what was last shown, saying
@@ -513,13 +663,15 @@ impl Document {
             title: TITLE.into(),
             page: self.page.clone(),
             lines: vec![said],
+            sections: self.sections.clone(),
             principals: self.principals.clone(),
         }
     }
 
     /// The document before anything was read: the daemon out of reach, and nothing to show.
     pub fn never_read() -> Document {
-        Document { title: TITLE.into(), page: None, lines: Vec::new(), principals: Vec::new() }.out_of_reach()
+        Document { title: TITLE.into(), page: None, lines: Vec::new(), sections: Vec::new(), principals: Vec::new() }
+            .out_of_reach()
     }
 }
 

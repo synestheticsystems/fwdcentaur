@@ -14,7 +14,7 @@ use ankurah::entity::LocalTrxEntity;
 use ankurah::error::RetrievalError;
 use ankurah::model::{ComponentViews, MutableBorrow};
 use ankurah::property::PropertyError;
-use ankurah::{EntityId, MatchArgs, Model, Value, View};
+use ankurah::{EntityId, LiveQuery, MatchArgs, Model, Value, View};
 
 impl ProjectGraph {
     /// The project's placed records that `args` selects, each read through its `Placement` and
@@ -55,6 +55,12 @@ impl ProjectGraph {
     ) -> Result<Vec<(EntityId, EntityId)>, ProjectGraphError> {
         let every: Vec<(PlacementView, R)> = self.ctx.fetch(named_by_start(prefix, formerly)).await?;
         Ok(every.iter().map(|(p, _)| Ok((p.id(), p.project_id()?))).collect::<Result<_, PropertyError>>()?)
+    }
+
+    /// A live query on the placed record `id` through `R`'s components, wherever it is, which
+    /// tells of each change of what they hold.
+    pub fn query_placed<R: ComponentViews>(&self, id: EntityId) -> Result<LiveQuery<R>, RetrievalError> {
+        self.ctx.query(selecting(equals("id", Value::EntityId(id))))
     }
 
     /// The component `V` of the placed record `placement` is on; none when the record does not
