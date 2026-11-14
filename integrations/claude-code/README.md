@@ -20,6 +20,8 @@ export FWD_CLAUDE_SESSION='56693b92-71ca-49ec-8ab4-aee1de36a4d3' FWD_CLAUDE_AGEN
 
 fwd reads the pair as the command's subject, `claude-code:<session>/<agent>`, and acts as the principal of the project bound to it. Where a command carries a subject, `FWD_AS` is not read, and a `--as` naming any other principal is refused.
 
+A pane beside the chat that shows you what a session holds runs `fwd session view <session id> --follow`, which prints the view as one JSON document a line, again whenever it changes, and an empty line every 30 seconds while it is healthy; it ends by itself only when the daemon runs another build, and is then started again. A press in the pane runs `fwd` with the arguments the document gives the action, no shell, with no session in its environment, and your words on its standard input: the arguments name the project and you (`--as`), so the press acts as you, prints nothing when it succeeds and one line on standard error when it fails (`docs/design/cli.md`, "The person's view of a session").
+
 ## Installing
 
 Once per machine. `fwd` must be on the `PATH` Claude Code runs its hooks with (`~/.cargo/bin` after `cargo install --path crates/fwd`), in a build that has `fwd session stamp`.
