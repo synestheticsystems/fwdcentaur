@@ -47,7 +47,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "serde",
- "strum",
+ "strum 0.27.2",
  "thiserror 2.0.21",
  "wasm-bindgen",
 ]
@@ -70,6 +70,16 @@ dependencies = [
  "uniffi",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "ankurah-commons"
+version = "0.0.0"
+source = "git+https://github.com/ankurah/commons?rev=0ade853a7befb66dca9d64986ca37dcb338990e9#0ade853a7befb66dca9d64986ca37dcb338990e9"
+dependencies = [
+ "ankurah",
+ "serde",
+ "strum 0.26.3",
 ]
 
 [[package]]
@@ -125,7 +135,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "strum",
+ "strum 0.27.2",
  "thiserror 1.0.69",
  "uniffi",
  "wasm-bindgen",
@@ -166,7 +176,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "sha2",
- "strum",
+ "strum 0.27.2",
  "thiserror 1.0.69",
  "ulid",
  "uniffi",
@@ -240,7 +250,7 @@ dependencies = [
  "bincode",
  "futures-util",
  "native-tls",
- "strum",
+ "strum 0.27.2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.27.0",
@@ -1158,6 +1168,7 @@ name = "fwd"
 version = "0.0.1"
 dependencies = [
  "ankurah",
+ "ankurah-commons",
  "ankurah-storage-sqlite",
  "ankurah-websocket-client",
  "ankurah-websocket-server",
@@ -1190,6 +1201,7 @@ name = "fwd-core"
 version = "0.0.1"
 dependencies = [
  "ankurah",
+ "ankurah-commons",
  "ankurah-storage-sqlite",
  "ankurah-websocket-client",
  "anyhow",
@@ -1206,7 +1218,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
- "strum",
+ "strum 0.27.2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -2821,11 +2833,33 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
+dependencies = [
+ "strum_macros 0.26.4",
+]
+
+[[package]]
+name = "strum"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.27.2",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.119",
 ]
 
 [[package]]

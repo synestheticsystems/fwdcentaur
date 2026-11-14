@@ -51,6 +51,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ankurah-commons"
+version = "0.0.0"
+source = "git+https://github.com/ankurah/commons?rev=0ade853a7befb66dca9d64986ca37dcb338990e9#0ade853a7befb66dca9d64986ca37dcb338990e9"
+dependencies = [
+ "ankurah",
+ "serde",
+ "strum 0.26.3",
+]
+
+[[package]]
 name = "ankurah-core"
 version = "0.10.0"
 source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
@@ -791,6 +801,7 @@ name = "fwd-core"
 version = "0.0.1"
 dependencies = [
  "ankurah",
+ "ankurah-commons",
  "anyhow",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -798,6 +809,7 @@ dependencies = [
  "js-sys",
  "serde",
  "serde_json",
+ "sha2",
  "strum 0.27.2",
  "thiserror 2.0.21",
  "tracing",

@@ -4,7 +4,7 @@ Draft for discussion, 2026-09-24; revised the same day after Daniel's answers to
 
 ## Conventions
 
-- **Project**: an intention graph, a UUID and a name; a set of repositories identified by their upstream remotes, never by a clone or a worktree (R, 2026-09-25). The daemon keeps every project in one durable node and one store (`../DECISIONS.md`, D135), where each project has a `Project` record and every record of the nine models below names its project in a `project` field, set when the record is made; only a task's move to another project changes it, for the task and what belongs to it (`cli.md`, "Moving tasks to another project"). That field groups a project's records, and every list and live query holds one project's alone: every read and write goes through a project's graph, which adds it to them; while a record's relations, an id a record holds and an id someone types reach a record of any project, which is named beside it (D176, D181; `daemon.md`, "Projects in one node"). Checkouts (clones and worktrees) are local, dynamic and never in the graph.
+- **Project**: an intention graph, a UUID and a name; a set of repositories identified by their upstream remotes, never by a clone or a worktree (R, 2026-09-25). The daemon keeps every project in one durable node and one store (`../DECISIONS.md`, D135), where each project has a `Project` record and every record of the nine models below names its project in a `project` field, set when the record is made, and an intention or a reading in the `Placement` component on its entity (Intention and Reading, below); only a task's move to another project changes it, for the task and what belongs to it (`cli.md`, "Moving tasks to another project"). That field groups a project's records, and every list and live query holds one project's alone: every read and write goes through a project's graph, which adds it to them; while a record's relations, an id a record holds and an id someone types reach a record of any project, which is named beside it (D176, D181; `daemon.md`, "Projects in one node"). Checkouts (clones and worktrees) are local, dynamic and never in the graph.
 - **Identity**: every entity has an Ankurah `EntityId` (ULID, shown as its base64 string), and in v1 that full id is the identifier everywhere: CLI arguments, JSON output, `context` maps, notification refs (Daniel, Q3: sequential numbers are the most human-friendly and the least Ankurah-friendly; use the full id for now). The `T72`, `M15`, `S3`, `N120`, `C40` forms in these docs are placeholders for readability, not a feature. Human-friendly short ids are filed as a later task (T18: options are unique base64 prefixes like git short SHAs, which need no coordination, or project-sequential numbers, which need a single numberer). Since 2026-09-26 two narrow steps have been taken, both with the decision records: the CLI takes the first six characters or more of an id when they begin the id of exactly one entity the command could use (the first option, for the command line only), and a decision carries its project's number, cited as `D<number>` (the second option, for decisions only, numbered from the decisions themselves rather than by a numbering service).
 - **Timestamps** are i64 milliseconds since epoch, wall clock, informational only; Ankurah's causal ordering decides merges.
 - **Enumerations** are Rust enums stored as strings (the simplikeys `impl_wrapper_type!` plus `Property` pattern); unknown values are preserved, displayed as-is, and treated as "unknown" by rules.
@@ -188,6 +188,8 @@ pub struct Relation {
 | `step_of` | anything -> Task | `from` is a step of the task: a highlight to look at, a message, another task | acyclic between tasks, as `subtask_of` is (a checked step counts); made once per thing and task; `position` orders the checklist; checked by moving it to `resolved`, with `closed_by` and `closed` saying who and when, and unchecked by moving it back to `accepted` with them cleared; no other kind is ever `resolved`; a highlight's steps move with the first thread on it (Rules, Steps); taken off the checklist by moving it to `retracted` with the reason in `closed_reason`, by the task's creator or its assignee (Rules, "Taking a step off a checklist") |
 | `mention` | Message -> anything | the message's text names `to` inline, stored there as `[[<full id>]]` (a whole file at a version as its whole-file highlight's, `[[<full id>@<version>]]`) | one per reference in the text, written with the message when it is posted and never by `fwd link`; `via` is `{"inline": true, "ordinal": n}`, its place among the text's references from 1, with `"edited": true` added on one an edit of the text wrote; an edit keeps the relations of what the new text still names, taking their new places, and retracts those of what it no longer names, with the reason (Message, "Editing"); a page leaves it out of the message's own lozenges, since the text shows it, and lists it as "mentioned in" on what it names |
 | `concerns` | Message -> Task, Relation, Scope | the triage agent's linking of a human utterance to graph nodes | none |
+| `works_under` | Principal -> Intention | what governs the principal's current work: an intention of any project, which `fwd intention list --mine` reads back with the principal's reading of it | made once per principal and intention: linking again answers the relation that stands, and accepts one only proposed |
+| `serves` | Task or Intention -> Intention | the work, or the narrower aim, is for the broader one | made once per pair, as `works_under` is; acyclic, as `subtask_of` is, and never from an intention to itself |
 | `cites` | Task, Message or Decision -> Decision; Decision -> Task or Message | `from` rests on the ruling `to`, so it needs re-justifying when the ruling is repealed or superseded; from a decision to a task or a message, the ruling was made in that task's or that question's context | a decision at one end or both, never the same entity at both; made once (citing again answers the relation that stands, and accepts it, with the new note when one is given, when it was only proposed) |
 
 `fwd link`, and `fwd task create` for the relations its `--after`, `--under`, `--from` and `--motivated-by` make, refuse a relation whose ends are not of the kinds its row gives (`ops::joins`), naming them and what the ends are, since what every page reads from a relation rests on them (`cli.md`, "Relations").
@@ -373,6 +375,47 @@ Nothing else moves: a rejected, superseded or repealed decision stays so, and a 
 **Routing** (`agents-and-inbox.md`, rules 11 and 12): a proposal reaches the triage agent of the scope it governs, else the one that serves the whole project, and the project's people; a comment on a decision (every move's reason among them) reaches whoever filed it and whoever ruled; a repeal or a supersession reaches the authors of everything that cites the decision, which is the retraction audit's inbox side, carrying the comment the move wrote (`closed_reason_message`), and that comment's own notifications leave those authors out (the comment names its move in `context.move`), so no one hears of one move twice. None of them reaches whoever caused it.
 
 **The log.** `fwd decision export` renders every decision as markdown in the style `docs/DECISIONS.md` was written in by hand, headed by a comment saying it is a rendering: the rulings that govern the whole project first, under "Project-wide", then each scope's under the scope's name, the scopes by name, so that whoever works in one scope reads the project's rulings and that scope's; within each, in force, proposed, then rejected, superseded and repealed, each by number (a status with no ruling is left out); each entry `- **D<n>: title** (area, governs <scope>, day, decided by …): the ruling`, a project-wide one naming no scope, with its context, consequences and links. `scripts/import-decisions.py` turned the hand-written file into records once; from then on the file is that rendering.
+
+### Intention and Reading
+
+What a person or an agent wants to be true, in their own words, and one party's account of how it understands such a record, built on the Ankurah Commons' models (`ankurah-commons`, `intention-graph` and `records`) rather than fwd's own, so that the records can be shared with other applications of the same models (`crates/fwd-core/src/intentions.rs`). Each is one entity carrying several components:
+
+    an intention  Intention + Creation + Placement, Attribution when someone else wrote the words
+                  down, later LastEdit once reworded and Closure once fulfilled or withdrawn
+    a reading     Reading + Creation + Placement + WordingRead, Attribution when written down for
+                  someone else, later LastEdit once reworded
+
+`Intention` holds a title, the words and a status (wished, committed, fulfilled, withdrawn); `Reading` holds the record it reads (`of`, an intention or another reading), the words and a stance (agree, disagree, question). `Creation` says who wrote the record down and when, `Attribution` whose words they are when someone else wrote them down (the speaker; without it, whoever wrote them down), `LastEdit` when and by whom the words last changed, and `Closure` when, by whom and why an intention was closed. Each reference to a principal in them (`created_by`, `speaker`, `edited_by`, `closed_by`) holds a fwd principal's id (Principal, above), which does not carry the Commons' principal component yet. fwd's node mints the Commons' definitions itself, under ids of its own, until the Commons keeps a mint, so nothing reads a definition's id as lasting.
+
+The Commons' models name no project, so a record built on them carries fwd's `Placement` component, which holds only the project it is placed in:
+
+```rust
+#[derive(Model)]
+pub struct Placement {
+    pub project: Ref<Project>,
+}
+```
+
+A project's lists read such a record through its `Placement` and its other components in one query that carries the project, so no list leaves the project out; a record read by its id is the project's, and one an id names elsewhere is followed into its project, as fwd's own records are (`crates/fwd-core/src/project_graph/placed.rs`). An intention is placed in the project of the command that records it, and a reading in the project of the command that writes it, whichever project holds what it reads; a record's readings are read wherever they were placed.
+
+Every reading also carries fwd's `WordingRead`, which names the wording of the record it read, so that a confirmation counts only for the words it answered; a reading that lacks it is a broken record, refused as one that lacks `Creation` is:
+
+```rust
+#[derive(Model)]
+pub struct WordingRead {
+    #[active_type(LWW)] pub revision: String, // the revision of the intention or reading read, as it stood when the reading was last written
+}
+```
+
+A revision is the start of the SHA-256 of a wording's parts, each its length and its bytes, 12 hex characters: of an intention, its title and its words; of a reading, the revision it read, its stance and its words, so that a reading that read a new wording is a new revision even when its own words stay. A party has one standing reading of a record, which a later one rewords; two first readings that raced resolve to the first by id for every reader. Only a record's speaker or party changes its words, in person or through someone who writes them down for them (`cli.md`, Intentions). Where an intention stands for a principal that works under it is judged by revisions, never by clocks, from the principal's standing reading of it and the speaker's standing reading of that: ended, then to discuss (a question or a disagreement on either side), then reworded since the principal read it, then unread, then unconfirmed, then confirmed. The speaker's reading counts, to confirm the principal's reading or to put it to discussion, only when it read the principal's reading as it reads now: one that answered an earlier wording leaves it unconfirmed, so that a principal that rewords its reading to take a correction in waits for the speaker to read it again.
+
+**Where fwd departs from the Commons' doc comments**, so that a later dump and load into a Commons store loses nothing:
+
+- A reading may read a reading, where `Reading.of` names an intention, a claim or a decision: it is how a person confirms or corrects an agent's account.
+- A speaker's own confirmation may have no words, where a reading is an account in its party's own words.
+- `LastEdit` is recorded when a reading's stance alone changes, not only its words.
+- `Creation.created_by`, `Attribution.speaker`, `LastEdit.edited_by` and `Closure.closed_by` hold the ids of fwd's principals (Principal, above), which do not carry the Commons' principal component yet.
+- `WordingRead` is fwd's own, and must be carried over with each reading: without it no confirmation can be judged.
 
 ### FormerId
 

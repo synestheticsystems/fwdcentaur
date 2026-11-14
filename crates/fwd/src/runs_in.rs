@@ -12,6 +12,7 @@
 //! acts as, so that its caller is found, or made, in the project it runs in, and nothing is read
 //! for the caller or written in the project it started in.
 
+use crate::intentions::IntentionCommand;
 use crate::{
     AnchorCommand, Command, DecisionCommand, MessageCommand, RelationCommand, ScopeCommand, StepCommand, TaskCommand,
 };
@@ -19,6 +20,7 @@ use ankurah::EntityId;
 use anyhow::{bail, Result};
 use fwd_core::daemon;
 use fwd_core::former_ids::FormerIds;
+use fwd_core::intentions::readings::ChangedSinceRead;
 use fwd_core::model::{RelationKind, RelationView};
 use fwd_core::ops::{self, Kind};
 use fwd_core::project::Paths;
@@ -87,6 +89,9 @@ fn placed_by(command: &Command) -> Option<PlacedBy<'_>> {
             | StepCommand::Uncheck { task, step }
             | StepCommand::Remove { task, step, .. } => Some(PlacedBy::Step { task, step }),
         },
+        // What a principal works under is linked by a name, read where the command runs.
+        Command::Link { kind: RelationKind::WorksUnder, .. }
+        | Command::Unlink { kind: RelationKind::WorksUnder, .. } => None,
         Command::Link { from, .. } => record(from, ops::ANY),
         Command::Unlink { from, kind, to, .. } => Some(PlacedBy::Relations { from, kind: *kind, to }),
         Command::Relations { id, .. } => record(id, ops::ANY),
@@ -127,6 +132,13 @@ fn placed_by(command: &Command) -> Option<PlacedBy<'_>> {
             DecisionCommand::Create(_) | DecisionCommand::List { .. } | DecisionCommand::Export => None,
         },
         Command::Cite { entity, .. } => record(entity, &[Kind::Task, Kind::Message, Kind::Decision]),
+        Command::Intention { command } => match command {
+            IntentionCommand::Show { id }
+            | IntentionCommand::Reword { id, .. }
+            | IntentionCommand::Fulfil { id, .. }
+            | IntentionCommand::Withdraw { id, .. } => record(id, &[Kind::Intention]),
+            IntentionCommand::Create { .. } | IntentionCommand::List { .. } => None,
+        },
         Command::Read { ids } | Command::Dismiss { ids } => {
             ids.first().map(|id| PlacedBy::Record { typed: id, kinds: &[Kind::Notification] })
         }
@@ -202,9 +214,10 @@ impl RanIn {
     /// as it is, with the error it caused as its source, for `main` to end the command with its exit
     /// code at once: the daemon's client attaches it to that error as its context
     /// (`Client::while_connected`), which anyhow's typed check finds and a walk of the error's
-    /// sources does not.
+    /// sources does not. So is a record read at a revision that no longer stands
+    /// (`ChangedSinceRead`), whose one line names the record and ends the command with exit 5.
     pub(crate) fn failure(&self, error: anyhow::Error) -> anyhow::Error {
-        if error.is::<daemon::Lost>() {
+        if error.is::<daemon::Lost>() || error.is::<ChangedSinceRead>() {
             return error;
         }
         let moved = error.chain().find_map(|e| match e.downcast_ref::<ProjectGraphError>() {

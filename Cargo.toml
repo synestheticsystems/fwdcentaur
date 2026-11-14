@@ -21,6 +21,9 @@ ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "59
 ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "5919b1a06b5c3e462597d4627521354f9052f4bb" }
 ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "5919b1a06b5c3e462597d4627521354f9052f4bb" }
 ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "5919b1a06b5c3e462597d4627521354f9052f4bb" }
+# The shared model definitions fwd's intentions and readings are built on, at a commit that pins the
+# same Ankurah revision as the lines above: crates of two revisions would not share Ankurah's types.
+ankurah-commons        = { git = "https://github.com/ankurah/commons", rev = "0ade853a7befb66dca9d64986ca37dcb338990e9", default-features = false, features = ["intention-graph", "records"] }
 # The connection pool ankurah-storage-sqlite is built on, the same major: the CLI builds the pool
 # of its in-memory store itself (crates/fwd-core/src/daemon.rs, `ephemeral_store`).
 bb8                    = "0.9"

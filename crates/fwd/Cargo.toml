@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 fwd-core = { path = "../fwd-core" }
 ankurah = { workspace = true }
+ankurah-commons = { workspace = true }
 ankurah-storage-sqlite = { workspace = true }
 ankurah-websocket-client = { workspace = true }
 ankurah-websocket-server = { workspace = true }

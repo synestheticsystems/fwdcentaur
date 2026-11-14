@@ -3,7 +3,8 @@
 //! ids. Each cited record is followed wherever it is, and shown by what names it, as the inbox's
 //! sentences name it (`reason`): a task by its title, a decision by its number and title, a scope by
 //! its title, a highlight by its file, a message by its first words, a person or an agent by `@` and
-//! its name; in a Markdown block, as a link to its page where the page has one.
+//! its name, an intention by its title; in a Markdown block, as a link to its page where the page has
+//! one.
 
 use crate::anchor_name::AnchorName;
 use crate::project_graph::{Followed, ProjectGraph, Referent, Whose};
@@ -92,6 +93,7 @@ impl Cited {
             },
             Referent::Principal { handle } => format!("@{handle}"),
             Referent::Relation { kind } => format!("a {} relation", kind.to_string().replace('_', " ")),
+            Referent::Intention { title, .. } => title.clone(),
         }
     }
 
@@ -103,7 +105,10 @@ impl Cited {
             Referent::Decision { .. } => Route::decision(found.record),
             Referent::Scope { .. } => Route::scope_tasks(found.record),
             Referent::Anchor { .. } => Route::Anchor(found.record),
-            Referent::Message { .. } | Referent::Principal { .. } | Referent::Relation { .. } => return None,
+            Referent::Message { .. }
+            | Referent::Principal { .. }
+            | Referent::Relation { .. }
+            | Referent::Intention { .. } => return None,
         };
         Some(page_path(found.project, &route))
     }

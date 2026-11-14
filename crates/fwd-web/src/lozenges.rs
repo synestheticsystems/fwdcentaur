@@ -341,6 +341,8 @@ pub fn facet(join: Join, outward: bool, own_decision: bool, end: &End) -> Option
         (K::StepOf, false) => return None,
         (K::Mention, true) => return None,
         (K::Mention, false) => Facet::MentionedIn,
+        // The page shows no intentions yet, so neither what works under one nor what serves one.
+        (K::WorksUnder | K::Serves, _) => return None,
     })
 }
 

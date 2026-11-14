@@ -3867,7 +3867,7 @@ async fn a_start_no_id_can_have_is_refused_as_one_no_id_starts_with() -> Result<
         let refused = ops::resolve_id(&graph, &typed, ops::ANY).await.expect_err("no id starts so").to_string();
         assert_eq!(
             refused,
-            format!("no task, message, decision, scope, anchor, relation has an id starting with `{typed}`")
+            format!("no task, message, decision, scope, anchor, relation, intention has an id starting with `{typed}`")
         );
         assert!(graph.ids_starting::<TaskView>(&typed, &[]).await?.is_empty(), "`{typed}` read a task");
     }

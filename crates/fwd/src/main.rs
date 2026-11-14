@@ -29,6 +29,7 @@ use std::time::Duration;
 
 mod claude_code;
 mod dev_runner;
+mod intentions;
 mod mcp;
 mod mcp_stdio;
 mod moved;
@@ -387,6 +388,18 @@ enum Command {
         #[arg(long)]
         note: Option<String>,
     },
+    /// What a person or an agent wants to be true, in their own words: create, list (--mine for
+    /// those you work under), show, reword, fulfil, withdraw.
+    Intention {
+        #[command(subcommand)]
+        command: intentions::IntentionCommand,
+    },
+    /// How a party understands an intention or another reading, in its own words: set, confirm,
+    /// list.
+    Reading {
+        #[command(subcommand)]
+        command: intentions::ReadingCommand,
+    },
     /// Your notifications.
     Inbox {
         #[command(subcommand)]
@@ -658,7 +671,7 @@ fn relation_kinds_help() -> String {
         help.push_str(&format!("  {kind}: {}\n", ops::joins_words(*kind)));
     }
     help.push_str(
-        "`fwd link <x> step_of <task>` is `fwd step add <task> <x>`; a decision supersedes another with `fwd decision supersede`; a mention is made by posting a message whose text names something, and `assigned_to` no more.",
+        "`fwd link <x> step_of <task>` is `fwd step add <task> <x>`; a decision supersedes another with `fwd decision supersede`; a mention is made by posting a message whose text names something, and `assigned_to` no more; `works_under` is linked from a principal, `me` or its name or id, to an intention of any project.",
     );
     help
 }
@@ -2229,6 +2242,15 @@ const JOINING: &[(&str, Writes)] = &[
     ("decision supersede", Writes::Yes),
     ("decision export", Writes::No),
     ("cite", Writes::Yes),
+    ("intention create", Writes::Yes),
+    ("intention list", Writes::No),
+    ("intention show", Writes::No),
+    ("intention reword", Writes::Yes),
+    ("intention fulfil", Writes::Yes),
+    ("intention withdraw", Writes::Yes),
+    ("reading set", Writes::Yes),
+    ("reading confirm", Writes::Yes),
+    ("reading list", Writes::No),
     ("inbox", Writes::No),
     ("inbox pop", Writes::No),
     ("read", Writes::No),
@@ -2292,6 +2314,8 @@ async fn main() -> Result<()> {
         // shutdown: its node, left without the daemon, can leave a thread stuck inside Ankurah,
         // which the shutdown would wait for (`watch::end` says how).
         Err(error) if error.is::<daemon::Lost>() => fail(error, 7),
+        // A reading read at a revision that no longer stands is a stale precondition (docs/design/cli.md, the exit codes).
+        Err(error) if error.is::<fwd_core::intentions::readings::ChangedSinceRead>() => fail(error, 5),
         ran => ran,
     }
 }
@@ -3895,6 +3919,15 @@ async fn principal_for(app: &App, handle: Option<&str>) -> Result<EntityId> {
     match handle {
         None | Some("me") => Ok(app.me),
         Some(h) => act_as(app.graph(), h).await,
+    }
+}
+
+/// The `from` of a relation of `kind` as typed: for `works_under`, a principal, `me` or a name or
+/// an id as `--as` reads one; for any other kind a record's id.
+async fn linked_from(app: &App, kind: RelationKind, from: &str) -> Result<EntityId> {
+    match kind {
+        RelationKind::WorksUnder => principal_for(app, Some(from.trim_start_matches('@'))).await,
+        _ => app.id(from, ops::ANY).await,
     }
 }
 
@@ -5510,7 +5543,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 graph,
                 app.me,
                 kind,
-                app.id(&from, ops::ANY).await?,
+                linked_from(app, kind, &from).await?,
                 app.id(&to, ops::ANY).await?,
                 note.as_deref(),
                 propose,
@@ -5521,9 +5554,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
             app.print_made(made_json(ops::json_of_relation(&r)?), to_text)
         }
         Command::Unlink { from, kind, to, reason } => {
-            let n =
-                ops::unlink(graph, app.me, kind, app.id(&from, ops::ANY).await?, app.id(&to, ops::ANY).await?, &reason)
-                    .await?;
+            let from = linked_from(app, kind, &from).await?;
+            let n = ops::unlink(graph, app.me, kind, from, app.id(&to, ops::ANY).await?, &reason).await?;
             app.print(json!({"retracted": n}))
         }
         Command::Relations { id, kind } => {
@@ -5824,6 +5856,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
             let posted = ops::post_settling(graph, app.me, &body, original_view.priority()?, mc, notification).await?;
             print_reply(app, "forward", posted).await
         }
+        Command::Intention { command } => intentions::intention(app, command).await,
+        Command::Reading { command } => intentions::reading(app, command).await,
         Command::Cite { entity, decision, note } => {
             let from = app.id(&entity, &[Kind::Task, Kind::Message, Kind::Decision]).await?;
             let decision = app.id(&decision, &[Kind::Decision]).await?;
@@ -6338,6 +6372,37 @@ mod tests {
                 ],
             ),
         ];
+        rows.extend([
+            (
+                "intention create".into(),
+                vec!["- in short", "--words", "- first, the list"],
+                vec![("title", id("- in short")), ("words", id("- first, the list"))],
+            ),
+            ("intention show".into(), vec![A], vec![("id", id(A))]),
+            (
+                "intention reword".into(),
+                vec![A, "--title", "- in short", "--words", "-"],
+                vec![("id", id(A)), ("title", some("- in short")), ("words", some("-"))],
+            ),
+            (
+                "reading set".into(),
+                vec![A, "- as I read it", "--stance", "agree"],
+                vec![("record", id(A)), ("words", id("- as I read it"))],
+            ),
+            (
+                "reading confirm".into(),
+                vec![A, "--as-read", "0a1b2c3d4e5f", "--words", "- yes"],
+                vec![("reading", id(A)), ("words", some("- yes"))],
+            ),
+            ("reading list".into(), vec!["--of", A], vec![("of", id(A))]),
+        ]);
+        for verb in ["fulfil", "withdraw"] {
+            rows.push((
+                format!("intention {verb}"),
+                vec![A, "--reason", "- why"],
+                vec![("id", id(A)), ("reason", some("- why"))],
+            ));
+        }
         for verb in ["accept", "reject", "repeal"] {
             rows.push((
                 format!("decision {verb}"),
