@@ -53,7 +53,7 @@ dependencies = [
 [[package]]
 name = "ankurah-commons"
 version = "0.0.0"
-source = "git+https://github.com/ankurah/commons?rev=0ade853a7befb66dca9d64986ca37dcb338990e9#0ade853a7befb66dca9d64986ca37dcb338990e9"
+source = "git+https://github.com/ankurah/commons?rev=84ea08417b9c4b093d864b7c1e60c940cb7e7c35#84ea08417b9c4b093d864b7c1e60c940cb7e7c35"
 dependencies = [
  "ankurah",
  "serde",

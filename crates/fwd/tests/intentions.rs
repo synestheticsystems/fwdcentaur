@@ -86,7 +86,7 @@ fn an_agent_records_what_the_person_said_and_an_intention_of_another_project_sho
     s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
     let words = "- the list keeps its place\n- and its selection\n";
     let create = ["intention", "create", "Readers keep their place", "--words", "-", "--said-by", "tester"];
-    let it = s.made(&s.alpha, Some("main"), &[&create[..], &["--status", "committed"]].concat(), words)?;
+    let it = s.made(&s.alpha, Some("main"), &create, words)?;
     let shown = s.json(&s.alpha, None, &["intention", "show", &it])?;
     assert_eq!((shown["words"].as_str(), shown["speaker_handle"].as_str()), (Some(words), Some("tester")));
     assert_eq!(shown["created_by_handle"], "impl-sam");

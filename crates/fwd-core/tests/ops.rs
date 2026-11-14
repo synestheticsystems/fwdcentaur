@@ -3,7 +3,6 @@
 
 use ankurah::EntityId;
 use ankurah::{policy::DEFAULT_CONTEXT, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::{Intention, IntentionStatus};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::former_ids::FormerIds;
@@ -3411,9 +3410,7 @@ async fn the_migration_carries_assignment_edges_over_to_the_field_once() -> Resu
 async fn the_migration_leaves_an_intentions_assignment_as_it_is() -> Result<()> {
     let graph = project().await?;
     let c = cast(&graph).await?;
-    let new =
-        Intention { title: "Readers keep their place".into(), words: String::new(), status: IntentionStatus::Wished };
-    let it = intentions::create(&graph, c.implementer, new, None).await?;
+    let it = intentions::create(&graph, c.implementer, "Readers keep their place", String::new(), None).await?;
     let assigned = intentions::assign(&graph, c.implementer, &it, c.implementer).await?;
 
     assert!(ops::migrate_assignments(&graph).await?.is_empty(), "nothing to carry over");

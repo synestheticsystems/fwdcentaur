@@ -4,7 +4,7 @@
 //! assigned to it.
 
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::{Intention, IntentionStatus};
+use ankurah_commons::intention_graph::IntentionStatus;
 use ankurah_commons::records::{AttributionView, ClosureView, LastEditView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
@@ -37,11 +37,9 @@ async fn world() -> Result<World> {
     Ok(World { alpha, beta, ines, omar, tide, reef })
 }
 
-/// A committed intention titled `title` that `by` records in alpha, in `said_by`'s words.
+/// An intention titled `title` that `by` records in alpha, in `said_by`'s words.
 async fn intention(w: &World, by: EntityId, title: &str, said_by: Option<EntityId>) -> Result<(PlacementView, Parts)> {
-    let words = format!("{title}, in the speaker's words");
-    let new = Intention { title: title.into(), words, status: IntentionStatus::Committed };
-    intentions::create(&w.alpha, by, new, said_by).await
+    intentions::create(&w.alpha, by, title, format!("{title}, in the speaker's words"), said_by).await
 }
 
 /// Whose words the intention `record` holds.
@@ -66,8 +64,8 @@ async fn an_intention_written_down_for_a_person_holds_their_words_and_an_agent_i
     let own = intention(&w, w.tide, "Builds stay under a minute", None).await?;
     assert_eq!(speaker(&w, &own).await?, w.tide, "in its writer's words");
 
-    let for_an_agent = Intention { title: "t".into(), words: String::new(), status: IntentionStatus::Wished };
-    assert!(refusal(intentions::create(&w.alpha, w.tide, for_an_agent, Some(w.reef)).await).contains("is an agent"));
+    let for_an_agent = intentions::create(&w.alpha, w.tide, "t", String::new(), Some(w.reef)).await;
+    assert!(refusal(for_an_agent).contains("is an agent"));
     Ok(())
 }
 
@@ -148,9 +146,7 @@ async fn a_principal_assigns_an_intention_to_itself_alone() -> Result<()> {
 #[tokio::test]
 async fn an_intention_of_another_project_is_assigned_where_it_lives_and_read_back_with_its_project() -> Result<()> {
     let w = world().await?;
-    let new =
-        Intention { title: "Builds stay under a minute".into(), words: String::new(), status: IntentionStatus::Wished };
-    let theirs = intentions::create(&w.beta, w.reef, new, None).await?;
+    let theirs = intentions::create(&w.beta, w.reef, "Builds stay under a minute", String::new(), None).await?;
     let assigned = intentions::assign(&w.alpha, w.tide, &theirs, w.tide).await?;
     assert_eq!(assigned.project_id()?, w.beta.record(), "with the intention, in beta");
     match &intentions::assigned_to(&w.alpha, w.tide).await?[..] {

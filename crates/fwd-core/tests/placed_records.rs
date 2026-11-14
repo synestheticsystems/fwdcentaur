@@ -29,9 +29,9 @@ async fn node_on(path: &Path, create: bool) -> Result<Context> {
     Ok(node.context_async(DEFAULT_CONTEXT).await?)
 }
 
-/// What a list of `graph`'s committed intentions holds: each one's id, title and speaker.
-async fn committed(graph: &ProjectGraph) -> Result<Vec<(EntityId, String, EntityId)>> {
-    let listed: Vec<(PlacementView, Read)> = graph.fetch_placed("status = 'committed'").await?;
+/// What a list of `graph`'s open intentions holds: each one's id, title and speaker.
+async fn open(graph: &ProjectGraph) -> Result<Vec<(EntityId, String, EntityId)>> {
+    let listed: Vec<(PlacementView, Read)> = graph.fetch_placed("status = 'open'").await?;
     listed.iter().map(|(_, (i, _, a))| Ok((i.id(), i.title()?, *a.speaker()?))).collect()
 }
 
@@ -53,7 +53,7 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
             .create_placed(&Intention {
                 title: "Readers keep their place".into(),
                 words: "When I come back, the list is where I left it.".into(),
-                status: IntentionStatus::Committed,
+                status: IntentionStatus::Open,
             })
             .await?;
         let record = ankurah::model::Mutable::entity(&*made);
@@ -65,8 +65,8 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
         trx.commit().await?;
 
         let title = "Readers keep their place".to_string();
-        assert_eq!(committed(&alpha).await?, vec![(intention, title, person)], "alpha lists it");
-        assert_eq!(committed(&beta).await?, vec![], "beta does not");
+        assert_eq!(open(&alpha).await?, vec![(intention, title, person)], "alpha lists it");
+        assert_eq!(open(&beta).await?, vec![], "beta does not");
         (intention, person)
     };
 
@@ -75,8 +75,8 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
     let alpha = ProjectGraph::open(ctx.clone(), alpha_uuid).await?;
     let beta = ProjectGraph::open(ctx, beta_uuid).await?;
     let title = "Readers keep their place".to_string();
-    assert_eq!(committed(&alpha).await?, vec![(intention, title.clone(), person)]);
-    assert_eq!(committed(&beta).await?, vec![]);
+    assert_eq!(open(&alpha).await?, vec![(intention, title.clone(), person)]);
+    assert_eq!(open(&beta).await?, vec![]);
 
     let (_, (i, c, _)): (PlacementView, Read) = alpha.get_placed(intention).await?;
     assert_eq!(

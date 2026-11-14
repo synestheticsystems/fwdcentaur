@@ -431,7 +431,7 @@ How far a ruling reaches is the scope it is attached to (`../DECISIONS.md`, D93,
 What a person or an agent wants to be true, in their own words (`data-model.md`, Intention), and the sessions it is assigned to: a session's active intentions are those assigned to it that have not ended, which `fwd prime` prints before everything else (Sessions, above).
 
 ```sh
-fwd intention create "Readers keep their place" --words "..." [--said-by @ines] [--status wished|committed]   # in this project; --said-by names the person whose words you write down; wished unless given
+fwd intention create "Readers keep their place" --words "..." [--said-by @ines]   # open, in this project; --said-by names the person whose words you write down
 fwd intention list [--active]         # this project's intentions; --active: yours, of any project, not ended
 fwd intention show <id> | reword <id> [--title ...] [--words ...] | fulfil <id> [--reason ...] | withdraw <id> --reason ...   # reword, fulfil and withdraw take --said-by
 fwd intention assign <id> [--to <principal>]     # assigns it to you, an intention of any project; --to names you alone for now

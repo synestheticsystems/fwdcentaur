@@ -57,24 +57,22 @@ async fn said_by(graph: &ProjectGraph, said_by: Option<EntityId>) -> Result<Opti
     }
 }
 
-/// Records `intention` in the graph's project, written down by `by`, in the words of the person
-/// `said_by` names, else in `by`'s own; the views of the record it made.
+/// Records an open intention titled `title` in the graph's project, written down by `by`, its
+/// words those of the person `said_by` names, else `by`'s own; the views of the record it made.
 pub async fn create(
     graph: &ProjectGraph,
     by: EntityId,
-    intention: Intention,
+    title: &str,
+    words: String,
     said_by: Option<EntityId>,
 ) -> Result<(PlacementView, Parts)> {
-    let title = intention.title.trim().to_string();
+    let title = title.trim().to_string();
     if title.is_empty() {
         bail!("an intention's title cannot be blank");
     }
-    if ended(intention.status) {
-        bail!("an intention is recorded wished or committed, and fulfilled or withdrawn afterwards");
-    }
     let speaker = rules::speaker_of(by, self::said_by(graph, said_by).await?)?;
     let trx = graph.begin();
-    let made = trx.create_placed(&Intention { title, ..intention }).await?;
+    let made = trx.create_placed(&Intention { title, words, status: IntentionStatus::Open }).await?;
     let record = Mutable::entity(&*made);
     trx.add(record, &Creation { created_by: principal_ref(by), created: now_ms() }).await?;
     if speaker != by {

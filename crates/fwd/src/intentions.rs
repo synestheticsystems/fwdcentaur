@@ -3,10 +3,10 @@
 
 use crate::{given_text, made_json, principal_for, App, Format};
 use ankurah::EntityId;
-use ankurah_commons::intention_graph::{Intention, IntentionStatus};
+use ankurah_commons::intention_graph::IntentionStatus;
 use ankurah_commons::records::{AttributionView, ClosureView, LastEditView};
 use anyhow::{bail, Result};
-use clap::{Subcommand, ValueEnum};
+use clap::Subcommand;
 use fwd_core::decision_log::date;
 use fwd_core::intentions::{self, Parts};
 use fwd_core::model::{PlacementView, RelationView};
@@ -30,8 +30,6 @@ pub(crate) enum IntentionCommand {
         /// project, or an id of any project.
         #[arg(long)]
         said_by: Option<String>,
-        #[arg(long, value_enum, default_value_t = Recorded::Wished)]
-        status: Recorded,
     },
     /// This project's intentions; with --active, yours.
     List {
@@ -91,26 +89,13 @@ pub(crate) enum IntentionCommand {
     },
 }
 
-/// The status an intention is recorded with; it is fulfilled or withdrawn afterwards.
-#[derive(ValueEnum, Clone, Copy, Debug)]
-pub(crate) enum Recorded {
-    /// Wanted, with no one yet committed to act on it.
-    Wished,
-    /// Someone has committed to act on it.
-    Committed,
-}
-
 pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()> {
     let graph = app.graph();
     match command {
-        IntentionCommand::Create { title, words, said_by, status } => {
-            let status = match status {
-                Recorded::Wished => IntentionStatus::Wished,
-                Recorded::Committed => IntentionStatus::Committed,
-            };
+        IntentionCommand::Create { title, words, said_by } => {
             let said_by = speaker_named(app, said_by).await?;
-            let new = Intention { title, words: given_text(app, words)?, status };
-            print_made(app, &intentions::create(graph, app.me, new, said_by).await?).await
+            let made = intentions::create(graph, app.me, &title, given_text(app, words)?, said_by).await?;
+            print_made(app, &made).await
         }
         IntentionCommand::List { active: false } => {
             let mut listed = graph.all_placed::<Parts>().await?;
