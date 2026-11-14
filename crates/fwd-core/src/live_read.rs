@@ -8,6 +8,7 @@
 use crate::model::*;
 use crate::project_graph::{ProjectGraph, ProjectRecord};
 use crate::query::with_id;
+use crate::subject;
 use crate::working_set::questions_by_name;
 use ankurah::core::livequery::EntityLiveQuery;
 use ankurah::signals::{Listener, ListenerGuard, Signal};
@@ -19,9 +20,9 @@ use anyhow::Result;
 pub enum LiveRead {
     /// Every project of the node, which a project made joins.
     Projects,
-    /// Every principal of a project: an agent of the session that names itself, retires or is
-    /// renamed, a role selected, the person's name.
-    Principals(ProjectRecord),
+    /// The principals of a project bound to an agent of a Claude Code session: one that names
+    /// itself, retires, is renamed or selects another role ([`subject::of_session_selection`]).
+    SessionPrincipals { project: ProjectRecord, session: String },
     /// The tasks assigned to a principal that are not finished, wherever they are.
     TasksAssignedTo(EntityId),
     /// The open questions a principal asked, wherever they are.
@@ -59,8 +60,9 @@ impl LiveRead {
     pub fn listen(&self, graph: &ProjectGraph, listener: Listener) -> Result<Listening> {
         Ok(match self {
             LiveRead::Projects => listening(graph.query_projects()?, listener),
-            LiveRead::Principals(project) => {
-                listening(graph.graph_of_project(project).query_all::<PrincipalView>()?, listener)
+            LiveRead::SessionPrincipals { project, session } => {
+                let bound = subject::of_session_selection(session)?;
+                listening(graph.graph_of_project(project).query::<PrincipalView>(bound)?, listener)
             }
             LiveRead::TasksAssignedTo(principal) => {
                 listening(graph.query_unfinished_tasks_assigned_to(*principal)?, listener)

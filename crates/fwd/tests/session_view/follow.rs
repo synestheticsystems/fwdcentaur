@@ -95,13 +95,13 @@ fn the_view_is_printed_again_when_what_it_shows_changes_and_only_then() -> Resul
     assert_eq!(first["principals"][0]["title"], "lead-sam", "{first}");
     assert_eq!(list(&first["principals"][0], "waits_on_you"), None);
 
-    // An agent of no session naming itself changes the project's principals, which the view reads,
-    // but not the view.
-    s.json(&s.alpha, None, &["--as", "impl-elsewhere", "principal", "add", "impl-elsewhere", "--role", "implementer"])?;
+    // The agent's comment on a task no one holds stamps it as having written, which the view's
+    // read of the session's principals hears, but changes nothing the view shows.
+    let elsewhere = s.made(&s.alpha, None, &["task", "create", "Name the page"])?;
+    s.made(&s.alpha, Some("main"), &["comment", &elsewhere, "Not mine to do."])?;
     let question = s.made(&s.alpha, Some("main"), &["ask", "--to", "tester", "Should the primer name the page?"])?;
     let asked = stream.document(SOON)?;
     assert_eq!(titles(&asked["principals"][0], "waits_on_you"), ["Should the primer name the page?"], "{asked}");
-    assert_eq!(asked["principals"].as_array().map(Vec::len), Some(1), "the other agent is not this session's");
 
     let row = &list(&asked["principals"][0], "waits_on_you").expect("waits on you")["records"][0];
     assert_eq!(row["id"], json!(question));
@@ -114,25 +114,49 @@ fn the_view_is_printed_again_when_what_it_shows_changes_and_only_then() -> Resul
 }
 
 /// Each part of what the view is made from is followed, each change here reaching the stream
-/// through one live read alone: a task the agent assigns itself (the tasks assigned to it), a
-/// comment the person makes on it (its unread notifications), a subagent naming itself (the
-/// project's principals), and a project made after the stream started, where the agent then names
-/// itself (the projects, then that project's principals).
+/// through one live read alone, the person making it, whose writes stamp no principal of the
+/// session: the title of a task assigned to the agent (the tasks assigned to it), a comment on it
+/// (its unread notifications), the text of a question asked of it (the questions asked of it), a
+/// question it asked, resolved (the questions it asked); then a subagent naming itself (the
+/// session's principals), and a project made after the stream started, where the agent then names
+/// itself (the projects, then that project's principals of the session).
 #[test]
 fn each_part_of_what_the_view_is_made_from_is_followed() -> Result<()> {
     let s = Scratch::new()?;
     s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    let task = s.made(&s.alpha, None, &["task", "create", "Retry on disconnect"])?;
+    s.json(&s.alpha, None, &["task", "assign", &task, "lead-sam"])?;
+    let asked_of = s.made(&s.alpha, None, &["ask", "--to", "lead-sam", "How long a wait?"])?;
+    let asked = s.made(&s.alpha, Some("main"), &["ask", "--to", "tester", "Should the primer name the page?"])?;
+    // The assignment and the person's question, so that the stream starts after routing is done.
+    s.told(&s.alpha, "main", 2)?;
     let stream = Stream::start(&s)?;
-    stream.document(SOON)?;
+    let first = stream.document(SOON)?;
+    assert_eq!(titles(&first["principals"][0], "holds"), ["How long a wait?", "Retry on disconnect"], "{first}");
 
-    let task = s.made(&s.alpha, Some("main"), &["task", "create", "Retry on disconnect"])?;
-    s.json(&s.alpha, Some("main"), &["task", "assign", &task, "lead-sam"])?;
-    let assigned = stream.document(SOON)?;
-    assert_eq!(titles(&assigned["principals"][0], "holds"), ["Retry on disconnect"], "{assigned}");
+    s.json(&s.alpha, None, &["task", "amend", &task, "--title", "Retry once on disconnect"])?;
+    let renamed = stream.document(SOON)?;
+    assert_eq!(
+        titles(&renamed["principals"][0], "holds"),
+        ["How long a wait?", "Retry once on disconnect"],
+        "{renamed}"
+    );
 
     s.made(&s.alpha, None, &["comment", &task, "Cap the wait at ten seconds."])?;
     let told = stream.document(SOON)?;
-    assert_eq!(told["principals"][0]["tags"][2]["text"], "1 unread", "{told}");
+    assert_eq!(told["principals"][0]["tags"][2]["text"], "3 unread", "{told}");
+
+    s.json(&s.alpha, None, &["message", "edit", &asked_of, "How long a wait at most?"])?;
+    let edited = stream.document(SOON)?;
+    assert_eq!(
+        titles(&edited["principals"][0], "holds"),
+        ["How long a wait at most?", "Retry once on disconnect"],
+        "{edited}"
+    );
+
+    s.json(&s.alpha, None, &["message", "resolve", &asked])?;
+    let resolved = stream.document(SOON)?;
+    assert_eq!(list(&resolved["principals"][0], "waits_on_you"), None, "{resolved}");
 
     s.json(&s.alpha, Some("a1"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
     let named = stream.document(SOON)?;

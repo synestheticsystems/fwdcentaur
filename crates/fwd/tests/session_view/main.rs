@@ -100,7 +100,12 @@ impl Scratch {
     /// The session's view as the pane reads it: from a directory of no project, with nothing in
     /// its environment naming a principal, one line on standard output.
     fn view(&self) -> Result<Value> {
-        let out = self.command(self.dir.path(), None, &["session", "view", SESSION]).output()?;
+        self.view_with(&[])
+    }
+
+    /// The view as [`Scratch::view`] reads it, with `global` before the command's words.
+    fn view_with(&self, global: &[&str]) -> Result<Value> {
+        let out = self.command(self.dir.path(), None, &[global, &["session", "view", SESSION]].concat()).output()?;
         if !out.status.success() {
             return Err(anyhow!("fwd session view failed: {}", String::from_utf8_lossy(&out.stderr)));
         }

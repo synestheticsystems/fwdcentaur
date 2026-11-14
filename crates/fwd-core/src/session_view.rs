@@ -159,6 +159,8 @@ pub struct Input {
 /// what it needs of the person.
 #[derive(Debug, Clone)]
 pub struct Held {
+    /// The Claude Code session's id.
+    pub session: String,
     /// Those of the session's own thread first, then its subagents' ([`Holder::Session`]).
     pub holdings: Vec<Holding>,
     pub person: Person,
@@ -212,7 +214,7 @@ pub async fn read(graph: &ProjectGraph, session: &str, person: &str) -> Result<H
             person.answered.insert(question);
         }
     }
-    Ok(Held { holdings, person, projects })
+    Ok(Held { session: session.to_string(), holdings, person, projects })
 }
 
 impl Person {
@@ -232,11 +234,16 @@ fn you_asked(h: &Holding) -> impl Iterator<Item = &Record> {
 }
 
 impl Held {
-    /// The live queries whose changes can change the view: the projects, each project's principals,
-    /// each principal's working set, and the threads of the questions asked of the person.
+    /// The live queries whose changes can change the view: the projects, each project's principals
+    /// bound to the session, each principal's working set, and the threads of the questions asked
+    /// of the person.
     pub fn live_reads(&self) -> BTreeSet<LiveRead> {
         let mut reads = BTreeSet::from([LiveRead::Projects]);
-        reads.extend(self.projects.iter().cloned().map(LiveRead::Principals));
+        let session = |project: &ProjectRecord| LiveRead::SessionPrincipals {
+            project: project.clone(),
+            session: self.session.clone(),
+        };
+        reads.extend(self.projects.iter().map(session));
         for h in &self.holdings {
             reads.extend(h.live_reads());
             reads.extend(you_asked(h).filter(|r| self.person.asked(r)).map(|r| LiveRead::AnswersTo(r.id)));
@@ -396,8 +403,8 @@ impl Held {
     }
 
     /// Answer, on a question asked of the person: a reply in its thread, in the person's words on
-    /// standard input, made as the person in the question's project, which says nothing when it
-    /// succeeds and one line on standard error when it fails (`--format pane`).
+    /// standard input (the text `-`), made as the person in the question's project, which says
+    /// nothing when it succeeds and one line on standard error when it fails (`--format pane`).
     fn answer(&self, question: &Record) -> Action {
         let args = [
             "--project",
@@ -408,7 +415,7 @@ impl Held {
             "pane",
             "reply",
             &question.id.to_base64(),
-            "--text-from-stdin",
+            "-",
         ];
         Action {
             label: "Answer".into(),

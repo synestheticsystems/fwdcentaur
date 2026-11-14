@@ -106,3 +106,23 @@ async fn the_answers_in_a_questions_thread_are_followed_wherever_they_are_writte
     assert_eq!(held(&answers).await?, ids(&[first, second]));
     Ok(())
 }
+
+/// The principals bound to an agent of one Claude Code session, its own thread's and its
+/// subagents', are followed in their project, and a principal of another session, even one whose
+/// id starts with this one's, of a Codex thread, or of no agent, is not among them.
+#[tokio::test]
+async fn the_principals_of_a_session_are_followed_and_no_others() -> Result<()> {
+    let t = two().await?;
+    let add = |name: &'static str, subject: &'static str| {
+        let alpha = t.alpha.clone();
+        async move { ops::add_principal(&alpha, name, Some(AgentRole::Implementer), None, None, None, Some(subject)).await }
+    };
+    let bound = t.alpha.query::<PrincipalView>(fwd_core::subject::of_session_selection("s1")?)?;
+    assert_eq!(held(&bound).await?, ids(&[]));
+    let main = add("lead-s1", "claude-code:s1/main").await?;
+    let subagent = add("impl-s1", "claude-code:s1/a1").await?;
+    add("impl-s10", "claude-code:s10/main").await?;
+    add("impl-codex", "codex:s1/s1").await?;
+    assert_eq!(held(&bound).await?, ids(&[main, subagent]));
+    Ok(())
+}

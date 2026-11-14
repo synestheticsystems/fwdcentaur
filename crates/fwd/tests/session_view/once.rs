@@ -84,6 +84,13 @@ fn the_view_lists_each_principal_of_the_session_with_what_waits_on_the_person_fi
     assert_eq!(titles(&groups[2], "waits_on_you"), ["May I cap the backoff at two seconds?"]);
     let short = &list(&groups[2], "waits_on_you").expect("waits on you")["records"][0];
     assert_eq!(short["lines"], json!([]), "a title that holds the whole text is not said again");
+
+    // Read for another principal with --as, what lead-sam asked it waits on it, and its Answer acts
+    // as it.
+    let theirs = s.view_with(&["--as", "impl-sam"])?;
+    let waiting = &list(&theirs["principals"][0], "waits_on_you").expect("waits on impl-sam")["records"][0];
+    assert_eq!(waiting["title"], "Does the retry cover the page too?", "{theirs}");
+    assert_eq!(waiting["actions"][0]["args"][3], "impl-sam");
     Ok(())
 }
 
@@ -105,17 +112,7 @@ fn answer_replies_in_the_persons_words_and_a_failed_press_says_why_in_one_line()
     let args: Vec<String> = serde_json::from_value(answer["args"].clone())?;
     assert_eq!(
         args,
-        [
-            "--project",
-            &s.project_id(&s.alpha)?,
-            "--as",
-            "tester",
-            "--format",
-            "pane",
-            "reply",
-            &question,
-            "--text-from-stdin"
-        ]
+        ["--project", &s.project_id(&s.alpha)?, "--as", "tester", "--format", "pane", "reply", &question, "-"]
     );
 
     let words = "-- no: the pane links there.\n\nLeave the primer as it is.\n";
@@ -143,27 +140,15 @@ fn answer_replies_in_the_persons_words_and_a_failed_press_says_why_in_one_line()
     Ok(())
 }
 
-/// `fwd reply` takes its text from standard input whole, even when it holds nothing, and takes it
-/// from the argument or standard input, never both; `--format pane` is for the commands the view's
-/// actions run alone.
+/// `fwd reply` given `-` takes its text from standard input whole, even when it holds nothing;
+/// `--format pane` says nothing of a reply that ran in another project than the one named, and is
+/// for the commands the view's actions run alone.
 #[test]
 fn a_reply_takes_its_text_from_standard_input_whole_and_pane_is_for_actions_alone() -> Result<()> {
     let s = Scratch::new()?;
     let question = s.made(&s.alpha, None, &["ask", "--to", "tester", "Is an empty answer kept?"])?;
-    let empty = s.press(
-        &[
-            "--as".into(),
-            "tester".into(),
-            "--format".into(),
-            "json".into(),
-            "--project".into(),
-            "alpha".into(),
-            "reply".into(),
-            question.clone(),
-            "--text-from-stdin".into(),
-        ],
-        "",
-    )?;
+    let args = ["--as", "tester", "--format", "json", "--project", "alpha", "reply", &question, "-"];
+    let empty = s.press(&args.map(str::to_string), "")?;
     assert!(empty.status.success(), "{}", String::from_utf8_lossy(&empty.stderr));
     let made: Value = serde_json::from_slice(&empty.stdout)?;
     assert_eq!(made["record"]["content"], "");
@@ -171,7 +156,7 @@ fn a_reply_takes_its_text_from_standard_input_whole_and_pane_is_for_actions_alon
     // A question of another project than the one the press names, as a question moved since the
     // view was printed is: the reply runs there, and with `--format pane` says nothing of it.
     let elsewhere = s.made(&s.beta, None, &["ask", "--to", "tester", "Was it moved?"])?;
-    let args = ["--project", "alpha", "--as", "tester", "--format", "pane", "reply", &elsewhere, "--text-from-stdin"];
+    let args = ["--project", "alpha", "--as", "tester", "--format", "pane", "reply", &elsewhere, "-"];
     let moved = s.press(&args.map(str::to_string), "It was.")?;
     assert_eq!(
         (moved.status.code(), moved.stdout.as_slice(), moved.stderr.as_slice()),
@@ -179,11 +164,6 @@ fn a_reply_takes_its_text_from_standard_input_whole_and_pane_is_for_actions_alon
         "{}",
         String::from_utf8_lossy(&moved.stderr)
     );
-
-    let both = s.command(&s.alpha, None, &["reply", &question, "words", "--text-from-stdin"]).output()?;
-    assert!(!both.status.success(), "the argument and standard input are not both taken");
-    let neither = s.command(&s.alpha, None, &["reply", &question]).output()?;
-    assert!(!neither.status.success(), "one of them is");
 
     let other = s.command(&s.alpha, None, &["--format", "pane", "task", "list"]).output()?;
     let said = String::from_utf8(other.stderr)?;

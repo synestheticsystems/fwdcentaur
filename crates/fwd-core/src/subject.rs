@@ -15,7 +15,9 @@
 
 use crate::model::*;
 use crate::project_graph::ProjectGraph;
+use crate::query::with_strings;
 use crate::{naming, ops};
+use ankurah::ankql::ast::{Parsed, Selection};
 use ankurah::EntityId;
 use anyhow::{bail, Result};
 
@@ -151,6 +153,18 @@ pub fn of_session<'a>(principals: &'a [PrincipalView], session: &str) -> Vec<&'a
             p.subject().ok().flatten().is_some_and(|s| s.starts_with(CLAUDE_CODE) && session_of(&s) == Some(session))
         })
         .collect()
+}
+
+/// A selection of the principals bound to an agent of the Claude Code session `session`, as
+/// [`of_session`] finds them among a list: every subject that starts with the session's, as one
+/// range of the text the store compares by its bytes, the subjects `claude-code:<session>/` up to,
+/// not including, `claude-code:<session>0`, `0` being the character after `/`. What a view of the
+/// session listens to for an agent of it naming itself, retiring or being renamed (`live_read`),
+/// rather than to every principal, which every write changes as it stamps its author.
+pub fn of_session_selection(session: &str) -> Result<Selection<Parsed>> {
+    let from = format!("{CLAUDE_CODE}{session}/");
+    let before = format!("{CLAUDE_CODE}{session}0");
+    with_strings("subject >= ? AND subject < ?", &[&from, &before])
 }
 
 /// The principals of `principals` bound to an agent of the session `subject` is an agent of, its

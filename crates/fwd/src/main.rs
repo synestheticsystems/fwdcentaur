@@ -334,13 +334,9 @@ enum Command {
     Reply {
         #[arg(allow_hyphen_values = true)]
         id: String,
-        #[arg(allow_hyphen_values = true, required_unless_present = "text_from_stdin")]
-        text: Option<String>,
-        /// Read the text from standard input, whole and as it is, in place of the argument: what a
-        /// program that passes a person's words on uses (the Answer of `fwd session view`), so that
-        /// no text, whatever it holds, is read as a flag or needs quoting.
-        #[arg(long, conflicts_with = "text")]
-        text_from_stdin: bool,
+        /// `-` reads it from standard input.
+        #[arg(allow_hyphen_values = true)]
+        text: String,
     },
     /// Forward a message (or the message behind a notification) to someone who can act on it.
     /// The forward is a reply in the same thread, addressed to them, quoting the original. Its
@@ -2345,14 +2341,10 @@ async fn run_cli() -> Result<()> {
     // directory would otherwise place (`runs_in::runs_in`).
     let project_typed = matches.value_source("project") == Some(ValueSource::CommandLine);
     let serving = matches!(cli.command, Command::Daemon { command: DaemonCommand::Serve { .. } });
-    let pane = cli.format == Some(Format::Pane);
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             if serving {
                 "info".into()
-            } else if pane {
-                // A press that succeeds prints nothing at all, and one that fails its one line.
-                "off".into()
             } else {
                 // A daemon restart is routine, and says nothing on a command's standard error
                 // (Daniel, 2026-09-26): each client loses its socket, and Ankurah's socket client
@@ -2369,7 +2361,7 @@ async fn run_cli() -> Result<()> {
     let paths = Paths::from_env()?;
     let format = format_of(&cli);
     // A pane runs only the commands the view's actions name, and the others print outside it.
-    if pane && !matches!(cli.command, Command::Reply { .. }) {
+    if cli.format == Some(Format::Pane) && !matches!(cli.command, Command::Reply { .. }) {
         bail!("--format pane is for the commands a session view's actions run, `reply` alone; leave it off");
     }
 
@@ -3842,6 +3834,19 @@ async fn principal_for(app: &App, handle: Option<&str>) -> Result<EntityId> {
         None | Some("me") => Ok(app.me),
         Some(h) => act_as(app.graph(), h).await,
     }
+}
+
+/// A text as typed on the command line, or, where it is `-`, standard input whole, so that any text
+/// reaches the command as it is: several lines, a leading hyphen, or nothing. A command the daemon
+/// runs for an MCP caller has no standard input, and its caller gives the text itself.
+fn given_text(app: &App, typed: String) -> Result<String> {
+    if typed != "-" || app.client.is_none() {
+        return Ok(typed);
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut text)
+        .context("reading the text from standard input")?;
+    Ok(text)
 }
 
 /// Whom `fwd ask` or `fwd forward` asks, from `--to`: the id of the principal it names, or none for
@@ -5715,19 +5720,12 @@ async fn run(app: &App, command: Command) -> Result<()> {
             say_waiting(app, &m).await;
             Ok(())
         }
-        Command::Reply { id, text, text_from_stdin } => {
-            let text = match (text, text_from_stdin) {
-                (Some(text), false) => text,
-                (None, true) => {
-                    std::io::read_to_string(std::io::stdin()).context("reading the reply's text from standard input")?
-                }
-                _ => unreachable!("clap takes the text from the argument or standard input, never both or neither"),
-            };
+        Command::Reply { id, text } => {
             let (reply_to, notification) = message_behind(app, &id, true).await?;
             let posted = ops::post_settling(
                 graph,
                 app.me,
-                &text,
+                &given_text(app, text)?,
                 Priority::Next,
                 MessageContext { reply_to: Some(reply_to), ..Default::default() },
                 notification,
@@ -6144,7 +6142,7 @@ mod tests {
             ("anchor show".into(), vec![A, "--against", "HEAD"], vec![("id", id(A)), ("against", id("HEAD"))]),
             ("anchor resolve".into(), vec![A], vec![("id", id(A))]),
             ("ask".into(), vec!["--about", A, "why?"], vec![("about", some(A)), ("text", id("why?"))]),
-            ("reply".into(), vec![A, "done"], vec![("id", id(A)), ("text", some("done"))]),
+            ("reply".into(), vec![A, "done"], vec![("id", id(A)), ("text", id("done"))]),
             ("forward".into(), vec![A, "--to", "impl-bob"], vec![("id", id(A)), ("to", some("impl-bob"))]),
             ("message list".into(), vec!["--on", A, "--open"], vec![("on", some(A)), ("open", "true".into())]),
             ("message show".into(), vec![A], vec![("id", id(A))]),
@@ -6202,7 +6200,7 @@ mod tests {
             (
                 "reply".into(),
                 vec![A, "- done\n- tested", "--format", "json"],
-                vec![("text", some("- done\n- tested")), ("format", "Some(Json)".into())],
+                vec![("text", id("- done\n- tested")), ("format", "Some(Json)".into())],
             ),
             (
                 "forward".into(),

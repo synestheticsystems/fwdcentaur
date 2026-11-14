@@ -73,7 +73,7 @@ fn holding(n: u8, handle: &str, agent: &str, sections: Vec<Section>, unread: usi
 }
 
 fn held(holdings: Vec<Holding>, person: Person) -> Held {
-    Held { holdings, person, projects: vec![project(0), project(1)] }
+    Held { session: "s1".into(), holdings, person, projects: vec![project(0), project(1)] }
 }
 
 fn to(n: u8, handle: &str) -> Addressee {
@@ -149,7 +149,7 @@ fn each_record_stands_in_the_list_of_whom_it_waits_on() {
         waits["records"][2]["actions"],
         json!([{
             "label": "Answer",
-            "args": ["--project", project(1).uuid.to_string(), "--as", "tester", "--format", "pane", "reply", id(12).to_base64(), "--text-from-stdin"],
+            "args": ["--project", project(1).uuid.to_string(), "--as", "tester", "--format", "pane", "reply", id(12).to_base64(), "-"],
             "input": {"prompt": "Your answer", "multiline": true},
         }]),
         "the answer runs in the question's project"
@@ -388,8 +388,8 @@ fn the_live_reads_cover_what_the_document_is_made_from() {
     let reads = view.live_reads();
     let expected = BTreeSet::from([
         LiveRead::Projects,
-        LiveRead::Principals(project(0)),
-        LiveRead::Principals(project(1)),
+        LiveRead::SessionPrincipals { project: project(0), session: "s1".into() },
+        LiveRead::SessionPrincipals { project: project(1), session: "s1".into() },
         LiveRead::QuestionsTo(id(20)),
         LiveRead::QuestionsBy(id(20)),
         LiveRead::QuestionsByName { project: project(0), handle: "lead-sam".into(), of_no_one: false },
