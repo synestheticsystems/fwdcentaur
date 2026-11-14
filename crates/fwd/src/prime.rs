@@ -248,7 +248,8 @@ struct Primer {
     /// The intentions assigned to the holdings' principals, each once: the first holding's first,
     /// each holding's in the order they were assigned.
     intentions: Vec<PrintedIntention>,
-    /// The ids of the intentions assigned to them that could not be read.
+    /// The ids of the intentions assigned to them that could not be read, or of the assignments
+    /// that could not be ([`intentions::assigned_to`]).
     unreadable_intentions: Vec<EntityId>,
     holdings: Vec<Holding>,
     /// The agent read for, which the line for an agent no principal is bound to names.

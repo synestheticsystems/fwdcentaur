@@ -108,21 +108,24 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
         IntentionCommand::List { active: true } => {
             // The principals `fwd prime` reads for the caller, in every project, without their sections.
             let principals = Extent { sections: Vec::new(), ready_in: None, ready: 0, unread: 0 };
-            let (mut listed, mut active, mut not_held) = (HashSet::new(), Vec::new(), Vec::new());
+            let (mut listed, mut active, mut unreadable) = (HashSet::new(), Vec::new(), Vec::new());
             for h in working_set::read(graph, app.holder(), &principals).await? {
                 for (id, assigned) in intentions::assigned_to(graph, h.principal).await? {
                     if !listed.insert(id) {
                         continue;
                     }
                     match assigned {
-                        Followed::Held { found, .. } if !intentions::ended(found.1 .0.status()?) => active.push(found),
-                        Followed::Held { .. } => {}
-                        Followed::NotHeld => not_held.push(id),
+                        Followed::Held { found, .. } => match found.1 .0.status() {
+                            Ok(status) if intentions::ended(status) => {}
+                            Ok(_) => active.push(found),
+                            Err(_) => unreadable.push(id),
+                        },
+                        Followed::NotHeld => unreadable.push(id),
                     }
                 }
             }
-            if let Some(first) = not_held.iter().min() {
-                let n = not_held.len();
+            if let Some(first) = unreadable.iter().min() {
+                let n = unreadable.len();
                 app.note(format!(
                     "fwd: {n} intentions assigned to you could not be read, the first {}",
                     short_id(first)

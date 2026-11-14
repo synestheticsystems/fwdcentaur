@@ -719,9 +719,26 @@ fn the_command_that_prints_the_rest_reads_the_same_working_set() -> Result<()> {
 /// names and fewer properties make them (`fwd_core::model::before_d108` is one such model).
 mod sparse {
     use ankurah::property::{Json, Ref};
-    use ankurah::Model;
-    use fwd_core::model::{NotificationStatus, NotificationType, Principal, Priority, Project, TaskStatus};
+    use ankurah::{EntityId, Model};
+    use fwd_core::model::{
+        NotificationStatus, NotificationType, Principal, Priority, Project, RelationKind, RelationStatus, TaskStatus,
+    };
     use serde::{Deserialize, Serialize};
+
+    /// A relation with no creation time.
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[model(no_ffi)]
+    pub struct Relation {
+        pub project: Ref<Project>,
+        #[active_type(LWW)]
+        pub kind: RelationKind,
+        pub from_id: EntityId,
+        pub to_id: EntityId,
+        #[active_type(LWW)]
+        pub status: RelationStatus,
+        pub created_by: Ref<Principal>,
+        pub via: Json,
+    }
 
     /// A task with no creation time.
     #[derive(Model, Debug, Clone, Serialize, Deserialize)]
@@ -882,5 +899,65 @@ fwdcentaur context for impl-sam (implementer) in alpha",
         (&records[0]["words"], &records[1]["project"]["name"]),
         (&json!("the list stays\nwhere I left it"), &json!("beta"))
     );
+    Ok(())
+}
+
+/// An assignment that cannot be followed costs the agent nothing else: one of an id that names
+/// nothing, and one whose relation has no creation time, as a writer that left the field out
+/// stores one, are counted as intentions that could not be read, the least of their ids named,
+/// and the rest of what the agent holds is printed.
+#[tokio::test]
+async fn an_assignment_that_cannot_be_followed_is_counted_and_the_rest_printed() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let words = ["intention", "create", "Readers keep their place", "--words", "the list stays"];
+    let ours: EntityId = s.made(&s.alpha, None, &words)?.parse().map_err(|e| anyhow!("{e:?}"))?;
+    s.json(&s.alpha, Some("main"), &["intention", "assign", &ours.to_base64()])?;
+    let client = s.client(&s.alpha).await?;
+    let graph = &client.graph;
+    let agent =
+        naming::principal_named(graph, "impl-sam", None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no agent"))?;
+    let gone = EntityId::from_bytes([0; 32]);
+    let trx = graph.begin();
+    trx.create(&Relation {
+        project: graph.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: gone,
+        to_id: agent,
+        status: RelationStatus::Accepted,
+        created_by: Ref::new(agent),
+        created: 1,
+        via: Json::new(json!({})),
+        note: None,
+        position: None,
+        closed_by: None,
+        closed: None,
+        closed_reason: None,
+    })
+    .await?;
+    trx.commit().await?;
+    let ctx = client.node.context_async(ankurah::policy::DEFAULT_CONTEXT).await?;
+    let trx = ctx.begin();
+    trx.create(&sparse::Relation {
+        project: graph.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: ours,
+        to_id: agent,
+        status: RelationStatus::Accepted,
+        created_by: Ref::new(agent),
+        via: Json::new(json!({})),
+    })
+    .await?;
+    trx.commit().await?;
+    drop(client);
+
+    let text = s.text(&s.alpha, Some("main"), &["prime", "--format", "text"])?;
+    assert!(
+        text.starts_with(&format!("Active Intentions (1):\n{} Readers keep their place\n", short_id(&ours))),
+        "{text}"
+    );
+    let counted = format!("2 intentions assigned to you could not be read, the first {}", short_id(&gone));
+    assert!(text.lines().any(|line| line == counted), "{text}");
+    assert!(text.contains("\nfwdcentaur context for impl-sam (implementer) in alpha."), "{text}");
     Ok(())
 }

@@ -213,8 +213,8 @@ pub struct Held {
     /// them; then how many assigned intentions could not be read.
     intentions: Vec<Row>,
     unreadable_intentions: usize,
-    /// The intentions assigned to the principals of the session's own thread, by id, read or not,
-    /// whose changes the view listens to.
+    /// The ids [`intentions::assigned_to`] gives for the principals of the session's own thread,
+    /// read or not, whose changes the view listens to.
     assigned: Vec<EntityId>,
 }
 

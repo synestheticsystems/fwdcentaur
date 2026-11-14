@@ -255,15 +255,25 @@ async fn assignments(graph: &ProjectGraph, intention: EntityId, to: EntityId) ->
 /// The intentions assigned to `principal`, of any project: the intention each of its accepted
 /// `assigned_to` relations names, by that id, followed wherever it is, the first assigned first,
 /// and each once however many relations assign it. Those since fulfilled or withdrawn are among
-/// them, so that whoever holds them can take them off.
+/// them, so that whoever holds them can take them off. A relation whose status, time or
+/// intention cannot be read comes after them, by its own id, as one that cannot be followed, so
+/// that one unreadable value leaves the rest of the read standing.
 pub async fn assigned_to(
     graph: &ProjectGraph,
     principal: EntityId,
 ) -> Result<Vec<(EntityId, Followed<(PlacementView, Parts)>)>> {
-    let mut holding = Vec::new();
+    let (mut holding, mut unreadable) = (Vec::new(), Vec::new());
     for r in graph.relations_to(principal, Some(RelationKind::AssignedTo)).await? {
-        if rules::holds(RelationKind::AssignedTo, r.status()?) {
-            holding.push((r.created()?, r.id(), r.from_id()?));
+        let assignment = || -> Result<Option<(i64, EntityId)>, PropertyError> {
+            if !rules::holds(RelationKind::AssignedTo, r.status()?) {
+                return Ok(None);
+            }
+            Ok(Some((r.created()?, r.from_id()?)))
+        };
+        match assignment() {
+            Ok(Some((created, intention))) => holding.push((created, r.id(), intention)),
+            Ok(None) => {}
+            Err(_) => unreadable.push(r.id()),
         }
     }
     holding.sort();
@@ -274,5 +284,6 @@ pub async fn assigned_to(
             assigned.push((intention, graph.follow_placed::<Parts>(intention).await?));
         }
     }
+    assigned.extend(unreadable.into_iter().map(|relation| (relation, Followed::NotHeld)));
     Ok(assigned)
 }

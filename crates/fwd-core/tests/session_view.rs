@@ -5,7 +5,7 @@
 //! intentions. How a read becomes a document is tested beside it (src/session_view/tests.rs).
 
 use ankurah::property::{Json, Ref};
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
 use ankurah_commons::intention_graph::IntentionStatus;
 use ankurah_commons::records::ClosureView;
 use ankurah_storage_sqlite::SqliteStorageEngine;
@@ -24,6 +24,8 @@ const PAGE: &str = "http://127.0.0.1:4242/";
 /// alpha and beta over one store in memory, each with its person `tester`; the session `s1`'s own
 /// thread is `lead-sam` in both, and its subagent `a1` is `impl-sam` in alpha.
 struct Two {
+    /// The node's context, through which a test writes what fwd's own writes never make.
+    node: Context,
     alpha: ProjectGraph,
     beta: ProjectGraph,
     tester: EntityId,
@@ -39,7 +41,7 @@ async fn two() -> Result<Two> {
     node.system.create().await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
-    let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
+    let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;
     let tester = ops::ensure_principal(&alpha, "tester", "tester", PrincipalKind::Human, None).await?;
     let their_tester = ops::ensure_principal(&beta, "tester", "tester", PrincipalKind::Human, None).await?;
     let agent = |graph: &ProjectGraph, name: &'static str, subject: &'static str| {
@@ -59,7 +61,7 @@ async fn two() -> Result<Two> {
         Some("claude-code:s1/a1"),
     )
     .await?;
-    Ok(Two { alpha, beta, tester, their_tester, lead, their_lead, subagent })
+    Ok(Two { node: ctx, alpha, beta, tester, their_tester, lead, their_lead, subagent })
 }
 
 /// The view of `s1` for `reader`, read through `graph`, as JSON.
@@ -314,5 +316,76 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
     assert_eq!(row(&done)["lines"][1], format!("fulfilled on {closed}"));
     assert_eq!(row(&done)["tags"], json!([{"text": "fulfilled", "tone": null, "at": null}]));
     assert_eq!(row(&subagents), Value::Null, "the subagent's is not the session's");
+    Ok(())
+}
+
+/// A relation as a writer that left a field out stores one: by a model of the name fwd's relation
+/// is read by, with fewer properties.
+mod sparse {
+    use ankurah::property::{Json, Ref};
+    use ankurah::{EntityId, Model};
+    use fwd_core::model::{Principal, Project, RelationKind, RelationStatus};
+    use serde::{Deserialize, Serialize};
+
+    /// A relation with no creation time.
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[model(no_ffi)]
+    pub struct Relation {
+        pub project: Ref<Project>,
+        #[active_type(LWW)]
+        pub kind: RelationKind,
+        pub from_id: EntityId,
+        pub to_id: EntityId,
+        #[active_type(LWW)]
+        pub status: RelationStatus,
+        pub created_by: Ref<Principal>,
+        pub via: Json,
+    }
+}
+
+/// An assignment that cannot be followed fails nothing: one of an id that names nothing, and one
+/// whose relation has no creation time, as a writer that left the field out stores one, are
+/// counted in the section's line, beside the intention that can be read.
+#[tokio::test]
+async fn an_assignment_that_cannot_be_followed_is_counted_beside_the_rest() -> Result<()> {
+    let t = two().await?;
+    let ours = intentions::create(&t.alpha, t.lead, "Readers keep their place", String::new(), None).await?;
+    intentions::assign(&t.alpha, t.lead, &ours, t.lead).await?;
+    let trx = t.alpha.begin();
+    trx.create(&Relation {
+        project: t.alpha.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: EntityId::from_bytes([0; 32]),
+        to_id: t.lead,
+        status: RelationStatus::Accepted,
+        created_by: Ref::new(t.lead),
+        created: 1,
+        via: Json::new(json!({})),
+        note: None,
+        position: None,
+        closed_by: None,
+        closed: None,
+        closed_reason: None,
+    })
+    .await?;
+    trx.commit().await?;
+    let trx = t.node.begin();
+    trx.create(&sparse::Relation {
+        project: t.alpha.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: ours.0.id(),
+        to_id: t.lead,
+        status: RelationStatus::Accepted,
+        created_by: Ref::new(t.lead),
+        via: Json::new(json!({})),
+    })
+    .await?;
+    trx.commit().await?;
+
+    let json = view(&t.alpha, Reader::Identity("tester")).await?;
+    let section = &json["sections"][0];
+    let titles: Vec<&Value> = section["records"].as_array().into_iter().flatten().map(|r| &r["title"]).collect();
+    assert_eq!(titles, [&json!("Readers keep their place")], "{json}");
+    assert_eq!(section["lines"], json!(["fwd could not read 2 of the intentions assigned to this session."]));
     Ok(())
 }

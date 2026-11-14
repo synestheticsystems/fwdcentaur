@@ -594,7 +594,8 @@ impl ProjectGraph {
             return at(r.project_id(), Referent::Relation { kind: r.kind()? });
         }
         if let Some(i) = absent(self.ctx.get::<IntentionView>(id).await)? {
-            let placement: PlacementView = self.ctx.get(id).await?;
+            // One no project placed is no record of fwd's.
+            let Some(placement) = absent(self.ctx.get::<PlacementView>(id).await)? else { return Ok(None) };
             return at(placement.project_id(), Referent::Intention(i));
         }
         Ok(None)

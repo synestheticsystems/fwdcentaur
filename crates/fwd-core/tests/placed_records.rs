@@ -1,14 +1,15 @@
 //! A record built on the Commons' models, which name no project, placed in one by fwd's
 //! `Placement` component (`fwd_core::project_graph`, `placed`): one transaction makes an intention
 //! with who wrote it down, whose words it holds and where it is placed; its project's graph lists
-//! it and another project's does not; and a second node of the same SQLite store reads it, the
-//! definitions the first node minted included.
+//! it and another project's does not; a second node of the same SQLite store reads it, the
+//! definitions the first node minted included; and one no project placed is no record of fwd's.
 
 use ankurah::{policy::DEFAULT_CONTEXT, property::Ref, Context, EntityId, Node, PermissiveAgent};
 use ankurah_commons::intention_graph::{Intention, IntentionStatus, IntentionView};
 use ankurah_commons::records::{Attribution, AttributionView, Creation, CreationView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::intentions;
 use fwd_core::model::{PlacementView, PrincipalKind};
 use fwd_core::ops;
 use fwd_core::project_graph::{Followed, ProjectGraph, ProjectGraphError, Whose};
@@ -94,5 +95,30 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
         }
         other => panic!("alpha's intention, followed from beta: {other:?}"),
     }
+    Ok(())
+}
+
+/// An intention no project placed, as another application of the Commons' models may write one
+/// into the node, is no record of fwd's: a reference to it is one that cannot be followed here,
+/// not a read that fails, beside one that fwd placed, which is followed.
+#[tokio::test]
+async fn an_intention_no_project_placed_is_a_reference_that_cannot_be_followed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let ctx = node_on(&dir.path().join("fwd.sqlite"), true).await?;
+    let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
+    let person = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
+    let placed = intentions::create(&alpha, person, "Readers keep their place", String::new(), None).await?.0.id();
+    let trx = ctx.begin();
+    let unplaced = trx
+        .create(&Intention {
+            title: "Builds stay under a minute".into(),
+            words: String::new(),
+            status: IntentionStatus::Open,
+        })
+        .await?
+        .id();
+    trx.commit().await?;
+    assert!(matches!(ops::reference(&alpha, placed).await?, ops::Reference::Followed { .. }));
+    assert_eq!(ops::reference(&alpha, unplaced).await?, ops::Reference::NotFollowed);
     Ok(())
 }

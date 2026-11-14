@@ -1,9 +1,13 @@
 //! `fwd intention` through the CLI, against a scratch daemon of the test's own that hosts two
 //! projects, alpha and beta, made by the person `tester`: an agent records what the person wants,
 //! in their words read whole from standard input; an intention of another project is shown with
-//! its project; and an agent assigns itself one and unassigns it.
+//! its project; the list holds its project's intentions; and an agent assigns itself one and
+//! unassigns it, and lists those assigned to any of its principals, past one it cannot read.
 
+use ankurah::{EntityId, View};
 use anyhow::{anyhow, Result};
+use fwd_core::daemon::{self, Autostart, Client};
+use fwd_core::project::{NamedProject, Paths};
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -71,6 +75,37 @@ impl Scratch {
     fn made(&self, dir: &Path, agent: Option<&str>, args: &[&str], stdin: &str) -> Result<String> {
         let made = self.json_in(dir, agent, args, stdin)?;
         Ok(made["record"]["id"].as_str().ok_or_else(|| anyhow!("no id under record in {made}"))?.to_string())
+    }
+
+    /// A client of the project whose folder is `dir`, for what the CLI cannot write: a value a
+    /// later build may store.
+    async fn client(&self, dir: &Path) -> Result<Client> {
+        let shown = self.json(dir, None, &["project", "show"])?;
+        let project = NamedProject {
+            id: shown["id"].as_str().ok_or_else(|| anyhow!("no id in {shown}"))?.parse()?,
+            name: shown["name"].as_str().unwrap_or_default().to_string(),
+        };
+        let paths = Paths { runtime_dir: self.dir.path().join("run"), data_dir: self.dir.path().join("data") };
+        daemon::ensure_daemon(&paths, &project, Autostart::Never).await
+    }
+}
+
+/// An intention as a later build may store one, by a model of the label the Commons' intention is
+/// read by, its status any text.
+mod later {
+    use ankurah::Model;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[model(label = "intention-graph.intention")]
+    #[model(no_ffi)]
+    pub struct Intention {
+        #[active_type(LWW)]
+        pub title: String,
+        #[active_type(LWW)]
+        pub words: String,
+        #[active_type(LWW)]
+        pub status: String,
     }
 }
 
@@ -140,6 +175,38 @@ fn the_active_list_covers_every_principal_bound_to_the_agent() -> Result<()> {
     let active = s.json(&s.alpha, Some("main"), &["intention", "list", "--active"])?;
     let ids: Vec<&Value> = active.as_array().into_iter().flatten().map(|r| &r["id"]).collect();
     assert_eq!(ids, [&Value::from(both), &Value::from(betas)], "{active}");
+    Ok(())
+}
+
+/// An intention assigned to the agent whose status this build does not know, as a later build may
+/// store one, fails nothing: `list --active` lists the rest, and says on standard error that one
+/// could not be read, by its id.
+#[tokio::test]
+async fn an_intention_whose_status_cannot_be_read_is_counted_and_the_rest_listed() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let create = |title: &str| s.made(&s.alpha, None, &["intention", "create", title, "--words", ""], "");
+    let (kept, paused) = (create("Readers keep their place")?, create("Builds stay under a minute")?);
+    for id in [&kept, &paused] {
+        s.json(&s.alpha, Some("main"), &["intention", "assign", id])?;
+    }
+    let client = s.client(&s.alpha).await?;
+    let ctx = client.node.context_async(ankurah::policy::DEFAULT_CONTEXT).await?;
+    let id: EntityId = paused.parse().map_err(|e| anyhow!("{e:?}"))?;
+    let view: later::IntentionView = ctx.get(id).await?;
+    let trx = ctx.begin();
+    trx.edit::<later::Intention>(view.entity())?.status()?.set(&"paused".to_string())?;
+    trx.commit().await?;
+    drop(client);
+
+    let out = s.run(&s.alpha, Some("main"), &["--format", "json", "intention", "list", "--active"], "")?;
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    let listed: Value = serde_json::from_slice(&out.stdout)?;
+    let ids: Vec<&Value> = listed.as_array().into_iter().flatten().map(|r| &r["id"]).collect();
+    assert_eq!(ids, [&Value::from(kept)], "{listed}");
+    let counted = format!("1 intentions assigned to you could not be read, the first {}", &paused[..8]);
+    assert!(said.contains(&counted), "{said}");
     Ok(())
 }
 
