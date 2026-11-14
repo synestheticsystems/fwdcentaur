@@ -1168,6 +1168,7 @@ name = "fwd"
 version = "0.0.1"
 dependencies = [
  "ankurah",
+ "ankurah-commons",
  "ankurah-storage-sqlite",
  "ankurah-websocket-server",
  "anyhow",

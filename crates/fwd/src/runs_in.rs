@@ -12,6 +12,7 @@
 //! acts as, so that its caller is found, or made, in the project it runs in, and nothing is read
 //! for the caller or written in the project it started in.
 
+use crate::intentions::IntentionCommand;
 use crate::{
     AnchorCommand, Command, DecisionCommand, MessageCommand, RelationCommand, ScopeCommand, StepCommand, TaskCommand,
 };
@@ -87,6 +88,9 @@ fn placed_by(command: &Command) -> Option<PlacedBy<'_>> {
             | StepCommand::Uncheck { task, step }
             | StepCommand::Remove { task, step, .. } => Some(PlacedBy::Step { task, step }),
         },
+        // What a principal works under is linked by a name, read where the command runs.
+        Command::Link { kind: RelationKind::WorksUnder, .. }
+        | Command::Unlink { kind: RelationKind::WorksUnder, .. } => None,
         Command::Link { from, .. } => record(from, ops::ANY),
         Command::Unlink { from, kind, to, .. } => Some(PlacedBy::Relations { from, kind: *kind, to }),
         Command::Relations { id, .. } => record(id, ops::ANY),
@@ -127,6 +131,13 @@ fn placed_by(command: &Command) -> Option<PlacedBy<'_>> {
             DecisionCommand::Create(_) | DecisionCommand::List { .. } | DecisionCommand::Export => None,
         },
         Command::Cite { entity, .. } => record(entity, &[Kind::Task, Kind::Message, Kind::Decision]),
+        Command::Intention { command } => match command {
+            IntentionCommand::Show { id }
+            | IntentionCommand::Reword { id, .. }
+            | IntentionCommand::Fulfil { id, .. }
+            | IntentionCommand::Withdraw { id, .. } => record(id, &[Kind::Intention]),
+            IntentionCommand::Create { .. } | IntentionCommand::List { .. } => None,
+        },
         Command::Read { ids } | Command::Dismiss { ids } => {
             ids.first().map(|id| PlacedBy::Record { typed: id, kinds: &[Kind::Notification] })
         }

@@ -61,12 +61,11 @@ impl ProjectGraph {
     }
 
     /// The project's placed record `id`, read through its `Placement` and `R`'s components. A
-    /// record of another project is refused as [`ProjectGraph::get`] refuses it; one that lacks a
-    /// component of `R` is the error that names it.
+    /// record of another project is refused as [`ProjectGraph::get`] refuses it, and one that lacks
+    /// a component of `R` is not found.
     pub async fn get_placed<R: ComponentViews>(&self, id: EntityId) -> Result<(PlacementView, R), ProjectGraphError> {
         let placement: PlacementView = self.get(id).await?;
-        let components = R::views_of(placement.entity().clone())?;
-        Ok((placement, components))
+        Ok(self.placed(placement.id()).await?.ok_or(RetrievalError::EntityNotFound(id))?)
     }
 
     /// The placed record `id` that a record holds, wherever in the node it is, as
@@ -75,14 +74,21 @@ impl ProjectGraph {
         &self,
         id: EntityId,
     ) -> Result<Followed<(PlacementView, R)>, ProjectGraphError> {
-        let Followed::Held { record, project, found } = self.follow::<PlacementView>(id).await? else {
+        let Followed::Held { record, project, .. } = self.follow::<PlacementView>(id).await? else {
             return Ok(Followed::NotHeld);
         };
-        Ok(match R::views_of(found.entity().clone()) {
-            Ok(components) => Followed::Held { record, project, found: (found, components) },
-            Err(RetrievalError::MissingComponent { .. }) => Followed::NotHeld,
-            Err(e) => return Err(e.into()),
+        Ok(match self.placed(record).await? {
+            Some(found) => Followed::Held { record, project, found },
+            None => Followed::NotHeld,
         })
+    }
+
+    /// The record `id` read through its `Placement` and `R`'s components, wherever it is; none
+    /// when it lacks one of them. Read by a fetch, which binds each component the node has not
+    /// bound yet, as a view read from the record alone does not.
+    async fn placed<R: ComponentViews>(&self, id: EntityId) -> Result<Option<(PlacementView, R)>, RetrievalError> {
+        let found: Vec<(PlacementView, R)> = self.ctx.fetch(selecting(equals("id", Value::EntityId(id)))).await?;
+        Ok(found.into_iter().next())
     }
 }
 

@@ -3,7 +3,7 @@
 //! intention's speaker confirmed that reading, so that an agent coming back to its work sees first
 //! what governs it, and where its understanding is in doubt.
 
-use super::readings::{confirmation, readings_of, Confirmation, ReadingRecord};
+use super::readings::{confirmation, party_reading, readings_of, Confirmation, ReadingRecord};
 use super::{IntentionRecord, Parts};
 use crate::model::RelationKind;
 use crate::project_graph::{Followed, ProjectGraph, Whose};
@@ -76,12 +76,7 @@ pub async fn works_under(graph: &ProjectGraph, principal: EntityId) -> Result<Wo
             continue;
         };
         let intention = IntentionRecord::read(graph, &placement, &parts).await?;
-        // Two readings by one party come only from two writes that raced, and the later stands.
-        let reading = readings_of(graph, intention.id)
-            .await?
-            .into_iter()
-            .filter(|r| r.party() == principal)
-            .max_by_key(|r| (r.authorship.changed(), r.id));
+        let reading = party_reading(&readings_of(graph, intention.id).await?, principal).cloned();
         let confirmation = match &reading {
             Some(r) => confirmation(r, intention.authorship.speaker, &readings_of(graph, r.id).await?),
             None => None,

@@ -136,10 +136,9 @@ pub async fn set(graph: &ProjectGraph, by: EntityId, spec: SetReading) -> Result
         _ => {}
     }
     let party = spec.said_by.unwrap_or(by);
-    let existing: Vec<ReadingRecord> =
-        readings_of(graph, spec.of).await?.into_iter().filter(|r| r.party() == party).collect();
-    match existing.as_slice() {
-        [] => {
+    let readings = readings_of(graph, spec.of).await?;
+    match party_reading(&readings, party) {
+        None => {
             let trx = graph.begin();
             let reading = Reading { of: spec.of, words: spec.words, stance: Some(spec.stance) };
             let made = trx.create_placed(&reading).await?;
@@ -152,8 +151,8 @@ pub async fn set(graph: &ProjectGraph, by: EntityId, spec: SetReading) -> Result
             trx.commit().await?;
             Ok(id)
         }
-        [one] if one.words == spec.words && one.stance == Some(spec.stance) => Ok(one.id),
-        [one] => {
+        Some(one) if one.words == spec.words && one.stance == Some(spec.stance) => Ok(one.id),
+        Some(one) => {
             let (placement, _) = graph.get_placed::<ReadingView>(one.id).await?;
             let trx = graph.begin();
             let m = trx.edit_placed::<Reading>(&placement)?;
@@ -163,13 +162,13 @@ pub async fn set(graph: &ProjectGraph, by: EntityId, spec: SetReading) -> Result
             trx.commit().await?;
             Ok(one.id)
         }
-        several => bail!(
-            "the record {} has {} readings by one party ({}), where a party has one: say which stands",
-            spec.of.to_base64(),
-            several.len(),
-            several.iter().map(|r| r.id.to_base64()).collect::<Vec<_>>().join(", ")
-        ),
     }
+}
+
+/// `party`'s reading among `readings`, the readings of one record. A party has one; two come only
+/// from two first writes that raced, and the one changed last stands.
+pub(crate) fn party_reading(readings: &[ReadingRecord], party: EntityId) -> Option<&ReadingRecord> {
+    readings.iter().filter(|r| r.party() == party).max_by_key(|r| (r.authorship.changed(), r.id))
 }
 
 /// Confirms the reading `reading`, which reads an intention, in the words of the intention's
@@ -264,7 +263,11 @@ mod tests {
         let questions = reading(3, 1, 9, Stance::Question, 300, None);
         assert_eq!(at(confirmation(&agents, speaker, &[questions])), None, "the speaker's question");
         let before_the_edit = reading(4, 1, 9, Stance::Agree, 150, None);
-        assert_eq!(at(confirmation(&agents, speaker, std::slice::from_ref(&before_the_edit))), None, "older than the edit");
+        assert_eq!(
+            at(confirmation(&agents, speaker, std::slice::from_ref(&before_the_edit))),
+            None,
+            "older than the edit"
+        );
         let with_the_edit = reading(5, 1, 9, Stance::Agree, 200, None);
         assert_eq!(at(confirmation(&agents, speaker, &[with_the_edit])), Some(200), "not older than the edit");
         let reworded_after = reading(6, 1, 9, Stance::Agree, 150, Some(250));

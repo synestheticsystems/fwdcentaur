@@ -41,6 +41,12 @@
 //!   [`ProjectGraph::query_projects`]): each holds what a reader names by id, so a record of another
 //!   project is shown with its project and its conversation, and no list reads through them.
 //!
+//! - A record built on the Commons' models names no project: the `Placement` component on its
+//!   entity does (`model::Placement`), and the graph reads it under the same rule (`placed`): a
+//!   list reads its components with its `Placement` in one selection that carries the project, a
+//!   record read by its id is the project's or followed into its own, and a record's readings are
+//!   read by its id wherever they were placed ([`ProjectGraph::readings_of`]).
+//!
 //! - A record changes project in one write alone, [`ProjectTransaction::take_in`], which a task's
 //!   move to another project makes (`task_move`); every other write of a project's graph makes and
 //!   changes that project's records alone.

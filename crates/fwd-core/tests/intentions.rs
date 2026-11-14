@@ -122,6 +122,11 @@ async fn a_party_has_one_reading_of_a_record_which_a_second_set_rewords_wherever
     assert_eq!(mine.len(), 1);
     assert_eq!((mine[0].stance, mine[0].authorship.edited.and_then(|e| e.by)), (Some(Stance::Question), Some(w.tide)));
     assert_ne!(mine[0].revision, unchanged[0].revision);
+    let first_edit = mine[0].authorship.edited.map(|e| e.at).expect("edited");
+    past(first_edit);
+    read(&w.alpha, w.tide, it, "the task list", Stance::Agree).await?;
+    let again = readings::readings_of(&w.alpha, it).await?[0].authorship.edited.map(|e| e.at);
+    assert!(again.is_some_and(|at| at > first_edit), "a later edit is recorded over the first");
 
     let theirs = read(&w.beta, w.reef, it, "the reader's scroll", Stance::Agree).await?;
     let all = readings::readings_of(&w.alpha, it).await?;
