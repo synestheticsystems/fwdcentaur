@@ -103,7 +103,7 @@ pub(crate) async fn for_agent(
         };
         let project = resolved.as_ref().map(|r| (r.project.id, r.project.name.as_str()));
         let rest = prime_command(project, directory, typed_as, session);
-        let primer = Primer::new(graph, holdings, Some(agent), directory, scope, client.port, rest).await?;
+        let primer = Primer::new(graph, format, holdings, Some(agent), directory, scope, client.port, rest).await?;
         anyhow::Ok((primer, notices))
     };
     let (primer, notices) = client.while_connected(read).await?;
@@ -111,7 +111,7 @@ pub(crate) async fn for_agent(
         // As every hook of an agent that has not named itself prints nothing.
         return Ok(());
     }
-    match primer.answer(format, *max_chars, &notices.lines()) {
+    match primer.answer(*max_chars, &notices.lines()) {
         Answer::Text(text) => write_answer(&text)?,
         Answer::Json(value, cut) => {
             write_answer(&pretty(&value))?;
@@ -140,8 +140,8 @@ pub(crate) async fn for_app(app: &App, max_chars: Option<usize>, include: &[Sect
         Output::Stdout => directory_project(&app.paths),
     };
     let rest = prime_command(Some((app.project.id, &app.project.name)), directory, app.typed_as.as_deref(), None);
-    let primer = Primer::new(graph, holdings, None, directory, app.scope, app.daemon_port, rest).await?;
-    match (primer.answer(app.format, max_chars, &notices.lines()), &app.out) {
+    let primer = Primer::new(graph, app.format, holdings, None, directory, app.scope, app.daemon_port, rest).await?;
+    match (primer.answer(max_chars, &notices.lines()), &app.out) {
         (Answer::Text(text), _) => write_answer(&text)?,
         (Answer::Json(value, cut), Output::Captured(_)) => {
             app.print(value)?;
@@ -247,6 +247,8 @@ impl Notices {
 
 /// What `fwd prime` prints, before it is fitted to its budget.
 struct Primer {
+    /// The format it was read for, which its intentions are printed in.
+    format: Format,
     /// The intentions assigned to the holdings' principals, each once: the first holding's first,
     /// each holding's in the order they were assigned.
     intentions: Vec<PrintedIntention>,
@@ -286,8 +288,11 @@ struct Cut {
 }
 
 impl Primer {
+    /// What `fwd prime` prints in `format` of `holdings`, read through `graph`.
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         graph: &ProjectGraph,
+        format: Format,
         holdings: Vec<Holding>,
         agent: Option<&str>,
         directory: Option<Uuid>,
@@ -302,8 +307,9 @@ impl Primer {
             },
             None => None,
         };
-        let (intentions, unreadable_intentions) = assigned_intentions(graph, &holdings, directory).await?;
+        let (intentions, unreadable_intentions) = assigned_intentions(graph, format, &holdings, directory).await?;
         Ok(Primer {
+            format,
             intentions,
             unreadable_intentions,
             holdings,
@@ -315,29 +321,33 @@ impl Primer {
         })
     }
 
-    /// What to print in `format`, fitted to `max_chars`, or with `--format hook` to [`HOOK_CHARS`];
-    /// a hook's text ends with `notices` before its last lines, as other commands say them beside
-    /// their answer. Where leaving out every record still leaves it longer than the budget, its last
-    /// line says so, with both numbers.
-    fn answer(&self, format: Format, max_chars: Option<usize>, notices: &[String]) -> Answer {
-        let budget = max_chars.or((format == Format::Hook).then_some(HOOK_CHARS));
+    /// What to print, fitted to `max_chars`, or with `--format hook` to [`HOOK_CHARS`]; a hook's
+    /// text ends with `notices` before its last lines, as other commands say them beside their
+    /// answer. Which intentions keep their words is chosen first, against the budget with every
+    /// other record left out, since every record is left out before any intention's words; the
+    /// records then fill what room those words leave. Where leaving out every record still leaves
+    /// it longer than the budget, its last line says so, with both numbers.
+    fn answer(&self, max_chars: Option<usize>, notices: &[String]) -> Answer {
+        let budget = max_chars.or((self.format == Format::Hook).then_some(HOOK_CHARS));
         // Counted as printed, its last newline with it.
         let size = |out: &str| out.chars().count() + 1;
-        match format {
+        let none: Shown = self.holdings.iter().map(|h| vec![0; h.sections.len()]).collect();
+        match self.format {
             Format::Pane => unreachable!("run_cli refuses --format pane for every command but reply"),
             Format::Json => {
-                let all = self.active();
-                let shown = self.fit(budget, |shown| size(&pretty(&self.json(shown, all))));
-                let words = self.fit_words(budget, |words| size(&pretty(&self.json(&shown, words))));
+                // The JSON holds the words of an intention since ended too.
+                let most = self.intentions.len();
+                let words = self.fit_words(budget, most, |words| size(&pretty(&self.json(&none, words))));
+                let shown = self.fit(budget, |shown| size(&pretty(&self.json(shown, words))));
                 let json = self.json(&shown, words);
                 let over = budget.map(|b| (size(&pretty(&json)), b)).filter(|(length, b)| length > b);
                 Answer::Json(json, self.last_line(&shown, words, over))
             }
             Format::Text | Format::Hook => {
-                let notices = if format == Format::Hook { notices } else { &[] };
-                let all = self.active();
-                let shown = self.fit(budget, |shown| size(&self.text(shown, all, notices, None)));
-                let words = self.fit_words(budget, |words| size(&self.text(&shown, words, notices, None)));
+                let notices = if self.format == Format::Hook { notices } else { &[] };
+                let most = self.active();
+                let words = self.fit_words(budget, most, |words| size(&self.text(&none, words, notices, None)));
+                let shown = self.fit(budget, |shown| size(&self.text(shown, words, notices, None)));
                 let text = match budget.filter(|b| size(&self.text(&shown, words, notices, None)) > *b) {
                     // The line states the length of the text that holds it, so its count is found
                     // by writing it until it states its own length.
@@ -383,11 +393,12 @@ impl Primer {
         shown
     }
 
-    /// How many of the active intentions keep their words in `budget` characters, as `measure`
-    /// counts what prints with that many: all of them, unless the intentions alone are longer than
-    /// the budget, when the first ones keep theirs as far as they fit, and every title stays.
-    fn fit_words(&self, budget: Option<usize>, measure: impl Fn(usize) -> usize) -> usize {
-        let mut words = self.active();
+    /// How many of the intentions keep their words, of the first `most` in the order they keep them
+    /// ([`Primer::keeping`]), in `budget` characters as `measure` counts what prints with that
+    /// many: all `most`, unless that is longer than the budget, when the last lose theirs first and
+    /// every title stays.
+    fn fit_words(&self, budget: Option<usize>, most: usize, measure: impl Fn(usize) -> usize) -> usize {
+        let mut words = most;
         if let Some(budget) = budget {
             while words > 0 && measure(words) > budget {
                 words -= 1;
@@ -398,14 +409,34 @@ impl Primer {
 
     /// How many of the intentions are active: assigned and not ended.
     fn active(&self) -> usize {
-        self.intentions.iter().filter(|i| i.words.is_some()).count()
+        self.intentions.iter().filter(|i| i.active).count()
     }
 
-    /// The text: the active intentions, the first `words` of them with their words; then for each
-    /// holding, who the agent is there, then each section with records shown, one line each, a
-    /// record of another project than its principal's naming that project, and what of it could not
-    /// be read; then `notices`, how to go on, and the last line: what was left out, and, given
-    /// `over` (the text's length and the budget), that it is longer than the budget.
+    /// Each intention, in the order they print, with whether it keeps its words when `words` of
+    /// them do: the active ones keep theirs first, in that order, then those since ended, whose
+    /// words only the JSON holds, so that a budget leaves out an ended intention's words before an
+    /// active one's.
+    fn keeping(&self, words: usize) -> impl Iterator<Item = (&PrintedIntention, bool)> {
+        let active = self.active();
+        let (mut actives, mut ended) = (0, 0);
+        self.intentions.iter().map(move |i| {
+            let place = if i.active {
+                actives += 1;
+                actives - 1
+            } else {
+                ended += 1;
+                active + ended - 1
+            };
+            (i, place < words)
+        })
+    }
+
+    /// The text: the active intentions, the first `words` of them with their words
+    /// ([`Primer::keeping`]); then for each holding, who the agent is there, then each section with
+    /// records shown, one line each, a record of another project than its principal's naming that
+    /// project, and what of it could not be read; then `notices`, how to go on, and the last line:
+    /// what was left out, and, given `over` (the text's length and the budget), that it is longer
+    /// than the budget.
     fn text(&self, shown: &Shown, words: usize, notices: &[String], over: Option<(usize, usize)>) -> String {
         if self.holdings.is_empty() {
             return [Some(self.unbound_line()), self.last_line(shown, words, over)]
@@ -449,14 +480,11 @@ impl Primer {
         let mut lines = Vec::new();
         if !self.intentions.is_empty() {
             lines.push(format!("Active Intentions ({}):", self.active()));
-            let mut kept = words;
-            for i in &self.intentions {
-                let mut printed = i.lines.clone();
-                if let Some(said) = i.words.as_ref().filter(|_| kept > 0) {
-                    printed.push_str(said);
-                    kept -= 1;
-                }
-                lines.push(printed);
+            for (i, keeps) in self.keeping(words) {
+                let Printed::Text { lines: before, words: said } = &i.printed else {
+                    unreachable!("a primer read for text prints its intentions as text")
+                };
+                lines.push(if keeps { format!("{before}{said}") } else { before.clone() });
             }
         }
         if let Some(first) = self.unreadable_intentions.iter().min() {
@@ -467,19 +495,17 @@ impl Primer {
     }
 
     /// The active intentions as the JSON gives them: each one, never left out, the first `words` of
-    /// the active ones with their words and the others' words null.
+    /// them with their words ([`Primer::keeping`]) and the others' words null.
     fn intentions_json(&self, words: usize) -> Value {
-        let mut kept = words;
         let records: Vec<Value> = self
-            .intentions
-            .iter()
-            .map(|i| {
-                let mut record = i.json.clone();
-                if i.words.is_some() {
-                    match kept {
-                        0 => record["words"] = Value::Null,
-                        _ => kept -= 1,
-                    }
+            .keeping(words)
+            .map(|(i, keeps)| {
+                let Printed::Json(record) = &i.printed else {
+                    unreachable!("a primer read for JSON prints its intentions as JSON")
+                };
+                let mut record = record.clone();
+                if !keeps {
+                    record["words"] = Value::Null;
                 }
                 record
             })
@@ -621,41 +647,62 @@ impl Primer {
     }
 }
 
-/// An intention assigned to one of the agent's principals, as prime prints it, rendered once from
-/// its views: its lines without its words, one line for one since fulfilled or withdrawn; its
-/// words, for one still active, which a budget leaves out last of all; and its JSON record, as
-/// `fwd intention show` gives it with a record's path and project, its words included.
+/// An intention assigned to one of the agent's principals, as prime prints it in the format it was
+/// read for, rendered once from its views.
 struct PrintedIntention {
-    lines: String,
-    words: Option<String>,
-    json: Value,
+    /// Whether it is active, neither fulfilled nor withdrawn, as its status read when it was
+    /// rendered, so that the heading's count and what it prints agree.
+    active: bool,
+    printed: Printed,
+}
+
+/// What an intention prints, in the format prime was read for.
+enum Printed {
+    /// Its lines, then its words, which a budget leaves out last of all; for one since ended, the
+    /// one line saying so, and no words.
+    Text { lines: String, words: String },
+    /// Its record, as `fwd intention show` gives it with a record's path and project, its words
+    /// among its fields.
+    Json(Value),
 }
 
 impl PrintedIntention {
     /// The intention `record` assigned to `h`'s principal, read in `there`, its principal's
-    /// project's graph, as one of `project`: its short id and title, its project when that is not
-    /// the principal's, then whose words they are and the day they were written down; for one
-    /// since ended, that it is still assigned and the command that takes it off, run from
-    /// `directory`'s project.
+    /// project's graph, as one of `project`, as it prints in `format`. In the text, its short id
+    /// and title, its project when that is not the principal's, then whose words they are and the
+    /// day they were written down, then its words; for one since ended, that it is still assigned
+    /// and the command that takes it off, run from `directory`'s project. In the JSON, its record.
     async fn of(
         there: &ProjectGraph,
+        format: Format,
         h: &Holding,
         directory: Option<Uuid>,
         project: &Whose,
         record: &(PlacementView, Parts),
     ) -> Result<PrintedIntention> {
         let (placement, (intention, _)) = record;
+        let status = intention.status()?;
+        let active = !intentions::ended(status);
+        if format == Format::Json {
+            let mut json = crate::intentions::intention_json(there, record).await?;
+            json["path"] = Value::Null;
+            json["project"] = match project {
+                Whose::Other(p) => json!({"id": p.uuid.to_string(), "name": p.name}),
+                Whose::This => Value::Null,
+            };
+            return Ok(PrintedIntention { active, printed: Printed::Json(json) });
+        }
         let short = short_id(&placement.id());
         let title = intention.title()?.split_whitespace().collect::<Vec<_>>().join(" ");
-        let status = intention.status()?;
-        let (elsewhere, in_project) = match project {
-            Whose::Other(p) => (format!(" in {}", p.name), json!({"id": p.uuid.to_string(), "name": p.name})),
-            Whose::This => (String::new(), Value::Null),
+        let elsewhere = match project {
+            Whose::Other(p) => format!(" in {}", p.name),
+            Whose::This => String::new(),
         };
-        let mut json = crate::intentions::intention_json(there, record).await?;
-        json["path"] = Value::Null;
-        json["project"] = in_project;
-        if intentions::ended(status) {
+        let printed = if active {
+            let (speaker, day, _) = crate::intentions::spoken(there, record).await?;
+            let lines = format!("{short} {title}{elsewhere}\n  @{speaker}, {day}");
+            Printed::Text { lines, words: crate::intentions::words_after(&intention.words()?) }
+        } else {
             let flag = if directory == Some(h.project.uuid) {
                 String::new()
             } else {
@@ -664,24 +711,19 @@ impl PrintedIntention {
             let lines = format!(
                 "{short} {title}{elsewhere} [{status}]: still assigned to you; `fwd{flag} intention unassign {short}` takes it off"
             );
-            return Ok(PrintedIntention { lines, words: None, json });
-        }
-        let (speaker, day, _) = crate::intentions::spoken(there, record).await?;
-        let words = crate::intentions::words_after(&intention.words()?);
-        Ok(PrintedIntention {
-            lines: format!("{short} {title}{elsewhere}\n  @{speaker}, {day}"),
-            words: Some(words),
-            json,
-        })
+            Printed::Text { lines, words: String::new() }
+        };
+        Ok(PrintedIntention { active, printed })
     }
 }
 
-/// The intentions assigned to the principals of `holdings`, each once, as prime prints them: the
-/// first holding's first and each holding's in the order they were assigned, each named with its
-/// project when that is not its principal's; and the ids of those that could not be read, which,
-/// as every record prime cannot read, are not listed but counted.
+/// The intentions assigned to the principals of `holdings`, each once, as prime prints them in
+/// `format`: the first holding's first and each holding's in the order they were assigned, each
+/// named with its project when that is not its principal's; and the ids of those that could not be
+/// read, which, as every record prime cannot read, are not listed but counted.
 async fn assigned_intentions(
     graph: &ProjectGraph,
+    format: Format,
     holdings: &[Holding],
     directory: Option<Uuid>,
 ) -> Result<(Vec<PrintedIntention>, Vec<EntityId>)> {
@@ -695,7 +737,7 @@ async fn assigned_intentions(
             }
             match assigned {
                 Followed::Held { project, found, .. } => {
-                    match PrintedIntention::of(&there, h, directory, &project, &found).await {
+                    match PrintedIntention::of(&there, format, h, directory, &project, &found).await {
                         Ok(intention) => printed.push(intention),
                         Err(_) => unreadable.push(id),
                     }
@@ -930,10 +972,11 @@ mod tests {
         }
     }
 
-    /// A primer of `holdings`, run in the first one's project's directory.
+    /// A primer of `holdings`, read for the text, run in the first one's project's directory.
     fn primer(holdings: Vec<Holding>) -> Primer {
         let directory = holdings.first().map(|h| h.project.uuid);
         Primer {
+            format: Format::Text,
             intentions: Vec::new(),
             unreadable_intentions: Vec::new(),
             holdings,
@@ -1014,18 +1057,19 @@ mod tests {
     /// enough, the last line says by how much, the length it states being the text's own.
     #[test]
     fn the_hook_fits_its_budget_and_says_when_leaving_out_records_is_not_enough() {
-        let mut p = primer(vec![holding(0, &[(Assigned, 400, 400)])]);
+        let mut p = Primer { format: Format::Hook, ..primer(vec![holding(0, &[(Assigned, 400, 400)])]) };
         for r in &mut p.holdings[0].sections[0].records {
             r.title = format!("{} {}", r.title, "é".repeat(40));
         }
-        let Answer::Text(text) = p.answer(Format::Hook, None, &[]) else { panic!("text") };
+        let Answer::Text(text) = p.answer(None, &[]) else { panic!("text") };
         assert!(text.chars().count() < HOOK_CHARS, "{} characters", text.chars().count());
         assert!(text
             .lines()
             .last()
             .is_some_and(|line| line.starts_with("fwd: ") && line.contains("of 400 tasks assigned to you shown")));
 
-        let Answer::Text(text) = p.answer(Format::Text, Some(30), &[]) else { panic!("text") };
+        p.format = Format::Text;
+        let Answer::Text(text) = p.answer(Some(30), &[]) else { panic!("text") };
         let length = text.chars().count() + 1;
         assert!(
             text.lines().last().is_some_and(|line| line.ends_with(&format!(
@@ -1036,7 +1080,7 @@ mod tests {
 
         // The one line for an agent no principal is bound to says so too.
         let unbound = Primer { holdings: Vec::new(), agent: Some("claude-code:s1/main".into()), ..primer(Vec::new()) };
-        let Answer::Text(text) = unbound.answer(Format::Text, Some(30), &[]) else { panic!("text") };
+        let Answer::Text(text) = unbound.answer(Some(30), &[]) else { panic!("text") };
         let length = text.chars().count() + 1;
         assert!(text.starts_with("fwd: nothing to show: no principal is bound to"), "{text}");
         assert_eq!(
@@ -1050,14 +1094,29 @@ mod tests {
         );
     }
 
-    /// An active intention assigned to the agent, the `n`th, with `words`.
-    fn assigned(n: u8, words: &str) -> PrintedIntention {
+    /// The `n`th intention assigned to the agent, with `words`, active or since fulfilled, as it
+    /// prints in `format`: in the text, one since fulfilled is its one line.
+    fn assigned(n: u8, words: &str, active: bool, format: Format) -> PrintedIntention {
         let id = EntityId::from_bytes([n; 32]);
-        PrintedIntention {
-            lines: format!("{} intention {n}\n  @ines, 2026-11-14", short_id(&id)),
-            words: Some(crate::intentions::words_after(words)),
-            json: json!({"id": id.to_base64(), "kind": "intention", "title": format!("intention {n}"), "words": words}),
-        }
+        let printed = match (format, active) {
+            (Format::Json, _) => Printed::Json(
+                json!({"id": id.to_base64(), "kind": "intention", "title": format!("intention {n}"), "words": words}),
+            ),
+            (_, true) => Printed::Text {
+                lines: format!("{} intention {n}\n  @ines, 2026-11-14", short_id(&id)),
+                words: crate::intentions::words_after(words),
+            },
+            (_, false) => {
+                Printed::Text { lines: format!("{} intention {n} [fulfilled]", short_id(&id)), words: String::new() }
+            }
+        };
+        PrintedIntention { active, printed }
+    }
+
+    /// `primer` read for `format`, holding `intentions`, each as it prints in `format`.
+    fn with_intentions(p: Primer, format: Format, intentions: &[(u8, &str, bool)]) -> Primer {
+        let intentions = intentions.iter().map(|&(n, words, active)| assigned(n, words, active, format)).collect();
+        Primer { format, intentions, ..p }
     }
 
     /// Over its budget prime leaves out every other record before an intention's words, then the
@@ -1065,10 +1124,14 @@ mod tests {
     /// and names the command that prints them, and the JSON gives the others' words as null.
     #[test]
     fn a_budget_leaves_out_the_last_intentions_words_after_every_record_and_never_a_title() {
-        let mut p = primer(vec![holding(0, &[(Unread, 2, 2)])]);
-        p.intentions = (1..=3).map(|n| assigned(n, &format!("{n}{}", " word".repeat(60)))).collect();
+        let words: Vec<String> = (1..=3).map(|n| format!("{n}{}", " word".repeat(60))).collect();
+        let three: Vec<(u8, &str, bool)> = (1..=3).map(|n| (n, words[usize::from(n) - 1].as_str(), true)).collect();
+        let read_for = |format| with_intentions(primer(vec![holding(0, &[(Unread, 2, 2)])]), format, &three);
+        let cut = "fwd: 2 of 3 active intentions with their words and 0 of 2 unread notifications shown; `fwd prime --format text` and `fwd inbox --unread` list the rest";
+
+        let p = read_for(Format::Text);
         let budget = p.text(&vec![vec![0]], 2, &[], None).chars().count() + 1;
-        let Answer::Text(text) = p.answer(Format::Text, Some(budget), &[]) else { panic!("text") };
+        let Answer::Text(text) = p.answer(Some(budget), &[]) else { panic!("text") };
         for n in 1..=3 {
             assert!(text.contains(&format!("intention {n}\n")), "every title stays: {text}");
         }
@@ -1076,11 +1139,11 @@ mod tests {
             text.contains("\n    1 word") && text.contains("\n    2 word") && !text.contains("\n    3 word"),
             "{text}"
         );
-        assert_eq!(
-            text.lines().last(),
-            Some("fwd: 2 of 3 active intentions with their words and 0 of 2 unread notifications shown; `fwd prime --format text` and `fwd inbox --unread` list the rest")
-        );
-        let json = p.json(&vec![vec![0]], 2);
+        assert_eq!(text.lines().last(), Some(cut));
+
+        let p = read_for(Format::Json);
+        let budget = pretty(&p.json(&vec![vec![0]], 2)).chars().count() + 1;
+        let Answer::Json(json, said) = p.answer(Some(budget), &[]) else { panic!("JSON") };
         let section = &json["sections"][0];
         assert_eq!(
             (&section["section"], &section["rest"]),
@@ -1088,6 +1151,54 @@ mod tests {
         );
         let words: Vec<bool> = (0..3).map(|i| section["records"][i]["words"].is_null()).collect();
         assert_eq!(words, [false, false, true]);
+        assert_eq!((&json["principals"][0]["sections"][0]["shown"], said.as_deref()), (&json!(0), Some(cut)));
+    }
+
+    /// Which intentions keep their words is chosen first, and the records fill the room the words
+    /// left out leave: at a budget that holds the first intention's words and both notifications,
+    /// but not the second's words, prime prints the first's words and both notifications, in the
+    /// text and in the JSON.
+    #[test]
+    fn the_records_fill_the_room_the_words_left_out_leave() {
+        let words: Vec<String> = (1..=2).map(|n| format!("{n}{}", " word".repeat(200))).collect();
+        let two = [(1, words[0].as_str(), true), (2, words[1].as_str(), true)];
+        let read_for = |format| {
+            let mut p = with_intentions(primer(vec![holding(0, &[(Unread, 2, 2)])]), format, &two);
+            for r in &mut p.holdings[0].sections[0].records {
+                r.title = format!("{} {}", r.title, "on the retry ".repeat(4));
+            }
+            p
+        };
+
+        let p = read_for(Format::Text);
+        let expected = p.text(&vec![vec![2]], 1, &[], None);
+        let Answer::Text(text) = p.answer(Some(expected.chars().count() + 1), &[]) else { panic!("text") };
+        assert_eq!(text, expected);
+
+        let p = read_for(Format::Json);
+        let expected = p.json(&vec![vec![2]], 1);
+        let Answer::Json(json, _) = p.answer(Some(pretty(&expected).chars().count() + 1), &[]) else { panic!("JSON") };
+        assert_eq!(json, expected);
+    }
+
+    /// The JSON holds the words of an intention since ended too, and a budget leaves those out
+    /// before any active intention's: with a fulfilled intention whose words alone pass the budget,
+    /// the active one keeps its words, the fulfilled one's are null, and the JSON fits; the text,
+    /// which gives an ended intention one line, keeps the active one's words too.
+    #[test]
+    fn an_ended_intentions_words_are_left_out_before_an_active_ones() {
+        let fulfilled = "fulfilled ".repeat(2_000);
+        let both = [(1, fulfilled.as_str(), false), (2, "the list stays", true)];
+        let read_for = |format| with_intentions(primer(vec![holding(0, &[])]), format, &both);
+
+        let Answer::Json(json, said) = read_for(Format::Json).answer(Some(10_000), &[]) else { panic!("JSON") };
+        let records = &json["sections"][0]["records"];
+        assert_eq!((&records[0]["words"], &records[1]["words"]), (&Value::Null, &json!("the list stays")));
+        assert!(pretty(&json).chars().count() < 10_000, "{} characters", pretty(&json).chars().count());
+        assert_eq!(said, None, "no active intention's words are left out");
+
+        let Answer::Text(text) = read_for(Format::Text).answer(Some(10_000), &[]) else { panic!("text") };
+        assert!(text.contains("intention 2\n  @ines, 2026-11-14:\n    the list stays\n"), "{text}");
     }
 
     /// A record of another project than its principal's names that project on its line and in the
