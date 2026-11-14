@@ -27,6 +27,13 @@
 //!   standing queries name no project (D177), and it routes each change through the graph of the
 //!   record's own project ([`ProjectGraph::graph_of`]), so that each rule is read where its subject
 //!   is and each notification is made in its recipient's project.
+//! - What an agent holds is read wherever it now is, since a task moved to another project keeps
+//!   its assignee, and its messages their authors and addressees (`task_move`): three reads, each
+//!   given one principal's id and building its own selection here, find the tasks assigned to it
+//!   ([`ProjectGraph::unfinished_tasks_assigned_to`]), the open questions it asked
+//!   ([`ProjectGraph::open_questions_by`]) and those asked of it by its id
+//!   ([`ProjectGraph::open_questions_to`]) in every project, each with its project, which the
+//!   reader names beside it (`working_set`). No read takes a caller's selection across projects.
 //!
 //! - A page shows one project's lists from live queries that carry the project, and names what
 //!   their records hold the ids of through live reads that carry none ([`ProjectGraph::follow_live`],
@@ -44,6 +51,8 @@
 //! joins the other's.
 
 use crate::model::*;
+use crate::ops::{ASKS_KEY, ASKS_PROJECT};
+use crate::query::{with_id, with_string};
 use ankurah::ankql::ast::{ComparisonOperator, Expr, Parsed, PathExpr, Predicate, Selection};
 use ankurah::error::{MutationError, RetrievalError};
 use ankurah::model::MutableBorrow;
@@ -545,6 +554,30 @@ impl ProjectGraph {
             return Ok(Vec::new());
         }
         self.ctx.fetch(selecting(starting("former", prefix))).await
+    }
+
+    /// The tasks assigned to `principal` that are not done, cancelled or rejected, of every
+    /// project: a task moved to another project keeps its assignee.
+    pub async fn unfinished_tasks_assigned_to(&self, principal: EntityId) -> anyhow::Result<Vec<TaskView>> {
+        let held = "assignee = ? AND status != 'done' AND status != 'cancelled' AND status != 'rejected'";
+        Ok(self.ctx.fetch(with_id(held, principal)?).await?)
+    }
+
+    /// The open messages `principal` wrote that ask someone, or no one in particular, of every
+    /// project: a message moved with its task keeps its author.
+    pub async fn open_questions_by(&self, principal: EntityId) -> anyhow::Result<Vec<MessageView>> {
+        let asking = format!(
+            "author = ? AND status = '{}' AND (context.to IS NOT NULL OR context.{ASKS_KEY} = '{ASKS_PROJECT}')",
+            MessageStatus::Active
+        );
+        Ok(self.ctx.fetch(with_id(&asking, principal)?).await?)
+    }
+
+    /// The open messages that ask `principal` by its id, of every project: a message moved with its
+    /// task keeps its addressee.
+    pub async fn open_questions_to(&self, principal: EntityId) -> anyhow::Result<Vec<MessageView>> {
+        let asked = format!("status = '{}' AND context.to = ?", MessageStatus::Active);
+        Ok(self.ctx.fetch(with_string(&asked, &principal.to_base64())?).await?)
     }
 
     /// The project of each of `projects`, project records as [`ProjectGraph::ids_in_every_project`]

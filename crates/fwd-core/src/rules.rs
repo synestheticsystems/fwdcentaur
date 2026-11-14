@@ -562,7 +562,7 @@ fn listed(items: &[String], and: &str) -> String {
 /// The first eight characters of an id: what the page shows, and enough for any id argument of
 /// the CLI to take (docs/DECISIONS.md, D35, "Short ids: the page shows the first characters of an
 /// id, and the CLI takes them").
-fn short_id(id: &EntityId) -> String {
+pub fn short_id(id: &EntityId) -> String {
     id.to_base64().chars().take(8).collect()
 }
 

@@ -32,6 +32,7 @@ mod dev_runner;
 mod mcp;
 mod mcp_stdio;
 mod moved;
+mod prime;
 mod runs_in;
 mod serve;
 mod services;
@@ -422,8 +423,37 @@ enum Command {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         count: Option<u64>,
     },
-    /// A bounded context block for an agent session: scope, tasks, unread.
-    Prime,
+    /// What the agent that runs it holds, in one read: for each principal bound to it, in every
+    /// project of the node, the questions that wait on it and those it asked, the tasks assigned to
+    /// it, its unread notifications and the ready tasks it could start.
+    ///
+    /// Without an agent (no stamp, no hook's JSON, no --session), it reads for the principal the
+    /// command acts as, in its project. The text, and the JSON a panel draws, list each record on
+    /// one line by its id, the most important first, and end, when something was left out, with a
+    /// line naming what and the command that prints it.
+    Prime {
+        /// A Claude Code session's id: read for the session's own thread, whoever runs the command,
+        /// stamped or not, for a command nothing stamps, such as one a skill runs as it loads. Only
+        /// this command takes it, and it only reads.
+        #[arg(long)]
+        session: Option<String>,
+        /// A budget of characters for the whole output: past it the least important records are
+        /// left out, ready tasks first, and when leaving out every record is not enough, the last
+        /// line says by how much. 10000 with --format hook, the most Claude Code keeps of a
+        /// SessionStart hook's output; none otherwise.
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// The sections to print, commas between several: `questions` (those asked of the agent and
+        /// those it asked), `assigned`, `unread` and `ready`; all of them unless given. Who the agent
+        /// is is always printed, and `questions,assigned` changes only when what the agent holds does.
+        #[arg(long, value_delimiter = ',', value_enum)]
+        include: Vec<prime::Section>,
+        /// Seconds within which the process ends with exit 0, whatever it is doing then: when the
+        /// daemon cannot be reached, no principal is bound to the agent, or the time passes first,
+        /// it prints one line saying why there is nothing to show.
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
     /// The graph of tasks in one call: tasks (with readiness) and their relations.
     Graph {
         /// Include done, cancelled and rejected tasks.
@@ -1659,7 +1689,10 @@ impl App {
     fn note(&self, line: impl Into<String>) {
         let line = line.into();
         match &self.out {
-            Output::Stdout => eprintln!("{line}"),
+            // A line that cannot be written has no reader left, and fails no command.
+            Output::Stdout => {
+                let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("{line}\n"));
+            }
             Output::Captured(captured) => captured.lock().expect("captured output").notes.push(line),
         }
     }
@@ -2203,6 +2236,9 @@ fn joins(matches: &ArgMatches) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Some(deadline) = prime::deadline() {
+        prime::within(deadline, run_cli()).await
+    }
     match run_cli().await {
         // A command whose daemon went away while it ran ends at once, with the exit of a command
         // that finds no daemon (docs/design/cli.md, the exit codes), and not through the runtime's
@@ -2223,6 +2259,11 @@ fn fail(error: anyhow::Error, code: i32) -> ! {
     // A line that cannot be written has no reader left; the exit status still tells the end.
     let _ = writeln!(err, "Error: {error:?}").and_then(|()| err.flush());
     std::process::exit(code)
+}
+
+/// The format a command answers in: `--format`, else text for a terminal and JSON for anything else.
+fn format_of(cli: &Cli) -> Format {
+    cli.format.unwrap_or(if std::io::stdout().is_terminal() { Format::Text } else { Format::Json })
 }
 
 /// Parses the command line and runs the command it names.
@@ -2273,7 +2314,7 @@ async fn run_cli() -> Result<()> {
         .with_ansi(false)
         .init();
     let paths = Paths::from_env()?;
-    let format = cli.format.unwrap_or(if std::io::stdout().is_terminal() { Format::Text } else { Format::Json });
+    let format = format_of(&cli);
 
     match &cli.command {
         command if refuse_before_running(command).is_err() => return refuse_before_running(command),
@@ -2556,7 +2597,7 @@ async fn run_cli() -> Result<()> {
             // The selection travels in the query string: the page's router owns the fragment.
             let mut query = Vec::new();
             if let Some(id) = project {
-                query.push(format!("p={id}"));
+                query.push(format!("{}={id}", fwd_core::route::PROJECT_PARAM));
                 // Only with a project: the principal was created in its graph above, and a page
                 // on the selector has no graph to find it in.
                 if let Some(me) = acting {
@@ -2592,6 +2633,23 @@ async fn run_cli() -> Result<()> {
         Some(subject) => Some(subject.clone()),
         None => subject_here()?,
     };
+    // An agent's working set is read in every project, from any directory (`prime`).
+    if let Command::Prime { session, .. } = &cli.command {
+        let named = session.as_deref().map(|s| subject::claude_code(s, subject::MAIN)).transpose()?;
+        if let Some(agent) = named.as_ref().or(subject.as_ref()) {
+            let typed = typed_as.as_deref();
+            return prime::for_agent(
+                &cli,
+                paths,
+                format,
+                agent,
+                session.as_deref(),
+                thread_hook && named.is_none(),
+                typed,
+            )
+            .await;
+        }
+    }
     let resolved = resolve_project(&cli, &paths)?;
     let client = daemon::ensure_daemon(&paths, &resolved.project, autostart(&cli)?).await?;
     // The daemon learns of the checkout the command runs in as one of the project the command
@@ -2878,11 +2936,8 @@ async fn caller(
             let binds = matches!(cli.command, Command::Principal { command: PrincipalCommand::Bind { .. } });
             let bound = if binds {
                 subject::principal_of(graph, subject).await?.map(|p| p.id())
-            } else if thread_hook && subject::principal_of(graph, subject).await?.is_none() {
-                match cli.act_as.as_deref() {
-                    Some(name) => Some(act_as(graph, name).await?),
-                    None => None,
-                }
+            } else if let Some(stand_in) = thread_hook_stand_in(cli, graph, subject, thread_hook).await? {
+                stand_in
             } else {
                 subject::caller(graph, subject, typed_as).await?
             };
@@ -2939,6 +2994,27 @@ async fn caller(
     Ok(Caller { me, me_handle, acting, scope, several })
 }
 
+/// Whom the hook of a session's own thread (`thread_hook`) acts for while no principal of the
+/// project, retired or not, is bound to its agent `subject`: the principal `--as` or FWD_AS names, as
+/// the hooks did before agents named themselves, or no one without either. None for any other
+/// command, and while a principal is bound, which the command then acts as, or, retired, acts for
+/// no one. A principal bound to the thread in another project does not count: the thread acts in
+/// this project, as every other hook of it does, through the stand-in.
+async fn thread_hook_stand_in(
+    cli: &Cli,
+    graph: &ProjectGraph,
+    subject: &str,
+    thread_hook: bool,
+) -> Result<Option<Option<EntityId>>> {
+    if !thread_hook || subject::principal_of(graph, subject).await?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(match cli.act_as.as_deref() {
+        Some(name) => Some(act_as(graph, name).await?),
+        None => None,
+    }))
+}
+
 /// The commands that write, beside those [`JOINING`] says write work into the project: the
 /// principal commands, which say who belongs, marking one's own notifications, and the migration.
 /// With `JOINING`'s, they are what an agent that has not named itself, a command in a Claude Code
@@ -2986,7 +3062,7 @@ fn reads_about_caller(command: &Command) -> bool {
     let own = |whose: &Option<String>| whose.as_deref().is_none_or(|w| w == "me");
     match command {
         Command::Inbox { for_handle, .. } | Command::Watch { for_handle, .. } => own(for_handle),
-        Command::Prime | Command::Session { command: SessionCommand::StopCheck } => true,
+        Command::Prime { .. } | Command::Session { command: SessionCommand::StopCheck } => true,
         Command::Task { command: TaskCommand::List { mine, .. } } => *mine,
         Command::Task { command: TaskCommand::Next { .. } } => true,
         _ => false,
@@ -3686,15 +3762,15 @@ async fn say_unbound(app: &App) -> Result<()> {
     if app.format == Format::Hook || app.acting.is_none() {
         return Ok(());
     }
-    if let Some(notice) = unbound_notice(app).await? {
+    if let Some(notice) = unbound_notice(app.graph(), app.me).await? {
         app.note(format!("fwd: {notice}"));
     }
     Ok(())
 }
 
-/// The notice for the principal `app` acts as, when it holds triage and serves nothing.
-async fn unbound_notice(app: &App) -> Result<Option<String>> {
-    let p: PrincipalView = app.graph().get(app.me).await?;
+/// The notice for `principal`, when it holds triage and serves nothing.
+async fn unbound_notice(graph: &ProjectGraph, principal: EntityId) -> Result<Option<String>> {
+    let p: PrincipalView = graph.get(principal).await?;
     Ok(ops::serves_nothing_yet(&p).then(|| fwd_core::guidance::unbound(&p.handle().unwrap_or_default())))
 }
 
@@ -5041,7 +5117,19 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     let r = ops::readiness(graph, t).await?;
                     out.push(ops::json_of_task(t, Some(&r))?);
                 }
-                app.print(Value::Array(out))
+                app.print(Value::Array(out))?;
+                // A list the limit cut looks like a whole one, so it says so beside the answer,
+                // which stays a plain array, and after it, where a terminal keeps it in sight. It
+                // names the filters this command reads (the global --scope is not one), less
+                // --status after --ready, which reads no status.
+                if tasks.len() > limit {
+                    let narrow = if ready { "--label or --mine" } else { "--status, --ready, --label or --mine" };
+                    app.note(format!(
+                        "fwd: {limit} of {} tasks shown; raise --limit, or narrow with {narrow}",
+                        tasks.len()
+                    ));
+                }
+                Ok(())
             }
             TaskCommand::Show { id, include } => {
                 let id = app.id(&id, &[Kind::Task]).await?;
@@ -5904,55 +5992,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 "me": app.acting.map(|me| me.to_base64()),
             }))
         }
-        Command::Prime => {
-            let mut v = json!({"principal": app.me_handle, "project": app.project.name});
-            if let Some(scope) = app.scope {
-                if let Followed::Held { found, .. } = graph.follow::<ScopeView>(scope).await? {
-                    v["scope"] = ops::json_of_scope(&found)?;
-                }
-            }
-            let ready: Vec<Value> = ops::ready_tasks(graph, Some(app.me))
-                .await?
-                .iter()
-                .take(10)
-                .map(|t| ops::json_of_task(t, None))
-                .collect::<Result<_>>()?;
-            v["ready_tasks"] = Value::Array(ready);
-            let unread = ops::inbox(graph, app.me, true).await?;
-            let mut lines = Vec::new();
-            for n in unread.iter().take(20) {
-                let (nj, m) = notification_with_message(graph, n, app.acting).await?;
-                lines.push(render_notification(&nj, m.as_ref(), true));
-            }
-            v["unread"] = json!(lines);
-            let guidance = lead_guidance(graph, app.me, app.scope).await?;
-            if app.format == Format::Hook {
-                let mut text = format!(
-                    "fwdcentaur context for {}: {} ready task(s), {} unread notification(s).\nReady: {}\nUnread:\n{}\nUse `fwd task next --claim` to take work, `fwd inbox pop` to read notifications.",
-                    app.me_handle,
-                    v["ready_tasks"].as_array().map(Vec::len).unwrap_or(0),
-                    unread.len(),
-                    v["ready_tasks"].as_array().map(|a| a.iter().map(|t| format!("{} {}", t["id"].as_str().unwrap_or(""), t["title"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("; ")).unwrap_or_default(),
-                    lines.join("\n")
-                );
-                if let Some(guidance) = guidance {
-                    text.push_str(&format!("\n{guidance}"));
-                }
-                // A triage agent that serves nothing reads why in its context at the start of its
-                // session and after each compaction, as its every other command says it on
-                // standard error (`say_unbound`).
-                if let Some(notice) = unbound_notice(app).await? {
-                    text.push_str(&format!("\n{notice}"));
-                }
-                println!("{text}");
-                Ok(())
-            } else {
-                if let Some(guidance) = guidance {
-                    app.note(format!("fwd: {guidance}"));
-                }
-                app.print(v)
-            }
-        }
+        Command::Prime { max_chars, include, .. } => prime::for_app(app, max_chars, &include).await,
         Command::Session { command } => match command {
             SessionCommand::StopCheck => {
                 let unread = ops::inbox(graph, app.me, true).await?;
