@@ -137,6 +137,8 @@ pub struct HostedProject {
 pub struct Running {
     pub pf: PortFile,
     pub projects: Vec<HostedProject>,
+    /// The build the daemon runs, as `/health` names it; none from a daemon older than that.
+    pub build: Option<String>,
 }
 
 pub fn read_port_file(path: &Path) -> Result<Option<PortFile>> {
@@ -558,11 +560,11 @@ pub async fn ensure_running(paths: &Paths, autostart: &Autostart) -> Result<Runn
 async fn answering(paths: &Paths) -> Result<Option<Running>> {
     let Some(pf) = read_port_file(&paths.port_file())? else { return Ok(None) };
     let answer = async {
-        identify(&pf).await?;
-        hosted_projects(&pf).await
+        let health = identify(&pf).await?;
+        Ok::<_, anyhow::Error>((health.build, hosted_projects(&pf).await?))
     };
     match answer.await {
-        Ok(projects) => Ok(Some(Running { pf, projects })),
+        Ok((build, projects)) => Ok(Some(Running { pf, projects, build })),
         Err(e) => {
             tracing::debug!(port = pf.port, error = %e, "port file present but its daemon did not answer");
             Ok(None)
@@ -576,10 +578,13 @@ async fn answering(paths: &Paths) -> Result<Option<Running>> {
 struct Health {
     pid: u32,
     instance_id: String,
+    /// The build the daemon runs, which a daemon older than the field does not name.
+    build: Option<String>,
 }
 
-/// Succeeds when the process listening on the port file's port is the daemon the file names.
-async fn identify(pf: &PortFile) -> Result<()> {
+/// What the process listening on the port file's port says of itself, when it is the daemon the
+/// file names.
+async fn identify(pf: &PortFile) -> Result<Health> {
     let health: Health = match http(pf, "GET", "/health", None, CONNECT_TIMEOUT).await? {
         Some((200, body)) => serde_json::from_str(&body).context("parsing the daemon's health check")?,
         Some((status, body)) => bail!("the health check was refused ({status}): {}", first_line(&body)),
@@ -595,7 +600,7 @@ async fn identify(pf: &PortFile) -> Result<()> {
             pf.pid
         );
     }
-    Ok(())
+    Ok(health)
 }
 
 async fn hosted_projects(pf: &PortFile) -> Result<Vec<HostedProject>> {

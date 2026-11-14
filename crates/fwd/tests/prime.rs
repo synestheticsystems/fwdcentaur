@@ -714,3 +714,108 @@ fn the_command_that_prints_the_rest_reads_the_same_working_set() -> Result<()> {
     );
     Ok(())
 }
+
+/// Records stored without fields an older build or another writer left out, as models of the same
+/// names and fewer properties make them (`fwd_core::model::before_d108` is one such model).
+mod sparse {
+    use ankurah::property::{Json, Ref};
+    use ankurah::Model;
+    use fwd_core::model::{NotificationStatus, NotificationType, Principal, Priority, Project, TaskStatus};
+    use serde::{Deserialize, Serialize};
+
+    /// A task with no creation time.
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[model(no_ffi)]
+    pub struct Task {
+        pub project: Ref<Project>,
+        #[active_type(LWW)]
+        pub title: String,
+        #[active_type(LWW)]
+        pub status: TaskStatus,
+        pub assignee: Option<Ref<Principal>>,
+        pub needs_review: bool,
+        #[active_type(LWW)]
+        pub hold: Option<String>,
+        #[active_type(LWW)]
+        pub not_before: Option<i64>,
+        #[active_type(LWW)]
+        pub priority: Option<i64>,
+        pub labels: Json,
+        pub context: Json,
+        pub created_by: Ref<Principal>,
+    }
+
+    /// A notification with no creation time.
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[model(no_ffi)]
+    pub struct Notification {
+        pub project: Ref<Project>,
+        pub recipient: Ref<Principal>,
+        #[active_type(LWW)]
+        pub notification_type: NotificationType,
+        #[active_type(LWW)]
+        pub status: NotificationStatus,
+        #[active_type(LWW)]
+        pub priority: Priority,
+        pub target: Json,
+        pub originator: Json,
+    }
+}
+
+/// What prime printed for sparse records it prints the same: a question with no text is one line
+/// that ends at its colon, a ready task with no creation time is listed by its title, and a
+/// notification with no creation time by its sentence, none of them failing the read or left out
+/// as unreadable for a fact only the person's view shows.
+#[tokio::test]
+async fn sparse_records_prime_as_they_did() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let client = s.client(&s.alpha).await?;
+    let graph = &client.graph;
+    let named = |handle: &'static str| async move {
+        naming::principal_named(graph, handle, None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no {handle}"))
+    };
+    let (tester, agent) = (named("tester").await?, named("impl-sam").await?);
+    let to_agent = fwd_core::ops::MessageContext { to: Some(agent.to_base64()), ..Default::default() };
+    let empty = fwd_core::ops::post_message(graph, tester, "", Priority::Now, to_agent).await?;
+    let ctx = client.node.context_async(ankurah::policy::DEFAULT_CONTEXT).await?;
+    let trx = ctx.begin();
+    let ready = trx
+        .create(&sparse::Task {
+            project: graph.project(),
+            title: "Cap the backoff".into(),
+            status: TaskStatus::Open,
+            assignee: None,
+            needs_review: false,
+            hold: None,
+            not_before: None,
+            priority: None,
+            labels: Json::new(json!([])),
+            context: Json::new(json!({})),
+            created_by: Ref::new(tester),
+        })
+        .await?
+        .id();
+    let told = trx
+        .create(&sparse::Notification {
+            project: graph.project(),
+            recipient: Ref::new(agent),
+            notification_type: NotificationType::TaskProposed,
+            status: NotificationStatus::Unread,
+            priority: Priority::Later,
+            target: Json::new(json!({"type": "Task", "id": ready.to_base64()})),
+            originator: Json::new(json!({})),
+        })
+        .await?
+        .id();
+    trx.commit().await?;
+    drop(client);
+
+    let text = s.text(&s.alpha, Some("main"), &["prime", "--format", "text", "--include", "questions,unread,ready"])?;
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines.contains(&format!("{} from @tester:", short_id(&empty)).as_str()), "{text}");
+    assert!(lines.contains(&format!("{} Cap the backoff", short_id(&ready)).as_str()), "{text}");
+    assert!(lines.iter().any(|line| line.starts_with(&format!("{} ", short_id(&told)))), "{text}");
+    assert!(!text.contains("could not be read"), "{text}");
+    Ok(())
+}
