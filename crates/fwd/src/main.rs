@@ -496,9 +496,10 @@ enum AdminCommand {
     /// placed in a scope by their `worked_in` alone (2026-10-03). Prints what it changed; a second
     /// run changes nothing.
     ///
-    /// Each task with an accepted `assigned_to` and no assignee gets whoever made that scope (its
-    /// owner, until scopes lost their owner), and every `assigned_to` is renamed `worked_in`, all
-    /// kept, a task being worked in any number of scopes. Each task whose record names the scope it
+    /// Each task with an accepted `assigned_to` to a scope and no assignee gets whoever made that
+    /// scope (its owner, until scopes lost their owner), and every `assigned_to` from a task to a
+    /// scope is renamed `worked_in`, all kept, a task being worked in any number of scopes; an
+    /// intention's `assigned_to` is left as it is. Each task whose record names the scope it
     /// was made in (`scope_id`, written until 2026-10-03) and which has no `worked_in` at all comes
     /// to be worked in that scope; one whose `worked_in` was taken off stays in none. Of
     /// the principals that held the role word `supervisor`, the one that wrote most recently holds
@@ -665,7 +666,7 @@ fn relation_kinds_help() -> String {
         help.push_str(&format!("  {kind}: {}\n", ops::joins_words(*kind)));
     }
     help.push_str(
-        "`fwd link <x> step_of <task>` is `fwd step add <task> <x>`; a decision supersedes another with `fwd decision supersede`; a mention is made by posting a message whose text names something, and `assigned_to` no more.",
+        "`fwd link <x> step_of <task>` is `fwd step add <task> <x>`; a decision supersedes another with `fwd decision supersede`; a mention is made by posting a message whose text names something, and `assigned_to` by `fwd intention assign`.",
     );
     help
 }
@@ -2242,6 +2243,8 @@ const JOINING: &[(&str, Writes)] = &[
     ("intention reword", Writes::Yes),
     ("intention fulfil", Writes::Yes),
     ("intention withdraw", Writes::Yes),
+    ("intention assign", Writes::Yes),
+    ("intention unassign", Writes::Yes),
     ("inbox", Writes::No),
     ("inbox pop", Writes::No),
     ("read", Writes::No),
@@ -6376,6 +6379,9 @@ mod tests {
                 vec![A, "--reason", "- why"],
                 vec![("id", id(A)), ("reason", some("- why"))],
             ));
+        }
+        for verb in ["assign", "unassign"] {
+            rows.push((format!("intention {verb}"), vec![A], vec![("id", id(A))]));
         }
         for verb in ["accept", "reject", "repeal"] {
             rows.push((

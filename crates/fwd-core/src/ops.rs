@@ -1391,7 +1391,8 @@ pub fn joins(kind: RelationKind) -> &'static [Join] {
         RelationKind::MotivatedBy | RelationKind::DiscoveredFrom => &[Join { from: TASK, to: TASK_OR_MESSAGE }],
         RelationKind::Supersedes => &[Join { from: TASK, to: TASK }, Join { from: DECISION, to: DECISION }],
         RelationKind::AnchoredAt => &[Join { from: TASK, to: OneOf(&[Kind::Anchor]) }],
-        RelationKind::WorkedIn | RelationKind::AssignedTo => &[Join { from: TASK, to: OneOf(&[Kind::Scope]) }],
+        RelationKind::WorkedIn => &[Join { from: TASK, to: OneOf(&[Kind::Scope]) }],
+        RelationKind::AssignedTo => &[Join { from: OneOf(&[Kind::Intention]), to: OneOf(&[Kind::Principal]) }],
         RelationKind::StepOf => &[Join { from: Anything, to: TASK }],
         RelationKind::Concerns => &[Join { from: MESSAGE, to: OneOf(&[Kind::Task, Kind::Relation, Kind::Scope]) }],
         RelationKind::Cites => &[
@@ -1405,7 +1406,7 @@ pub fn joins(kind: RelationKind) -> &'static [Join] {
 
 /// The relation kinds [`link`] makes, in the order the table of relations in
 /// docs/design/data-model.md gives them: every kind but `mention`, which posting a message's text
-/// makes, and `assigned_to`, which nothing makes any more.
+/// makes, and `assigned_to`, which `intentions::assign` makes.
 pub const LINKED: &[RelationKind] = &[
     RelationKind::DependsOn,
     RelationKind::SubtaskOf,
@@ -1494,7 +1495,7 @@ async fn end_kind(graph: &ProjectGraph, id: EntityId) -> Result<Option<Kind>> {
 /// its task's checklist ([`add_step`]); a task is worked in each of its scopes once, by one
 /// `worked_in`, and in any number of scopes (docs/DECISIONS.md, D136, "A task may be worked in
 /// several scopes"; until 2026-10-03 a second scope was refused); a mention is made only by posting
-/// the text that holds it, and `assigned_to` not at all any more.
+/// the text that holds it, and `assigned_to` only by `intentions::assign`.
 #[allow(clippy::too_many_arguments)]
 pub async fn link(
     graph: &ProjectGraph,
@@ -1508,7 +1509,7 @@ pub async fn link(
 ) -> Result<EntityId> {
     match kind {
         RelationKind::AssignedTo => bail!(
-            "`assigned_to` is no longer made: who does a task is its assignee (`fwd task assign <task> @handle`), and the scope the work happens in is `worked_in` (docs/DECISIONS.md, \"Assignment is an optional field on the task, never an edge\", 2026-09-28)"
+            "an intention is assigned with `fwd intention assign <intention>`, not linked; who does a task is its assignee (`fwd task assign <task> @handle`)"
         ),
         RelationKind::Mention => bail!(
             "a mention is written in a message's text (`@handle`, `[[<id>]]`, `[[D<number>]]`) and made when the message is posted; it is not linked"
@@ -1576,7 +1577,7 @@ pub async fn link(
 /// A relation of `kind` from the first of `ends` to the second, with `status`, that `by` makes
 /// now, as [`link`] writes one, and `add_highlight_step` the step of a new highlight.
 #[allow(clippy::too_many_arguments)]
-fn new_relation(
+pub(crate) fn new_relation(
     project: Ref<Project>,
     by: EntityId,
     kind: RelationKind,
@@ -2202,16 +2203,15 @@ pub async fn worked_in(graph: &ProjectGraph, task: EntityId) -> Result<Vec<Entit
 
 /// The scopes `task` is worked in, read from `relations`, which may hold any relations, those of
 /// other kinds, from other entities or not accepted being passed over: the targets of the task's
-/// accepted `worked_in` relations, and of an accepted `assigned_to`, that relation's name until
-/// 2026-09-28, which a graph `fwd admin migrate` has not carried over still holds; each scope once,
-/// in the order the task came to be worked in them (each relation's `created`, then its id). The
-/// one rule [`worked_in`] and the page order a task's scopes by, so that they list them alike.
+/// accepted `worked_in` relations, each scope once, in the order the task came to be worked in them
+/// (each relation's `created`, then its id). The one rule [`worked_in`] and the page order a task's
+/// scopes by, so that they list them alike.
 pub fn scopes_in(task: EntityId, relations: &[RelationView]) -> Vec<EntityId> {
     let mut found: Vec<(i64, EntityId, EntityId)> = relations
         .iter()
         .filter(|r| {
             r.from_id().ok() == Some(task)
-                && matches!(r.kind(), Ok(RelationKind::WorkedIn | RelationKind::AssignedTo))
+                && r.kind().ok() == Some(RelationKind::WorkedIn)
                 && r.status().ok() == Some(RelationStatus::Accepted)
         })
         .filter_map(|r| Some((r.created().ok()?, r.id(), r.to_id().ok()?)))
@@ -2399,20 +2399,26 @@ impl Migration {
 
 /// Carries a graph from the days of assignment as a relation over to the assignee field
 /// (docs/DECISIONS.md, "Assignment is an optional field on the task, never an edge", 2026-09-28):
-/// every `assigned_to` relation, whatever its status, is renamed `worked_in`, which is what it now
-/// means, so that a task is worked in each scope it was assigned to, as it may be in several
+/// every `assigned_to` relation from a task to a scope, whatever its status, is renamed
+/// `worked_in`, which is what it meant, so that a task is worked in each scope it was assigned to,
+/// as it may be in several
 /// (D136, "A task may be worked in several scopes"; until 2026-10-03 the run kept the newest
 /// accepted one and retracted the others). A task with an accepted `assigned_to`, no accepted
 /// `worked_in` already and no assignee gets whoever made the scope of the newest of them as its
 /// assignee (its owner, which was always whoever made it, until scopes lost their owner: D108).
 /// One transaction per task, so a run that stops halfway leaves each task whole; a second run finds
 /// nothing to do. The assignee it sets names [`MIGRATED`] as who assigned it, so routing tells no
-/// one of it.
+/// one of it. Any other `assigned_to`, an intention's assignment to a principal
+/// (`intentions::assign`), is what the kind means now, and is left as it is.
 pub async fn migrate_assignments(graph: &ProjectGraph) -> Result<Migration> {
-    let legacy: Vec<RelationView> = graph.fetch("kind = 'assigned_to'").await?;
+    let assigned: Vec<RelationView> = graph.fetch("kind = 'assigned_to'").await?;
     let mut by_task: Vec<(EntityId, Vec<RelationView>)> = Vec::new();
-    for r in legacy {
+    for r in assigned {
         let task = r.from_id()?;
+        let to_a_scope = matches!(graph.follow::<ScopeView>(r.to_id()?).await?, Followed::Held { .. });
+        if !to_a_scope || !matches!(graph.follow::<TaskView>(task).await?, Followed::Held { .. }) {
+            continue;
+        }
         match by_task.iter_mut().find(|(t, _)| *t == task) {
             Some((_, rels)) => rels.push(r),
             None => by_task.push((task, vec![r])),

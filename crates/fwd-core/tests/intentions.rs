@@ -1,6 +1,7 @@
 //! Intention records (`fwd_core::intentions`) on one store in memory holding two projects, alpha
 //! and beta: an intention holds the words of whoever it was written down for, and only they change
-//! them or end it.
+//! them or end it; a principal assigns an intention of any project to itself, and reads back what is
+//! assigned to it.
 
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_commons::intention_graph::{Intention, IntentionStatus};
@@ -10,12 +11,13 @@ use anyhow::Result;
 use fwd_core::intentions::{self, Parts};
 use fwd_core::model::*;
 use fwd_core::ops;
-use fwd_core::project_graph::ProjectGraph;
+use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
 use std::sync::Arc;
 
 /// alpha's people, Ines and Omar, and its agent impl-tide; beta's agent impl-reef.
 struct World {
     alpha: ProjectGraph,
+    beta: ProjectGraph,
     ines: EntityId,
     omar: EntityId,
     tide: EntityId,
@@ -32,7 +34,7 @@ async fn world() -> Result<World> {
     let agent = |graph, handle: &'static str| ops::ensure_principal(graph, handle, handle, PrincipalKind::Agent, None);
     let (ines, omar) = (person(&alpha, "ines").await?, person(&alpha, "omar").await?);
     let (tide, reef) = (agent(&alpha, "impl-tide").await?, agent(&beta, "impl-reef").await?);
-    Ok(World { alpha, ines, omar, tide, reef })
+    Ok(World { alpha, beta, ines, omar, tide, reef })
 }
 
 /// A committed intention titled `title` that `by` records in alpha, in `said_by`'s words.
@@ -107,5 +109,100 @@ async fn an_ended_intention_is_neither_reworded_nor_ended_again_and_a_withdrawal
     assert!(refusal(again).contains("fulfilled already"));
     let reworded = intentions::reword(&w.alpha, w.ines, &it, None, Some("more"), None).await;
     assert!(refusal(reworded).contains("not reworded"));
+    Ok(())
+}
+
+/// The ids of the intentions `assigned` names, in its order.
+fn ids(assigned: &[(EntityId, Followed<(PlacementView, Parts)>)]) -> Vec<EntityId> {
+    assigned.iter().map(|(id, _)| *id).collect()
+}
+
+#[tokio::test]
+async fn an_intention_assigned_twice_is_assigned_once_and_unassigning_it_takes_it_off() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w, w.ines, "Readers keep their place", None).await?;
+    let first = intentions::assign(&w.alpha, w.tide, &it, w.tide).await?;
+    assert_eq!((first.kind()?, first.status()?), (RelationKind::AssignedTo, RelationStatus::Accepted));
+    let again = intentions::assign(&w.alpha, w.tide, &it, w.tide).await?;
+    assert_eq!(again.id(), first.id(), "assigning twice keeps one");
+    assert_eq!(ids(&intentions::assigned_to(&w.alpha, w.tide).await?), vec![it.0.id()]);
+
+    assert_eq!(intentions::unassign(&w.alpha, w.tide, &it, w.tide).await?, 1);
+    assert!(intentions::assigned_to(&w.alpha, w.tide).await?.is_empty(), "taken off");
+    assert_eq!(intentions::unassign(&w.alpha, w.tide, &it, w.tide).await?, 0, "assigned no more");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_principal_assigns_an_intention_to_itself_alone() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w, w.ines, "Readers keep their place", None).await?;
+    let to_omar = intentions::assign(&w.alpha, w.tide, &it, w.omar).await;
+    assert!(refusal(to_omar).contains("leave out --to"));
+    assert!(intentions::assigned_to(&w.alpha, w.omar).await?.is_empty());
+    Ok(())
+}
+
+/// beta's intention, assigned from alpha to alpha's agent: the assignment lives with the
+/// intention, in beta, and alpha reads it back named with beta, then takes it off there.
+#[tokio::test]
+async fn an_intention_of_another_project_is_assigned_where_it_lives_and_read_back_with_its_project() -> Result<()> {
+    let w = world().await?;
+    let new =
+        Intention { title: "Builds stay under a minute".into(), words: String::new(), status: IntentionStatus::Wished };
+    let theirs = intentions::create(&w.beta, w.reef, new, None).await?;
+    let assigned = intentions::assign(&w.alpha, w.tide, &theirs, w.tide).await?;
+    assert_eq!(assigned.project_id()?, w.beta.record(), "with the intention, in beta");
+    match &intentions::assigned_to(&w.alpha, w.tide).await?[..] {
+        [(id, Followed::Held { project: Whose::Other(p), .. })] => {
+            assert_eq!((*id, p.name.as_str()), (theirs.0.id(), "beta"))
+        }
+        other => panic!("beta's intention, read from alpha: {other:?}"),
+    }
+    assert_eq!(intentions::unassign(&w.alpha, w.tide, &theirs, w.tide).await?, 1, "taken off in beta");
+    Ok(())
+}
+
+/// An accepted `assigned_to` from `intention` to `principal`, made at `created`, written as a write
+/// from another node leaves one, so that the order of two does not rest on a clock's resolution.
+async fn assigned_at(w: &World, intention: EntityId, principal: EntityId, created: i64) -> Result<()> {
+    let trx = w.alpha.begin();
+    trx.create(&Relation {
+        project: w.alpha.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: intention,
+        to_id: principal,
+        status: RelationStatus::Accepted,
+        created_by: ankurah::property::Ref::new(principal),
+        created,
+        via: ankurah::property::Json::new(serde_json::json!({})),
+        note: None,
+        position: None,
+        closed_by: None,
+        closed: None,
+        closed_reason: None,
+    })
+    .await?;
+    trx.commit().await?;
+    Ok(())
+}
+
+/// What is assigned to impl-tide: the first assigned first, one since fulfilled among them, and
+/// neither what is assigned to Omar nor what was taken off.
+#[tokio::test]
+async fn the_intentions_assigned_to_a_principal_come_the_first_assigned_first_ended_ones_included() -> Result<()> {
+    let w = world().await?;
+    let first = intention(&w, w.ines, "first", None).await?;
+    let second = intention(&w, w.ines, "second", None).await?;
+    let omars = intention(&w, w.ines, "Omar's", None).await?;
+    let dropped = intention(&w, w.ines, "dropped", None).await?;
+    assigned_at(&w, second.0.id(), w.tide, 10).await?;
+    assigned_at(&w, first.0.id(), w.tide, 20).await?;
+    assigned_at(&w, omars.0.id(), w.omar, 5).await?;
+    intentions::assign(&w.alpha, w.tide, &dropped, w.tide).await?;
+    intentions::unassign(&w.alpha, w.tide, &dropped, w.tide).await?;
+    intentions::close(&w.alpha, w.ines, &second, IntentionStatus::Fulfilled, None, None).await?;
+
+    assert_eq!(ids(&intentions::assigned_to(&w.alpha, w.tide).await?), vec![second.0.id(), first.0.id()]);
     Ok(())
 }

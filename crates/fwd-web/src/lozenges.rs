@@ -142,7 +142,7 @@ pub enum Facet {
     /// Free association, either way.
     RelatesTo,
     /// A scope the task is worked in, one lozenge each.
-    AssignedTo,
+    WorkedIn,
     /// The tasks a scope works.
     Assigned,
     /// The code a task concerns.
@@ -291,7 +291,7 @@ pub const TABLE: &[Treatment] = &[
     row(Facet::DuplicatedBy, Family::Lineage, "duplicated by", "", Style::Lineage, each(2)),
     row(Facet::MentionedIn, Family::Mentions, "mentioned in", "", Style::Plain, each(3)),
     row(Facet::RelatesTo, Family::Association, "relates to", "", Style::Quiet, counted(0, Words::After)),
-    row(Facet::AssignedTo, Family::Assignment, "", "", Style::Scope, each(ALL)),
+    row(Facet::WorkedIn, Family::Assignment, "", "", Style::Scope, each(ALL)),
     row(Facet::Assigned, Family::Assignment, "in this scope", "", Style::Readiness, counted(0, ASSIGNED)),
     row(Facet::AnchoredAt, Family::Code, "code", "", Style::Code, each(2)),
     row(Facet::CodeOf, Family::Code, "code of", "", Style::Tree, each(2)),
@@ -333,14 +333,16 @@ pub fn facet(join: Join, outward: bool, own_decision: bool, end: &End) -> Option
         (K::Duplicates, true) => Facet::Duplicates,
         (K::Duplicates, false) => Facet::DuplicatedBy,
         (K::RelatesTo, _) => Facet::RelatesTo,
-        (K::AssignedTo | K::WorkedIn, true) => Facet::AssignedTo,
-        (K::AssignedTo | K::WorkedIn, false) => Facet::Assigned,
+        (K::WorkedIn, true) => Facet::WorkedIn,
+        (K::WorkedIn, false) => Facet::Assigned,
         (K::AnchoredAt, true) => Facet::AnchoredAt,
         (K::AnchoredAt, false) => Facet::CodeOf,
         (K::StepOf, true) => Facet::StepOf,
         (K::StepOf, false) => return None,
         (K::Mention, true) => return None,
         (K::Mention, false) => Facet::MentionedIn,
+        // An intention's assignment to a principal: the page shows no intentions yet.
+        (K::AssignedTo, _) => return None,
     })
 }
 
@@ -1614,7 +1616,7 @@ mod tests {
         assert_eq!(of(Facet::RelatesTo).shown, Shown::Counted { over: 0, words: Words::After }, "always one count");
         assert_eq!(of(Facet::RelatesTo).style, Style::Quiet);
         // Each scope a task is worked in, however many (docs/DECISIONS.md, D136), in its own look.
-        let assigned = of(Facet::AssignedTo);
+        let assigned = of(Facet::WorkedIn);
         assert_eq!((assigned.style, assigned.shown, assigned.label), (Style::Scope, Shown::Each { cap: ALL }, ""));
         assert_eq!((of(Facet::AnchoredAt).style, of(Facet::AnchoredAt).shown), (Style::Code, Shown::Each { cap: 2 }));
     }
@@ -1634,11 +1636,11 @@ mod tests {
         assert_eq!(facet(Join::Relation(K::Supersedes), false, true, &d), Some(Facet::SupersededBy));
         assert_eq!(facet(Join::Relation(K::RelatesTo), true, false, &t), Some(Facet::RelatesTo));
         assert_eq!(facet(Join::Relation(K::RelatesTo), false, false, &t), Some(Facet::RelatesTo), "either way");
-        assert_eq!(facet(Join::Relation(K::AssignedTo), true, false, &End::Scope), Some(Facet::AssignedTo));
+        assert_eq!(facet(Join::Relation(K::AssignedTo), false, false, &End::Principal), None, "no intentions shown");
         assert_eq!(facet(Join::Relation(K::Concerns), true, false, &t), Some(Facet::About));
         assert_eq!(facet(Join::Relation(K::Concerns), false, false, &End::Message), None, "they hang beneath it");
         assert_eq!(facet(Join::Subject, true, false, &t), Some(Facet::On));
-        assert_eq!(facet(Join::Relation(K::WorkedIn), true, false, &End::Scope), Some(Facet::AssignedTo), "as before");
+        assert_eq!(facet(Join::Relation(K::WorkedIn), true, false, &End::Scope), Some(Facet::WorkedIn));
         assert_eq!(facet(Join::Relation(K::StepOf), true, false, &t), Some(Facet::StepOf));
         assert_eq!(facet(Join::Relation(K::StepOf), false, false, &End::Anchor), None, "the checklist shows them");
         assert_eq!(facet(Join::Relation(K::Mention), false, false, &End::Message), Some(Facet::MentionedIn));
@@ -1681,7 +1683,7 @@ mod tests {
     fn a_task_in_several_scopes_shows_each_of_them() {
         let all = vec![joined(K::WorkedIn, true, 50, End::Scope), joined(K::WorkedIn, true, 51, End::Scope)];
         let groups = plan(None, &all, None);
-        assert_eq!(facets(&groups), vec![Facet::AssignedTo]);
+        assert_eq!(facets(&groups), vec![Facet::WorkedIn]);
         assert_eq!((others(&groups[0]), groups[0].rest.clone()), (vec![50, 51], Rest::All));
     }
 
@@ -1690,8 +1692,8 @@ mod tests {
         // The task panel shows the scope beside the assignee, so its Relations leave it out.
         let all =
             vec![joined(K::WorkedIn, true, 50, End::Scope), joined(K::RelatesTo, true, 40, task(TaskStatus::Open))];
-        assert_eq!(facets(&super::plan(None, &all, None, &[Facet::AssignedTo])), vec![Facet::RelatesTo]);
-        assert_eq!(facets(&plan(None, &all, None)), vec![Facet::RelatesTo, Facet::AssignedTo]);
+        assert_eq!(facets(&super::plan(None, &all, None, &[Facet::WorkedIn])), vec![Facet::RelatesTo]);
+        assert_eq!(facets(&plan(None, &all, None)), vec![Facet::RelatesTo, Facet::WorkedIn]);
     }
 
     #[test]
@@ -1700,7 +1702,7 @@ mod tests {
         // done, one blocked), relates to two, is worked in a scope and is part of another task.
         let mut all = vec![
             joined(K::RelatesTo, true, 40, task(TaskStatus::Open)),
-            joined(K::AssignedTo, true, 50, End::Scope),
+            joined(K::WorkedIn, true, 50, End::Scope),
             joined(K::RelatesTo, false, 41, task(TaskStatus::Open)),
             joined(K::SubtaskOf, true, 60, task(TaskStatus::InProgress)),
         ];
@@ -1715,7 +1717,7 @@ mod tests {
         let groups = plan(None, &all, None);
         assert_eq!(
             facets(&groups),
-            vec![Facet::Cites, Facet::DependsOn, Facet::SubtaskOf, Facet::RelatesTo, Facet::AssignedTo]
+            vec![Facet::Cites, Facet::DependsOn, Facet::SubtaskOf, Facet::RelatesTo, Facet::WorkedIn]
         );
         let cites = &groups[0];
         assert_eq!(others(cites), vec![4, 5, 1, 2, 3], "the fallen rulings first, then by number");

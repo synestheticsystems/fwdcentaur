@@ -5,13 +5,13 @@ use crate::{given_text, made_json, principal_for, App, Format};
 use ankurah::EntityId;
 use ankurah_commons::intention_graph::{Intention, IntentionStatus};
 use ankurah_commons::records::{AttributionView, ClosureView, LastEditView};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Subcommand, ValueEnum};
 use fwd_core::decision_log::date;
 use fwd_core::intentions::{self, Parts};
-use fwd_core::model::PlacementView;
+use fwd_core::model::{PlacementView, RelationView};
 use fwd_core::ops::{self, Kind};
-use fwd_core::project_graph::{InProjectView, ProjectGraph, Whose};
+use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
 use fwd_core::rules::short_id;
 use serde_json::{json, Value};
 
@@ -33,8 +33,12 @@ pub(crate) enum IntentionCommand {
         #[arg(long, value_enum, default_value_t = Recorded::Wished)]
         status: Recorded,
     },
-    /// This project's intentions.
-    List,
+    /// This project's intentions; with --active, yours.
+    List {
+        /// Your active intentions, of any project: those assigned to you that have not ended.
+        #[arg(long)]
+        active: bool,
+    },
     Show {
         #[arg(allow_hyphen_values = true)]
         id: String,
@@ -69,6 +73,22 @@ pub(crate) enum IntentionCommand {
         #[arg(long)]
         said_by: Option<String>,
     },
+    /// Assign an intention of any project to yourself: it is one of your active intentions until
+    /// it ends or is unassigned.
+    Assign {
+        #[arg(allow_hyphen_values = true)]
+        id: String,
+        /// Whom to assign it to: yourself, the one principal it is assigned to for now.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Take an intention off yourself, or off the principal --to names.
+    Unassign {
+        #[arg(allow_hyphen_values = true)]
+        id: String,
+        #[arg(long)]
+        to: Option<String>,
+    },
 }
 
 /// The status an intention is recorded with; it is fulfilled or withdrawn afterwards.
@@ -92,10 +112,29 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
             let new = Intention { title, words: given_text(app, words)?, status };
             print_made(app, &intentions::create(graph, app.me, new, said_by).await?).await
         }
-        IntentionCommand::List => {
+        IntentionCommand::List { active: false } => {
             let mut listed = graph.all_placed::<Parts>().await?;
             listed.sort_by_key(|(placement, _)| placement.id());
             print_intentions(app, &listed).await
+        }
+        IntentionCommand::List { active: true } => {
+            let mut active = Vec::new();
+            let mut not_held = Vec::new();
+            for (id, assigned) in intentions::assigned_to(graph, app.me).await? {
+                match assigned {
+                    Followed::Held { found, .. } if !intentions::ended(found.1 .0.status()?) => active.push(found),
+                    Followed::Held { .. } => {}
+                    Followed::NotHeld => not_held.push(id),
+                }
+            }
+            if let Some(first) = not_held.iter().min() {
+                let n = not_held.len();
+                app.note(format!(
+                    "fwd: {n} intentions assigned to you could not be read, the first {}",
+                    short_id(first)
+                ));
+            }
+            print_intentions(app, &active).await
         }
         IntentionCommand::Show { id } => {
             let id = app.id(&id, INTENTION).await?;
@@ -114,7 +153,57 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
         IntentionCommand::Withdraw { id, reason, said_by } => {
             close(app, &id, IntentionStatus::Withdrawn, reason, said_by).await
         }
+        IntentionCommand::Assign { id, to } => {
+            let record = followed(app, &id).await?;
+            let to = principal_for(app, to.as_deref().map(|t| t.trim_start_matches('@'))).await?;
+            let assignment = intentions::assign(graph, app.me, &record, to).await?;
+            print_assignment(app, &record, &assignment).await
+        }
+        IntentionCommand::Unassign { id, to } => {
+            let record = followed(app, &id).await?;
+            let to = principal_for(app, to.as_deref().map(|t| t.trim_start_matches('@'))).await?;
+            let retracted = intentions::unassign(graph, app.me, &record, to).await?;
+            match app.format {
+                Format::Text => {
+                    let still = if retracted == 0 { "not" } else { "no longer" };
+                    let whom = ops::handle_of(graph, to).await?;
+                    println!("{}: {still} assigned to @{whom}", heading(graph, &record).await?);
+                    Ok(())
+                }
+                _ => app.print(json!({"retracted": retracted})),
+            }
+        }
     }
+}
+
+/// The intention `typed` names, of any project, wherever it is: one is assigned from whichever
+/// project the command runs in, to a principal of that project.
+async fn followed(app: &App, typed: &str) -> Result<(PlacementView, Parts)> {
+    let id = app.id(typed, INTENTION).await?;
+    match app.graph().follow_placed::<Parts>(id).await? {
+        Followed::Held { found, .. } => Ok(found),
+        Followed::NotHeld => bail!("{} names no intention the node holds", short_id(&id)),
+    }
+}
+
+/// What `assign` answers: the relation that assigns the intention `record`, as JSON `made`, or for
+/// people the intention's heading and to whom it is assigned.
+async fn print_assignment(app: &App, record: &(PlacementView, Parts), assignment: &RelationView) -> Result<()> {
+    let graph = app.graph();
+    match app.format {
+        Format::Text => {
+            let whom = ops::handle_of(graph, assignment.to_id()?).await?;
+            println!("{}: assigned to @{whom}", heading(graph, record).await?);
+            Ok(())
+        }
+        _ => app.print(made_json(ops::json_of_relation(assignment)?)),
+    }
+}
+
+/// An intention's first line for people: its short id, its title, and its project when that is
+/// not `graph`'s.
+async fn heading(graph: &ProjectGraph, (placement, (intention, _)): &(PlacementView, Parts)) -> Result<String> {
+    Ok(format!("{} {}{}", short_id(&placement.id()), intention.title()?, elsewhere(graph, placement).await?))
 }
 
 /// The person `--said-by` names: by name, one of this project's principals; by id, whole or its

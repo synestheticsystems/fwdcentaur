@@ -1,7 +1,7 @@
 //! `fwd intention` through the CLI, against a scratch daemon of the test's own that hosts two
 //! projects, alpha and beta, made by the person `tester`: an agent records what the person wants,
-//! in their words read whole from standard input, and an intention of another project is shown with
-//! its project.
+//! in their words read whole from standard input; an intention of another project is shown with
+//! its project; and an agent assigns itself one and unassigns it.
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
@@ -94,5 +94,28 @@ fn an_agent_records_what_the_person_said_and_an_intention_of_another_project_sho
     let theirs = s.made(&s.beta, None, &["intention", "create", "Builds stay under a minute", "--words", ""], "")?;
     let shown = s.json(&s.alpha, None, &["intention", "show", &theirs])?;
     assert_eq!((&shown["from_project"], &shown["title"]), (&"beta".into(), &"Builds stay under a minute".into()));
+    Ok(())
+}
+
+/// impl-sam, an agent of alpha, assigns itself an intention of beta: it is among its active
+/// intentions, named with beta, until it is fulfilled, and is unassigned all the same afterwards;
+/// assigning it to someone else is refused.
+#[test]
+fn an_agent_assigns_itself_an_intention_of_another_project_and_unassigns_it_once_it_ended() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let theirs = s.made(&s.beta, None, &["intention", "create", "Builds stay under a minute", "--words", ""], "")?;
+    let assigned = s.json(&s.alpha, Some("main"), &["intention", "assign", &theirs])?;
+    assert_eq!((&assigned["kind"], &assigned["from"]), (&"assigned_to".into(), &theirs.clone().into()));
+    let active = s.json(&s.alpha, Some("main"), &["intention", "list", "--active"])?;
+    assert_eq!((&active[0]["id"], &active[0]["project"]), (&theirs.clone().into(), &"beta".into()), "{active}");
+
+    let to_tester = s.run(&s.alpha, Some("main"), &["intention", "assign", &theirs, "--to", "tester"], "")?;
+    assert!(!to_tester.status.success() && String::from_utf8_lossy(&to_tester.stderr).contains("leave out --to"));
+
+    s.json(&s.beta, None, &["intention", "fulfil", &theirs])?;
+    assert_eq!(s.json(&s.alpha, Some("main"), &["intention", "list", "--active"])?, serde_json::json!([]));
+    let unassigned = s.json(&s.alpha, Some("main"), &["intention", "unassign", &theirs])?;
+    assert_eq!(unassigned["retracted"], 1);
     Ok(())
 }

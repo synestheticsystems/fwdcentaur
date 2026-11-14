@@ -3,10 +3,13 @@
 //! else wrote the words down, then `LastEdit` once reworded and `Closure` once fulfilled or
 //! withdrawn, placed in a project by fwd's `Placement` (`project_graph`). A read hands out the
 //! views of the components every intention carries with its placement, `(PlacementView, Parts)`,
-//! and the other components are read through `ProjectGraph::component_of`.
+//! and the other components are read through `ProjectGraph::component_of`. An intention is
+//! assigned to a principal, or to several, by an `assigned_to` relation for each, which lives with
+//! the intention in its project (D218, D219).
 
-use crate::model::{PlacementView, PrincipalKind, PrincipalView};
+use crate::model::{PlacementView, PrincipalKind, PrincipalView, RelationKind, RelationStatus, RelationView};
 use crate::now_ms;
+use crate::ops;
 use crate::project_graph::{Followed, ProjectGraph, ProjectTransaction};
 use crate::rules;
 use ankurah::entity::LocalTrxEntity;
@@ -17,6 +20,8 @@ use ankurah_commons::identity::Principal as CommonsPrincipal;
 use ankurah_commons::intention_graph::{Intention, IntentionStatus, IntentionView};
 use ankurah_commons::records::{Attribution, AttributionView, Closure, Creation, CreationView, LastEdit, LastEditView};
 use anyhow::{bail, Result};
+use serde_json::json;
+use std::collections::HashSet;
 
 /// The components every intention carries, which a read takes it by.
 pub type Parts = (IntentionView, CreationView);
@@ -174,4 +179,95 @@ async fn record_edit(
         None => trx.add(record, &edit).await?,
     }
     Ok(())
+}
+
+/// Assigns the intention `record` to the principal `to`, as `by` does: an accepted `assigned_to`
+/// relation from the intention to the principal, made in the intention's project, where it lives,
+/// whichever project the command runs in. One that holds already is the answer, so that assigning
+/// twice keeps one. A principal assigns an intention to itself alone: nothing yet tells another
+/// that an intention was assigned to it, as a task's assignee is told.
+pub async fn assign(
+    graph: &ProjectGraph,
+    by: EntityId,
+    (placement, _): &(PlacementView, Parts),
+    to: EntityId,
+) -> Result<RelationView> {
+    if to != by {
+        bail!(
+            "refused: an intention is assigned to whoever assigns it, since nothing yet tells another principal that one was assigned to them; leave out --to"
+        );
+    }
+    let intention = placement.id();
+    if let Some(holding) = assignments(graph, intention, to).await?.into_iter().next() {
+        return Ok(holding);
+    }
+    let trx = graph.graph_of(placement)?.begin();
+    let via = json!({"actor_id": by.to_base64()});
+    let ends = (intention, to);
+    let relation =
+        ops::new_relation(trx.project(), by, RelationKind::AssignedTo, ends, RelationStatus::Accepted, via, None, None);
+    // Read through the transaction, the view follows the relation once it is committed.
+    let made = trx.create(&relation).await?.read()?;
+    trx.commit().await?;
+    Ok(made)
+}
+
+/// Takes the intention `record` off the principal `to`, as `by` does: retracts each accepted
+/// `assigned_to` from the intention to the principal, in the intention's project, where they live.
+/// How many it retracted, none when the intention was not assigned to them.
+pub async fn unassign(
+    graph: &ProjectGraph,
+    by: EntityId,
+    (placement, _): &(PlacementView, Parts),
+    to: EntityId,
+) -> Result<usize> {
+    let holding = assignments(graph, placement.id(), to).await?;
+    if holding.is_empty() {
+        return Ok(0);
+    }
+    let trx = graph.graph_of(placement)?.begin();
+    for r in &holding {
+        let m = trx.edit(r)?;
+        m.status()?.set(&RelationStatus::Retracted)?;
+        m.closed_by()?.set(&Some(Ref::new(by)))?;
+        m.closed()?.set(&Some(now_ms()))?;
+    }
+    trx.commit().await?;
+    Ok(holding.len())
+}
+
+/// The accepted `assigned_to` relations from the intention `intention` to the principal `to`.
+async fn assignments(graph: &ProjectGraph, intention: EntityId, to: EntityId) -> Result<Vec<RelationView>> {
+    let mut holding = Vec::new();
+    for r in graph.relations_from(intention, Some(RelationKind::AssignedTo)).await? {
+        if r.to_id()? == to && rules::holds(RelationKind::AssignedTo, r.status()?) {
+            holding.push(r);
+        }
+    }
+    Ok(holding)
+}
+
+/// The intentions assigned to `principal`, of any project: the intention each of its accepted
+/// `assigned_to` relations names, by that id, followed wherever it is, the first assigned first,
+/// and each once however many relations assign it. Those since fulfilled or withdrawn are among
+/// them, so that whoever holds them can take them off.
+pub async fn assigned_to(
+    graph: &ProjectGraph,
+    principal: EntityId,
+) -> Result<Vec<(EntityId, Followed<(PlacementView, Parts)>)>> {
+    let mut holding = Vec::new();
+    for r in graph.relations_to(principal, Some(RelationKind::AssignedTo)).await? {
+        if rules::holds(RelationKind::AssignedTo, r.status()?) {
+            holding.push((r.created()?, r.id(), r.from_id()?));
+        }
+    }
+    holding.sort();
+    let mut listed = HashSet::new();
+    let mut assigned = Vec::new();
+    for (_, _, intention) in holding {
+        if listed.insert(intention) {
+            assigned.push((intention, graph.follow_placed::<Parts>(intention).await?));
+        }
+    }
+    Ok(assigned)
 }

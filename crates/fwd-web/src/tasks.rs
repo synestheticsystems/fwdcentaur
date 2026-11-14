@@ -496,7 +496,7 @@ pub fn TaskDetail(id: EntityId) -> impl IntoView {
             {summary}
             <Steps task=id/>
             // The scope shows beside the assignee above, so its lozenge is left out here.
-            {lozenges::section(id, "Relations", &[Facet::AssignedTo])}
+            {lozenges::section(id, "Relations", &[Facet::WorkedIn])}
             <section class="prose">
                 <h4>"Thread"</h4>
                 // A fresh thread per acting principal: replies and resolutions are theirs.

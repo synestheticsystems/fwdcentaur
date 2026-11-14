@@ -1068,9 +1068,8 @@ pub fn task_title(id: EntityId) -> String {
 /// The scopes a task is worked in, any number of them (docs/DECISIONS.md, D136, "A task may be
 /// worked in several scopes", 2026-10-03), read from `relations`, the page's or the task's own, in
 /// the order the command line lists them (`fwd_core::ops::scopes_in`): the targets of its accepted
-/// `worked_in` relations, or of an `assigned_to`, the name that relation had until 2026-09-28,
-/// which `fwd admin migrate` has not renamed yet. Until 2026-10-03 the page read the first of them
-/// alone, a task having one scope.
+/// `worked_in` relations. Until 2026-10-03 the page read the first of them alone, a task having
+/// one scope.
 pub fn task_scopes(task: EntityId, relations: &[RelationView]) -> Vec<EntityId> {
     fwd_core::ops::scopes_in(task, relations)
 }

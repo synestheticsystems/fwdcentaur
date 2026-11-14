@@ -308,8 +308,8 @@ pub fn option_texts(offered: &[Offered]) -> Vec<String> {
 #[derive(Clone, Copy)]
 pub struct Work<'a> {
     pub tasks: &'a [TaskView],
-    /// The `worked_in` relations that say where each task is worked (`assigned_to` on a graph
-    /// `fwd admin migrate` has not renamed yet); other relations are passed over.
+    /// The `worked_in` relations that say where each task is worked; other relations are passed
+    /// over.
     pub relations: &'a [RelationView],
     pub scopes: &'a [ScopeView],
     /// The messages whose authors' scopes are asked for; others are passed over.
@@ -325,8 +325,7 @@ pub struct Work<'a> {
 pub fn scopes_of(principal: EntityId, work: &Work) -> Vec<EntityId> {
     let mut worked_in: HashMap<EntityId, Vec<EntityId>> = HashMap::new();
     for r in work.relations {
-        let counts = matches!(r.kind(), Ok(RelationKind::WorkedIn | RelationKind::AssignedTo))
-            && r.status().ok() == Some(RelationStatus::Accepted);
+        let counts = r.kind().ok() == Some(RelationKind::WorkedIn) && r.status().ok() == Some(RelationStatus::Accepted);
         if let (true, Ok(task), Ok(scope)) = (counts, r.from_id(), r.to_id()) {
             worked_in.entry(task).or_default().push(scope);
         }
@@ -385,8 +384,7 @@ pub struct Loaded {
 impl Loaded {
     /// The work of `principals` in the project's graph.
     pub async fn of(graph: &ProjectGraph, principals: &[EntityId]) -> Result<Loaded> {
-        let mut relations: Vec<RelationView> = graph.fetch("kind = 'worked_in' AND status = 'accepted'").await?;
-        relations.extend(graph.fetch::<RelationView>("kind = 'assigned_to' AND status = 'accepted'").await?);
+        let relations: Vec<RelationView> = graph.fetch("kind = 'worked_in' AND status = 'accepted'").await?;
         let mut messages = Vec::new();
         for p in principals {
             messages.extend(graph.fetch::<MessageView>(with_id("author = ?", *p)?).await?);

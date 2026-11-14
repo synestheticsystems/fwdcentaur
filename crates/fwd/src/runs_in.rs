@@ -133,7 +133,12 @@ fn placed_by(command: &Command) -> Option<PlacedBy<'_>> {
             | IntentionCommand::Reword { id, .. }
             | IntentionCommand::Fulfil { id, .. }
             | IntentionCommand::Withdraw { id, .. } => record(id, &[Kind::Intention]),
-            IntentionCommand::Create { .. } | IntentionCommand::List => None,
+            // Assigned and listed for the caller of the project the command runs in, an intention
+            // of any project.
+            IntentionCommand::Create { .. }
+            | IntentionCommand::List { .. }
+            | IntentionCommand::Assign { .. }
+            | IntentionCommand::Unassign { .. } => None,
         },
         Command::Read { ids } | Command::Dismiss { ids } => {
             ids.first().map(|id| PlacedBy::Record { typed: id, kinds: &[Kind::Notification] })
