@@ -432,7 +432,13 @@ fn elsewhere(v: &Value) -> String {
 /// `@ines, written down by @impl-tide`. No time, so that the text reads the same whenever it is
 /// read while the records are unchanged.
 fn whose(v: &Value) -> String {
-    let mut line = format!("@{}", text(v, "speaker_handle"));
+    format!("@{}{}", text(v, "speaker_handle"), written_down(v))
+}
+
+/// Who wrote a record's words down, when not its speaker, and who reworded them, when not whoever
+/// wrote them down: `, written down by @impl-tide`; nothing when the speaker did both.
+fn written_down(v: &Value) -> String {
+    let mut line = String::new();
     if v["written_by"] != v["speaker"] {
         line.push_str(&format!(", written down by @{}", text(v, "written_by_handle")));
     }
@@ -512,7 +518,14 @@ fn works_under_text(v: &Value) -> String {
         } else if w["confirmed"] == json!(true) {
             block.push_str(&format!("\n  confirmed by {}{}", whose(s), said(text(s, "words"))));
         } else {
-            block.push_str(&format!("\n  {} by {}{}", text(s, "stance"), whose(s), said(text(s, "words"))));
+            let answers = match text(s, "stance") {
+                "agree" => "agrees",
+                "disagree" => "disagrees",
+                "question" => "asks",
+                _ => "answers",
+            };
+            let speaker = text(s, "speaker_handle");
+            block.push_str(&format!("\n  @{speaker} {answers}{}{}", written_down(s), said(text(s, "words"))));
             if s["read"] != r["revision"] {
                 block.push_str("\n  (an answer to an earlier revision of your reading)");
             }
@@ -557,17 +570,17 @@ mod tests {
         let relayed = reading("SSSSSSSSone", "ines", "impl-tide", "agree", "yes", "r1", "s1");
         let objecting = reading("SSSSSSSStwo", "ines", "ines", "disagree", "no, only the scroll", "r0", "s2");
         let v = json!({"intentions": [
-            {"standing": "to_discuss", "intention": intention("IIIIIIIItwo", "Builds", "committed"),
+            {"standing": "unconfirmed", "intention": intention("IIIIIIIItwo", "Builds", "committed"),
              "reading": agents, "speakers_reading": objecting, "confirmed": false, "reworded_since_reading": false},
             {"standing": "confirmed", "intention": intention("IIIIIIIIone", "Readers", "committed"),
              "reading": agents, "speakers_reading": relayed, "confirmed": true, "reworded_since_reading": false},
         ], "not_held": []});
-        let expected = "to discuss: IIIIIIII Builds [committed] (revision i1)
+        let expected = "unconfirmed: IIIIIIII Builds [committed] (revision i1)
   @ines, written down by @impl-tide:
     the words
   your reading RRRRRRRR (agree, revision r1):
     as I read it
-  disagree by @ines:
+  @ines disagrees:
     no, only the scroll
   (an answer to an earlier revision of your reading)
 

@@ -249,6 +249,37 @@ async fn the_speaker_alone_confirms_an_agents_reading_as_it_reads_and_a_rewordin
     Ok(())
 }
 
+/// The speaker's disagreement puts an agent's reading to discussion only while it reads as she
+/// answered it: the agent rewords it to take her correction in and it waits, unconfirmed, still
+/// carrying her answer, until she disagrees with the new wording too.
+#[tokio::test]
+async fn a_speakers_disagreement_with_an_earlier_wording_of_a_reading_leaves_it_unconfirmed() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w.alpha, w.tide, "Readers keep their place", Some(w.ines)).await?;
+    ops::link(&w.alpha, w.tide, RelationKind::WorksUnder, w.tide, it, None, false, json!({})).await?;
+    let agents = read(&w.alpha, w.tide, it, "the list keeps its scroll", Stance::Agree).await?;
+    let disagree = |words: &str, read: String| SetReading {
+        of: agents,
+        words: words.into(),
+        stance: Stance::Disagree,
+        said_by: None,
+        as_read: Some(read),
+    };
+    let answer = |held: &WorkingIntention| held.speakers_reading.as_ref().map(|r| r.words.clone());
+
+    readings::set(&w.alpha, w.ines, disagree("no, only the scroll", reading(&w.alpha, it, agents).await?.revision))
+        .await?;
+    assert_eq!(only(&w.alpha, w.tide).await?.standing(), Standing::ToDiscuss);
+    read(&w.alpha, w.tide, it, "the list keeps only its scroll", Stance::Agree).await?;
+    let reworded = only(&w.alpha, w.tide).await?;
+    assert_eq!(reworded.standing(), Standing::Unconfirmed, "her answer read the earlier wording");
+    assert_eq!(answer(&reworded).as_deref(), Some("no, only the scroll"), "and is still shown");
+    let again = disagree("not quite: its selection too", reading(&w.alpha, it, agents).await?.revision);
+    readings::set(&w.alpha, w.ines, again).await?;
+    assert_eq!(only(&w.alpha, w.tide).await?.standing(), Standing::ToDiscuss, "she disagrees with the new wording");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_confirmation_of_a_wording_no_longer_standing_does_not_confirm() -> Result<()> {
     let w = world().await?;

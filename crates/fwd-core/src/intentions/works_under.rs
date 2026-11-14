@@ -32,27 +32,33 @@ impl WorkingIntention {
         self.reading.as_ref().is_some_and(|r| r.read != self.intention.revision)
     }
 
+    /// The speaker's reading of the principal's reading when it read that reading as it reads now:
+    /// only such an answer confirms the reading or puts it to discussion, so that a principal that
+    /// rewords its reading to take a correction in leaves the discussion and waits for the speaker.
+    fn speakers_answer(&self) -> Option<&ReadingRecord> {
+        match (&self.reading, &self.speakers_reading) {
+            (Some(reading), Some(speakers)) if speakers.read == reading.revision => Some(speakers),
+            _ => None,
+        }
+    }
+
     /// Whether the speaker agrees with the principal's reading as it reads now.
     pub fn confirmed(&self) -> bool {
-        match (&self.reading, &self.speakers_reading) {
-            (Some(reading), Some(speakers)) => {
-                speakers.stance == Some(Stance::Agree) && speakers.read == reading.revision
-            }
-            _ => false,
-        }
+        self.speakers_answer().is_some_and(|speakers| speakers.stance == Some(Stance::Agree))
     }
 
     /// Where it stands, which orders a list: an intention since fulfilled or withdrawn first, whose
     /// link wants reviewing; then what is to discuss, a reading that questions or disagrees, the
-    /// principal's or the speaker's of it; then an intention reworded since the principal read it;
-    /// then one with no reading; then a reading not confirmed; then the confirmed ones.
+    /// principal's, or the speaker's of the principal's reading as it reads now; then an intention
+    /// reworded since the principal read it; then one with no reading; then a reading not
+    /// confirmed; then the confirmed ones.
     pub fn standing(&self) -> Standing {
-        let doubts = |r: &Option<ReadingRecord>| {
-            r.as_ref().is_some_and(|r| matches!(r.stance, Some(Stance::Question | Stance::Disagree)))
+        let doubts = |r: Option<&ReadingRecord>| {
+            r.is_some_and(|r| matches!(r.stance, Some(Stance::Question | Stance::Disagree)))
         };
         if closing(self.intention.status) {
             Standing::Ended
-        } else if doubts(&self.reading) || doubts(&self.speakers_reading) {
+        } else if doubts(self.reading.as_ref()) || doubts(self.speakers_answer()) {
             Standing::ToDiscuss
         } else if self.reworded_since_reading() {
             Standing::Reworded

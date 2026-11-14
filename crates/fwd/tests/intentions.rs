@@ -145,7 +145,7 @@ fn an_agent_works_under_what_the_person_said_and_the_person_confirms_the_reading
     let corrected = s.run(&s.alpha, Some("main"), &["--format", "text", "intention", "list", "--mine"], "")?;
     let corrected = String::from_utf8(corrected.stdout)?;
     assert!(corrected.starts_with("to discuss:"), "{corrected}");
-    assert!(corrected.contains("disagree by @tester:\n    no, the board list"), "{corrected}");
+    assert!(corrected.contains("@tester disagrees:\n    no, the board list"), "{corrected}");
 
     s.json(&s.alpha, Some("main"), &["unlink", "me", "works_under", &it, "--reason", "done with it"])?;
     let mine = s.json(&s.alpha, Some("main"), &["intention", "list", "--mine"])?;
