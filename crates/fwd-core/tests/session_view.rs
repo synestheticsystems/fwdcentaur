@@ -270,10 +270,10 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
 }
 
 /// The session's active intentions are those assigned to the principals of its own thread, of any
-/// project, each once, however many of them hold it: each titled by its title, its line its
-/// speaker's name and the day in bold before its words, another project's name a tag, and one since
-/// fulfilled saying so in a second line and a tag; no path and no action. What is assigned to its
-/// subagent is not among them.
+/// project, each once, however many of them hold it, one its principal of beta alone holds among
+/// them: each titled by its title, its line its speaker's name and the day in bold before its
+/// words, another project's name a tag, and one since fulfilled saying so in a second line and a
+/// tag; no path and no action. What is assigned to its subagent is not among them.
 #[tokio::test]
 async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -> Result<()> {
     let t = two().await?;
@@ -283,16 +283,18 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
     let theirs = intentions::create(&t.beta, t.their_tester, "Builds stay under a minute", String::new(), None).await?;
     let done = intentions::create(&t.alpha, ines, "Name the page", "A short name.".into(), None).await?;
     let subagents = intentions::create(&t.alpha, ines, "Draw the panel", String::new(), None).await?;
+    let betas = intentions::create(&t.beta, t.their_tester, "Logs name their run", String::new(), None).await?;
     for it in [&ours, &theirs, &done] {
         intentions::assign(&t.alpha, t.lead, it, t.lead).await?;
     }
     intentions::assign(&t.beta, t.their_lead, &ours, t.their_lead).await?;
+    intentions::assign(&t.beta, t.their_lead, &betas, t.their_lead).await?;
     intentions::assign(&t.alpha, t.subagent, &subagents, t.subagent).await?;
     intentions::close(&t.alpha, ines, &done, IntentionStatus::Fulfilled, None, None).await?;
 
     let json = view(&t.alpha, Reader::Identity("tester")).await?;
     let section = &json["sections"][0];
-    assert_eq!((&section["section"], &section["of"]), (&json!("active_intentions"), &json!(3)), "{json}");
+    assert_eq!((&section["section"], &section["of"]), (&json!("active_intentions"), &json!(4)), "{json}");
     let row = |record: &(PlacementView, intentions::Parts)| -> Value {
         let id = json!(record.0.id().to_base64());
         section["records"].as_array().into_iter().flatten().find(|r| r["id"] == id).cloned().unwrap_or(Value::Null)
@@ -306,6 +308,7 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
         })
     );
     assert_eq!(row(&theirs)["tags"], json!([{"text": "beta", "tone": null, "at": null}]));
+    assert_eq!((&row(&betas)["title"], &row(&betas)["tags"]), (&json!("Logs name their run"), &json!([])));
     let closure = t.alpha.component_of::<ClosureView>(&done.0).await?.expect("closed");
     let closed = date(closure.closed()?.expect("when it closed"));
     assert_eq!(row(&done)["lines"][1], format!("fulfilled on {closed}"));

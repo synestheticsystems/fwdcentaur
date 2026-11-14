@@ -821,10 +821,10 @@ async fn sparse_records_prime_as_they_did() -> Result<()> {
 }
 
 /// What a reset gives back first: the hook prints the agent's active intentions before everything
-/// else, each once though two of its principals hold one, each in its speaker's words with the day
-/// they were written down, one of another project named with it, and one since fulfilled in one
-/// line with the command that takes it off; an unassigned one is gone; and the JSON gives them as
-/// records of kind `intention`.
+/// else, each once though two of its principals hold one, one its principal of beta alone holds
+/// after those of alpha's, each in its speaker's words with the day they were written down, one of
+/// another project named with it, and one since fulfilled in one line with the command that takes
+/// it off; an unassigned one is gone; and the JSON gives them as records of kind `intention`.
 #[test]
 fn the_hook_prints_the_agents_active_intentions_first_in_their_speakers_words() -> Result<()> {
     let s = Scratch::new()?;
@@ -836,10 +836,12 @@ fn the_hook_prints_the_agents_active_intentions_first_in_their_speakers_words() 
     let theirs = create(&s.beta, "Builds stay under a minute", "release builds")?;
     let done = create(&s.alpha, "Name the page", "a short name")?;
     let dropped = create(&s.alpha, "Draw the panel", "")?;
+    let betas = create(&s.beta, "Logs name their run", "each line")?;
     for id in [&ours, &theirs, &done, &dropped] {
         s.json(&s.alpha, Some("main"), &["intention", "assign", id])?;
     }
     s.json(&s.beta, Some("main"), &["intention", "assign", &ours])?;
+    s.json(&s.beta, Some("main"), &["intention", "assign", &betas])?;
     s.json(&s.alpha, None, &["intention", "fulfil", &done])?;
     s.json(&s.alpha, Some("main"), &["intention", "unassign", &dropped])?;
     let shown = s.json(&s.alpha, None, &["intention", "show", &ours])?;
@@ -848,7 +850,7 @@ fn the_hook_prints_the_agents_active_intentions_first_in_their_speakers_words() 
 
     let hook = s.text(&s.alpha, Some("main"), &["prime", "--format", "hook"])?;
     let expected = format!(
-        "Active Intentions (2):
+        "Active Intentions (3):
 {} Readers keep their place
   @tester, {day}:
     the list stays
@@ -857,11 +859,15 @@ fn the_hook_prints_the_agents_active_intentions_first_in_their_speakers_words() 
   @tester in beta, {day}:
     release builds
 {} Name the page [fulfilled]: still assigned to you; `fwd intention unassign {}` takes it off
+{} Logs name their run
+  @tester, {day}:
+    each line
 fwdcentaur context for impl-sam (implementer) in alpha",
         short(&ours),
         short(&theirs),
         short(&done),
-        short(&done)
+        short(&done),
+        short(&betas)
     );
     assert!(hook.starts_with(&expected), "{hook}");
     assert!(!hook.contains("Draw the panel"), "unassigned: {hook}");
@@ -871,7 +877,7 @@ fwdcentaur context for impl-sam (implementer) in alpha",
     assert_eq!(section["section"], "active_intentions", "{json}");
     let records = section["records"].as_array().ok_or_else(|| anyhow!("no records in {json}"))?;
     let kinds: Vec<&Value> = records.iter().map(|r| &r["kind"]).collect();
-    assert_eq!(kinds, [&json!("intention"); 3]);
+    assert_eq!(kinds, [&json!("intention"); 4]);
     assert_eq!(
         (&records[0]["words"], &records[1]["project"]["name"]),
         (&json!("the list stays\nwhere I left it"), &json!("beta"))
