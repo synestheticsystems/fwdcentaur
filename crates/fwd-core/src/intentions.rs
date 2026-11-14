@@ -42,6 +42,15 @@ pub fn speaker(creation: &CreationView, attribution: Option<&AttributionView>) -
     })
 }
 
+/// When an intention's words were last written down: at their last rewording, which its
+/// `LastEdit` records, else when the record was made.
+pub fn last_written(creation: &CreationView, edit: Option<&LastEditView>) -> Result<i64, PropertyError> {
+    Ok(match edit {
+        Some(e) => e.edited()?,
+        None => creation.created()?,
+    })
+}
+
 /// Whether an intention of `status` has ended: fulfilled or withdrawn.
 pub fn ended(status: IntentionStatus) -> bool {
     matches!(status, IntentionStatus::Fulfilled | IntentionStatus::Withdrawn)

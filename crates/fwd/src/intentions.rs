@@ -391,9 +391,11 @@ pub(crate) async fn spoken(
     let (placement, (_, creation)) = record;
     let attribution = graph.component_of::<AttributionView>(placement).await?;
     let speaker = intentions::speaker(creation, attribution.as_ref())?;
-    let (written, written_by) = match graph.component_of::<LastEditView>(placement).await? {
-        Some(edit) => (edit.edited()?, edit.edited_by()?.map(|by| *by)),
-        None => (creation.created()?, Some(*creation.created_by()?)),
+    let edit = graph.component_of::<LastEditView>(placement).await?;
+    let written = intentions::last_written(creation, edit.as_ref())?;
+    let written_by = match &edit {
+        Some(edit) => edit.edited_by()?.map(|by| *by),
+        None => Some(*creation.created_by()?),
     };
     let writer = handle_of(graph, written_by.filter(|by| *by != speaker)).await?;
     Ok((ops::handle_of(graph, speaker).await?, date(written), writer))

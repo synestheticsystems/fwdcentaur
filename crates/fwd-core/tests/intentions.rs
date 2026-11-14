@@ -5,7 +5,7 @@
 
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_commons::intention_graph::IntentionStatus;
-use ankurah_commons::records::{AttributionView, ClosureView, LastEditView};
+use ankurah_commons::records::{AttributionView, ClosureView, LastEdit, LastEditView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::intentions::{self, Parts};
@@ -89,6 +89,24 @@ async fn only_the_speaker_or_someone_writing_down_their_words_rewords_or_closes_
 
     let by_omar = intentions::close(&w.alpha, w.omar, &theirs, IntentionStatus::Fulfilled, None, None).await;
     assert!(refusal(by_omar).contains("only they change"));
+    Ok(())
+}
+
+/// An intention's words were last written down when the record was made, until they are reworded,
+/// and then at their last rewording: here a day after it was made.
+#[tokio::test]
+async fn its_words_were_last_written_down_at_their_last_rewording_else_when_it_was_made() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w, w.ines, "Readers keep their place", None).await?;
+    let (placement, (_, creation)) = &it;
+    assert_eq!(intentions::last_written(creation, None)?, creation.created()?);
+    intentions::reword(&w.alpha, w.ines, &it, None, Some("the list stays where I left it"), None).await?;
+    let a_day_later = creation.created()? + 86_400_000;
+    let trx = w.alpha.begin();
+    trx.edit_placed::<LastEdit>(placement)?.edited()?.set(&a_day_later)?;
+    trx.commit().await?;
+    let edit = w.alpha.component_of::<LastEditView>(placement).await?;
+    assert_eq!(intentions::last_written(creation, edit.as_ref())?, a_day_later);
     Ok(())
 }
 

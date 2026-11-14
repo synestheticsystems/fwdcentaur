@@ -304,10 +304,8 @@ async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(Placemen
         Followed::Held { found, .. } => found.display_name()?,
         Followed::NotHeld => NOT_FOUND.into(),
     };
-    let written = match there.component_of::<LastEditView>(placement).await? {
-        Some(edit) => edit.edited()?,
-        None => creation.created()?,
-    };
+    let edit = there.component_of::<LastEditView>(placement).await?;
+    let written = intentions::last_written(creation, edit.as_ref())?;
     let name = markdown::escaped(&plain(&name, TITLE_LIMIT));
     let mut lines: Vec<String> =
         unpaged_block(&format!("**{name}, {}:** {}", date(written), intention.words()?)).into_iter().collect();
