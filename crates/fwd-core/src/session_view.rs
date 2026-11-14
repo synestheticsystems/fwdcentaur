@@ -103,9 +103,6 @@ pub struct List {
 pub enum ListKind {
     /// The open questions the principal asked the person that the person has not answered.
     WaitsOnYou,
-    /// The intentions the principal works under and its readings of the person's words, which a
-    /// later change fills once intentions are recorded; nothing makes this list yet.
-    WorksUnder,
     /// The questions asked of the principal, then the tasks assigned to it.
     Holds,
     /// The open questions it asked of anyone else, or of no one in particular.
@@ -468,7 +465,6 @@ impl ListKind {
     fn title(self) -> &'static str {
         match self {
             ListKind::WaitsOnYou => "Waiting on you",
-            ListKind::WorksUnder => "Works under",
             ListKind::Holds => "Holds",
             ListKind::WaitsOnOthers => "Waiting on others",
         }

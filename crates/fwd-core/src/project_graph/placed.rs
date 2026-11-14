@@ -15,7 +15,6 @@ use ankurah::error::RetrievalError;
 use ankurah::model::{ComponentViews, MutableBorrow};
 use ankurah::property::PropertyError;
 use ankurah::{EntityId, MatchArgs, Model, Value, View};
-use ankurah_commons::intention_graph::ReadingView;
 
 impl ProjectGraph {
     /// The project's placed records that `args` selects, each read through its `Placement` and
@@ -56,12 +55,6 @@ impl ProjectGraph {
     ) -> Result<Vec<(EntityId, EntityId)>, ProjectGraphError> {
         let every: Vec<(PlacementView, R)> = self.ctx.fetch(named_by_start(prefix, formerly)).await?;
         Ok(every.iter().map(|(p, _)| Ok((p.id(), p.project_id()?))).collect::<Result<_, PropertyError>>()?)
-    }
-
-    /// The readings of the record `of`, whichever project placed them: a record's readings show on
-    /// it wherever they were written, as its relations do (D176).
-    pub async fn readings_of(&self, of: EntityId) -> Result<Vec<(PlacementView, ReadingView)>, RetrievalError> {
-        self.ctx.fetch(selecting(equals("of", Value::EntityId(of)))).await
     }
 
     /// The component `V` of the placed record `placement` is on; none when the record does not

@@ -356,11 +356,6 @@ pub enum RelationKind {
     /// `[[D12]]`), one edge per reference, written with the text; `via` records that it was
     /// inline and its place among the message's references.
     Mention,
-    /// Principal -> Intention: what governs the principal's current work, an intention of any
-    /// project (`crate::intentions::works_under`).
-    WorksUnder,
-    /// Task or Intention -> Intention: the work, or the narrower aim, is for the broader one.
-    Serves,
 }
 string_enum_property!(RelationKind);
 
@@ -938,17 +933,6 @@ pub struct Decision {
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Placement {
     pub project: Ref<Project>,
-}
-
-/// Which wording of a record a reading read: the revision (`crate::intentions::revision`) of the
-/// intention or reading it reads, as it stood when the reading was last written, so that a
-/// confirmation counts only for the words it answered. fwd's own, on the reading's entity, since
-/// the Commons' `Reading` names the record read but not its wording, and leaves which words were
-/// read to clocks.
-#[derive(Model, Debug, Clone, Serialize, Deserialize)]
-pub struct WordingRead {
-    #[active_type(LWW)]
-    pub revision: String,
 }
 
 // ---------------------------------------------------------------------------------------------

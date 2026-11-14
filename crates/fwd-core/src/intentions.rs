@@ -1,13 +1,7 @@
-//! Intention records: what a person or an agent wants to be true, in their own words, so that an
-//! agent reads back from fwd, first of all, the intentions it works under. Each is one entity of
-//! the Commons' components, `Intention` and `Creation`, with `Attribution` when someone else wrote
-//! the words down, then `LastEdit` once reworded and `Closure` once fulfilled or withdrawn, placed
-//! in a project by fwd's `Placement` (`project_graph`). A party's account of how it understands an
-//! intention is a reading (`readings`), and what a principal works under is read in one go
-//! (`works_under`).
-
-pub mod readings;
-pub mod works_under;
+//! Intention records: what a person or an agent wants to be true, in their own words. Each is one
+//! entity of the Commons' components, `Intention` and `Creation`, with `Attribution` when someone
+//! else wrote the words down, then `LastEdit` once reworded and `Closure` once fulfilled or
+//! withdrawn, placed in a project by fwd's `Placement` (`project_graph`).
 
 use crate::model::{PlacementView, PrincipalKind, PrincipalView};
 use crate::now_ms;
@@ -22,7 +16,6 @@ use ankurah_commons::records::{
     Attribution, AttributionView, Closure, ClosureView, Creation, CreationView, LastEdit, LastEditView,
 };
 use anyhow::{bail, Result};
-use sha2::{Digest, Sha256};
 
 /// The components every intention carries, which a list reads it through.
 pub type Parts = (IntentionView, CreationView);
@@ -34,23 +27,8 @@ pub(crate) fn principal_ref(id: EntityId) -> Ref<CommonsPrincipal> {
     Ref::new(id)
 }
 
-/// How many bytes of the SHA-256 a revision gives, as hex: enough to tell one wording from the
-/// next, short enough to pass back on a command line.
-const REVISION_BYTES: usize = 6;
-
-/// The revision of a wording made of `parts`: the start of the SHA-256 of each part's length and
-/// bytes in turn, so that no two lists of parts run together into one.
-pub fn revision(parts: &[&str]) -> String {
-    let mut hash = Sha256::new();
-    for part in parts {
-        hash.update((part.len() as u64).to_le_bytes());
-        hash.update(part.as_bytes());
-    }
-    hash.finalize()[..REVISION_BYTES].iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// The principal `said_by` names, with its kind, wherever in the node it is: whose words a write
-/// records ([`rules::party_of`]).
+/// records ([`rules::speaker_of`]).
 pub(crate) async fn said_by(
     graph: &ProjectGraph,
     said_by: Option<EntityId>,
@@ -124,8 +102,6 @@ pub struct IntentionRecord {
     pub status: IntentionStatus,
     pub authorship: Authorship,
     pub closed: Option<Closed>,
-    /// [`revision`] of its title and words, which a reading of it records as the wording it read.
-    pub revision: String,
 }
 
 impl IntentionRecord {
@@ -139,13 +115,11 @@ impl IntentionRecord {
             Some(c) => Some(Closed { at: c.closed()?, by: c.closed_by()?.map(|r| *r), reason: c.reason()? }),
             None => None,
         };
-        let (title, words) = (intention.title()?, intention.words()?);
         Ok(IntentionRecord {
             id: placement.id(),
             project: placement.project_id()?,
-            revision: revision(&[&title, &words]),
-            title,
-            words,
+            title: intention.title()?,
+            words: intention.words()?,
             status: intention.status()?,
             authorship: Authorship::of(graph, placement, creation).await?,
             closed,
@@ -189,7 +163,7 @@ pub async fn create(graph: &ProjectGraph, by: EntityId, new: NewIntention) -> Re
     if closing(new.status) {
         bail!("an intention is recorded wished or committed, and fulfilled or withdrawn afterwards");
     }
-    let speaker = rules::party_of(by, said_by(graph, new.said_by).await?)?;
+    let speaker = rules::speaker_of(by, said_by(graph, new.said_by).await?)?;
     let trx = graph.begin();
     let made = trx.create_placed(&Intention { title: title.to_string(), words: new.words, status: new.status }).await?;
     let record = ankurah::model::Mutable::entity(&*made);
@@ -219,7 +193,10 @@ pub async fn reword(
     if closing(intention.status) {
         bail!("the intention is {}, and is not reworded", intention.status);
     }
-    rules::can_change_words(intention.authorship.speaker, rules::party_of(by, self::said_by(graph, said_by).await?)?)?;
+    rules::can_change_words(
+        intention.authorship.speaker,
+        rules::speaker_of(by, self::said_by(graph, said_by).await?)?,
+    )?;
     let title = title.map(str::trim);
     if title.is_some_and(str::is_empty) {
         bail!("an intention's title cannot be blank");
@@ -263,7 +240,10 @@ pub async fn close(
     if closing(intention.status) {
         bail!("the intention is {} already", intention.status);
     }
-    rules::can_change_words(intention.authorship.speaker, rules::party_of(by, self::said_by(graph, said_by).await?)?)?;
+    rules::can_change_words(
+        intention.authorship.speaker,
+        rules::speaker_of(by, self::said_by(graph, said_by).await?)?,
+    )?;
     let trx = graph.begin();
     let m = trx.edit_placed::<Intention>(&placement)?;
     m.status()?.set(&status)?;
@@ -296,16 +276,4 @@ pub(crate) async fn record_edit(
         None => trx.add(record, &edit).await?,
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::revision;
-
-    #[test]
-    fn a_revision_tells_apart_parts_that_would_run_together_with_a_separator() {
-        assert_ne!(revision(&["a\n", "b"]), revision(&["a", "\nb"]));
-        assert_eq!(revision(&["a", "b"]).len(), 12);
-        assert_eq!(revision(&["a", "b"]), revision(&["a", "b"]));
-    }
 }

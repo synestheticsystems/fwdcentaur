@@ -15,7 +15,7 @@ use crate::rules::{self, DecisionMove, Edge, Readiness, TaskSnapshot, Verb};
 use crate::subject;
 use ankurah::property::{Json, Ref};
 use ankurah::EntityId;
-use ankurah_commons::intention_graph::{IntentionView, ReadingView};
+use ankurah_commons::intention_graph::IntentionView;
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde_json::{json, Value};
 
@@ -1384,7 +1384,6 @@ pub fn joins(kind: RelationKind) -> &'static [Join] {
     const MESSAGE: End = OneOf(&[Kind::Message]);
     const DECISION: End = OneOf(&[Kind::Decision]);
     const TASK_OR_MESSAGE: End = OneOf(&[Kind::Task, Kind::Message]);
-    const INTENTION: End = OneOf(&[Kind::Intention]);
     match kind {
         RelationKind::DependsOn | RelationKind::SubtaskOf | RelationKind::Duplicates => {
             &[Join { from: TASK, to: TASK }]
@@ -1401,8 +1400,6 @@ pub fn joins(kind: RelationKind) -> &'static [Join] {
         ],
         RelationKind::Mention => &[Join { from: MESSAGE, to: Anything }],
         RelationKind::RelatesTo => &[Join { from: Anything, to: Anything }],
-        RelationKind::WorksUnder => &[Join { from: OneOf(&[Kind::Principal]), to: INTENTION }],
-        RelationKind::Serves => &[Join { from: OneOf(&[Kind::Task, Kind::Intention]), to: INTENTION }],
     }
 }
 
@@ -1422,8 +1419,6 @@ pub const LINKED: &[RelationKind] = &[
     RelationKind::StepOf,
     RelationKind::Concerns,
     RelationKind::Cites,
-    RelationKind::WorksUnder,
-    RelationKind::Serves,
 ];
 
 /// What a relation of `kind` joins, as `fwd link --help` and its refusals say it: `a task to a
@@ -1528,10 +1523,8 @@ pub async fn link(
             return Ok(r.id());
         }
     }
-    // Made once per pair: linking again answers the relation that stands, and accepts one that was
-    // only proposed.
-    if matches!(kind, RelationKind::Cites | RelationKind::WorksUnder | RelationKind::Serves) {
-        let already = relations_from(graph, from, Some(kind)).await?;
+    if kind == RelationKind::Cites {
+        let already = relations_from(graph, from, Some(RelationKind::Cites)).await?;
         if let Some(r) = already.iter().find(|r| r.to_id().ok() == Some(to) && standing(r)) {
             if !propose && r.status()? == RelationStatus::Proposed {
                 let trx = graph.begin();
@@ -4788,7 +4781,6 @@ pub enum Kind {
     /// A person or an agent: named inline in a message's text, never as a command's id argument.
     Principal,
     Intention,
-    Reading,
 }
 
 impl Kind {
@@ -4803,7 +4795,6 @@ impl Kind {
             Kind::Notification => "notification",
             Kind::Principal => "principal",
             Kind::Intention => "intention",
-            Kind::Reading => "reading",
         }
     }
 
@@ -4821,7 +4812,6 @@ impl Kind {
             Kind::Notification => graph.ids_starting::<NotificationView>(prefix, formerly).await?,
             Kind::Principal => graph.ids_starting::<PrincipalView>(prefix, formerly).await?,
             Kind::Intention => graph.placed_ids_starting::<IntentionView>(prefix, formerly).await?,
-            Kind::Reading => graph.placed_ids_starting::<ReadingView>(prefix, formerly).await?,
         })
     }
 
@@ -4844,7 +4834,6 @@ impl Kind {
             Kind::Notification => graph.ids_in_every_project::<NotificationView>(prefix, formerly).await?,
             Kind::Principal => graph.ids_in_every_project::<PrincipalView>(prefix, formerly).await?,
             Kind::Intention => graph.placed_ids_in_every_project::<IntentionView>(prefix, formerly).await?,
-            Kind::Reading => graph.placed_ids_in_every_project::<ReadingView>(prefix, formerly).await?,
         })
     }
 
@@ -4877,7 +4866,6 @@ impl Kind {
             Kind::Notification => held::<NotificationView>(graph, id).await,
             Kind::Principal => held::<PrincipalView>(graph, id).await,
             Kind::Intention => placed::<IntentionView>(graph, id).await,
-            Kind::Reading => placed::<ReadingView>(graph, id).await,
         }
     }
 }

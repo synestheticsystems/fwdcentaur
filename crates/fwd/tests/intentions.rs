@@ -1,7 +1,7 @@
-//! `fwd intention` and `fwd reading` through the CLI, against a scratch daemon of the test's own
-//! that hosts two projects, alpha and beta, made by the person `tester`: an agent records what the
-//! person wants and works under it, the person confirms the agent's reading of the revision they
-//! read and no other, and a text reaches a command whole on standard input.
+//! `fwd intention` through the CLI, against a scratch daemon of the test's own that hosts two
+//! projects, alpha and beta, made by the person `tester`: an agent records what the person wants,
+//! in their words read whole from standard input, and an intention of another project is shown with
+//! its project.
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
@@ -80,112 +80,19 @@ impl Drop for Scratch {
     }
 }
 
-/// The one intention `impl-sam` works under, as `intention list --mine` gives it.
-fn only_one(s: &Scratch) -> Result<Value> {
-    let mine = s.json(&s.alpha, Some("main"), &["intention", "list", "--mine"])?;
-    match mine["intentions"].as_array().map(Vec::as_slice) {
-        Some([one]) => Ok(one.clone()),
-        _ => Err(anyhow!("not one intention: {mine}")),
-    }
-}
-
 #[test]
-fn an_agent_works_under_what_the_person_said_and_the_person_confirms_the_reading_they_read() -> Result<()> {
+fn an_agent_records_what_the_person_said_and_an_intention_of_another_project_shows_its_project() -> Result<()> {
     let s = Scratch::new()?;
     s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
     let words = "- the list keeps its place\n- and its selection\n";
-    let it = s.made(
-        &s.alpha,
-        Some("main"),
-        &[
-            "intention",
-            "create",
-            "Readers keep their place",
-            "--words",
-            "-",
-            "--said-by",
-            "tester",
-            "--status",
-            "committed",
-        ],
-        words,
-    )?;
+    let create = ["intention", "create", "Readers keep their place", "--words", "-", "--said-by", "tester"];
+    let it = s.made(&s.alpha, Some("main"), &[&create[..], &["--status", "committed"]].concat(), words)?;
     let shown = s.json(&s.alpha, None, &["intention", "show", &it])?;
     assert_eq!((shown["words"].as_str(), shown["speaker_handle"].as_str()), (Some(words), Some("tester")));
     assert_eq!(shown["written_by_handle"], "impl-sam");
 
-    s.json(&s.alpha, Some("main"), &["link", "me", "works_under", &it])?;
-    let reading =
-        s.made(&s.alpha, Some("main"), &["reading", "set", &it, "which list?", "--stance", "question"], "")?;
-    assert_eq!(only_one(&s)?["standing"], "to_discuss");
-    s.json(&s.alpha, Some("main"), &["reading", "set", &it, "the task list", "--stance", "agree"])?;
-    let unconfirmed = only_one(&s)?;
-    assert_eq!(
-        (&unconfirmed["standing"], &unconfirmed["reading"]["id"]),
-        (&"unconfirmed".into(), &reading.clone().into())
-    );
-
-    let stale = s.run(&s.alpha, None, &["reading", "confirm", &reading, "--as-read", "000000000000"], "")?;
-    let said = String::from_utf8_lossy(&stale.stderr);
-    assert_eq!(stale.status.code(), Some(5), "a stale revision: {said}");
-    assert!(said.contains("has changed since you read it"), "{said}");
-    let revision = unconfirmed["reading"]["revision"].as_str().ok_or_else(|| anyhow!("no revision"))?;
-    s.json(&s.alpha, None, &["reading", "confirm", &reading, "--as-read", revision])?;
-    let confirmed = only_one(&s)?;
-    assert_eq!((&confirmed["standing"], &confirmed["confirmed"]), (&"confirmed".into(), &true.into()));
-    assert_eq!(confirmed["speakers_reading"]["speaker_handle"], "tester");
-
-    // The person disagrees, in their own words, and the agent reads it first, with those words.
-    let current = confirmed["reading"]["revision"].as_str().ok_or_else(|| anyhow!("no revision"))?;
-    s.json(
-        &s.alpha,
-        None,
-        &["reading", "set", &reading, "no, the board list", "--stance", "disagree", "--as-read", current],
-    )?;
-    let corrected = s.run(&s.alpha, Some("main"), &["--format", "text", "intention", "list", "--mine"], "")?;
-    let corrected = String::from_utf8(corrected.stdout)?;
-    assert!(corrected.starts_with("to discuss:"), "{corrected}");
-    assert!(corrected.contains("@tester disagrees:\n    no, the board list"), "{corrected}");
-
-    s.json(&s.alpha, Some("main"), &["unlink", "me", "works_under", &it, "--reason", "done with it"])?;
-    let mine = s.json(&s.alpha, Some("main"), &["intention", "list", "--mine"])?;
-    assert_eq!(mine["intentions"], serde_json::json!([]));
-    Ok(())
-}
-
-#[test]
-fn an_agent_works_under_an_intention_of_another_project_and_a_text_reaches_a_command_whole_on_stdin() -> Result<()> {
-    let s = Scratch::new()?;
-    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
     let theirs = s.made(&s.beta, None, &["intention", "create", "Builds stay under a minute", "--words", ""], "")?;
-    s.json(&s.alpha, Some("main"), &["link", "me", "works_under", &theirs])?;
-    let held = only_one(&s)?;
-    assert_eq!((&held["intention"]["project"], &held["intention"]["words"]), (&"beta".into(), &"".into()));
-    assert_eq!(held["standing"], "unread");
     let shown = s.json(&s.alpha, None, &["intention", "show", &theirs])?;
     assert_eq!((&shown["from_project"], &shown["title"]), (&"beta".into(), &"Builds stay under a minute".into()));
-
-    // impl-sam reads it and writes down the beta person's confirmation, naming them by their id.
-    let reading =
-        s.made(&s.alpha, Some("main"), &["reading", "set", &theirs, "a release build", "--stance", "agree"], "")?;
-    let revision = only_one(&s)?["reading"]["revision"].as_str().ok_or_else(|| anyhow!("no revision"))?.to_string();
-    let beta_tester = s.json(&s.beta, None, &["whoami"])?["principal"]["id"].as_str().unwrap_or_default().to_string();
-    let relayed = ["reading", "confirm", &reading, "--as-read", &revision, "--words", "yes", "--said-by", &beta_tester];
-    s.json(&s.alpha, Some("main"), &relayed)?;
-    assert_eq!(only_one(&s)?["standing"], "confirmed");
-    let listed = s.run(&s.beta, None, &["--format", "text", "reading", "list", "--of", &theirs], "")?;
-    let listed = String::from_utf8(listed.stdout)?;
-    assert!(listed.contains(" in alpha:"), "a reading of another project is named with it: {listed}");
-
-    // A stale revision ends with exit 5 also where the command ran in another project.
-    let scope = s.made(&s.beta, None, &["scope", "create", "Builds"], "")?;
-    let routed = ["--scope", &scope, "reading", "set", &reading, "x", "--stance", "agree", "--as-read", "000000000000"];
-    let stale = s.run(&s.alpha, None, &routed, "")?;
-    assert_eq!(stale.status.code(), Some(5), "{}", String::from_utf8_lossy(&stale.stderr));
-
-    let asked = s.made(&s.alpha, Some("main"), &["ask", "--to", "tester", "which build?"], "")?;
-    let text = "- the release build\n- not the debug one";
-    let reply = s.json_in(&s.alpha, None, &["reply", &asked, "-"], text)?;
-    assert_eq!(reply["record"]["content"], text);
     Ok(())
 }

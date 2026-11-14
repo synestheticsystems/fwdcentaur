@@ -5,10 +5,9 @@
 //! changed in the project that made it, whichever projects its ends are in.
 
 use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::{IntentionStatus, Stance};
+use ankurah_commons::intention_graph::IntentionStatus;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
-use fwd_core::intentions::readings::{self, SetReading};
 use fwd_core::intentions::{self, NewIntention};
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateScope, CreateTask, Kind, MessageContext};
@@ -338,20 +337,15 @@ async fn intention(graph: &ProjectGraph, by: EntityId, title: &str) -> Result<En
     .await
 }
 
-/// An intention and a reading, records placed in a project rather than fwd's own, are named by the
-/// first eight characters of their ids in their project, and the intention from a project that does
-/// not hold it, which names its project.
+/// An intention, a record placed in a project rather than fwd's own, is named by the first eight
+/// characters of its id in its project, and from a project that does not hold it, which names its
+/// project.
 #[tokio::test]
-async fn an_intention_and_a_reading_are_named_by_the_start_of_their_ids_in_any_project() -> Result<()> {
+async fn an_intention_is_named_by_the_start_of_its_id_in_any_project() -> Result<()> {
     let t = two().await?;
     let held = intention(&t.alpha, t.daniel, "Readers keep their place").await?;
-    let spec =
-        SetReading { of: held, words: "as I read it".into(), stance: Stance::Agree, said_by: None, as_read: None };
-    let reading = readings::set(&t.alpha, t.alice, spec).await?;
-
-    let here = |id: EntityId| ops::Located { id, project: Whose::This };
-    assert_eq!(ops::locate(&t.alpha, &held.to_base64()[..8], &[Kind::Intention]).await?, here(held));
-    assert_eq!(ops::locate(&t.alpha, &reading.to_base64()[..8], &[Kind::Reading]).await?, here(reading));
+    let here = ops::Located { id: held, project: Whose::This };
+    assert_eq!(ops::locate(&t.alpha, &held.to_base64()[..8], &[Kind::Intention]).await?, here);
     let found = ops::locate(&t.beta, &held.to_base64()[..8], &[Kind::Intention]).await?;
     assert_eq!(found.id, held);
     assert!(matches!(found.project, Whose::Other(p) if p.name == "alpha"));

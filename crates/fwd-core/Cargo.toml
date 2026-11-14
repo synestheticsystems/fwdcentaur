@@ -20,6 +20,7 @@ native = [
     "dep:dirs",
     "dep:tokio",
     "dep:similar",
+    "dep:sha2",
     "dep:rusqlite",
 ]
 # The browser (crates/fwd-web): models, rules, operations and routing plans on wasm32. Ankurah's
@@ -59,7 +60,7 @@ toml = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 similar = { workspace = true, optional = true }
-sha2 = { workspace = true }
+sha2 = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
