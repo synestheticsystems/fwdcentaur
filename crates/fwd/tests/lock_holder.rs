@@ -54,11 +54,13 @@ async fn a_daemon_whose_port_file_is_gone_is_named_with_the_line_that_ends_it() 
     let ws = project::init(&paths, &repo, project::InitOptions { name: Some("held"), ..Default::default() })?.0.project;
     let spawn = Autostart::Spawn { daemon_bin: PathBuf::from(env!("CARGO_BIN_EXE_fwd")) };
     let pf = daemon::ensure_daemon(&paths, &ws, spawn.clone()).await?.pf.clone();
+    let holder = daemon::lock_holder(&paths)?.ok_or_else(|| anyhow!("the daemon names no one in its lock"))?;
     assert_eq!(
-        daemon::lock_holder(&paths)?.map(|holder| (holder.pid, holder.listening_on)),
-        Some((pf.pid, Some(pf.port))),
+        (holder.pid, holder.listening_on),
+        (pf.pid, Some(pf.port)),
         "the daemon names itself in its lock, with the port it listens on"
     );
+    let _ended_if_this_fails = EndsUnreached { holder, paths: paths.clone() };
 
     std::fs::remove_file(paths.port_file())?;
     let kill = format!("  kill {}", pf.pid);
@@ -89,6 +91,25 @@ async fn a_daemon_whose_port_file_is_gone_is_named_with_the_line_that_ends_it() 
     drop(again);
     assert!(daemon::stop(&paths).await?);
     Ok(())
+}
+
+/// Ends, when dropped, the daemon a test started and then made unreachable, should the test fail
+/// before it runs the `kill` line itself: `fwd daemon stop`, which the scratch folder runs as it
+/// goes, cannot reach that daemon and sends it nothing. It signals only while the lock still names
+/// that very process.
+struct EndsUnreached {
+    holder: daemon::LockHolder,
+    paths: Paths,
+}
+
+impl Drop for EndsUnreached {
+    fn drop(&mut self) {
+        let Ok(pid) = libc::pid_t::try_from(self.holder.pid) else { return };
+        if daemon::lock_holder(&self.paths).ok().flatten() == Some(self.holder) {
+            // SAFETY: kill has no memory preconditions.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
 }
 
 /// A process that holds the daemon lock and names no daemon there, as a daemon of an earlier build
