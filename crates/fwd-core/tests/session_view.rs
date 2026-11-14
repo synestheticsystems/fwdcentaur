@@ -29,6 +29,7 @@ struct Two {
     tester: EntityId,
     their_tester: EntityId,
     lead: EntityId,
+    their_lead: EntityId,
     subagent: EntityId,
 }
 
@@ -46,7 +47,7 @@ async fn two() -> Result<Two> {
         async move { ops::add_principal(&graph, name, Some(AgentRole::Lead), None, None, None, Some(subject)).await }
     };
     // In beta first, so that a read that kept the order things were made in would put beta first.
-    agent(&beta, "lead-sam", "claude-code:s1/main").await?;
+    let their_lead = agent(&beta, "lead-sam", "claude-code:s1/main").await?;
     let lead = agent(&alpha, "lead-sam", "claude-code:s1/main").await?;
     let subagent = ops::add_principal(
         &alpha,
@@ -58,7 +59,7 @@ async fn two() -> Result<Two> {
         Some("claude-code:s1/a1"),
     )
     .await?;
-    Ok(Two { alpha, beta, tester, their_tester, lead, subagent })
+    Ok(Two { alpha, beta, tester, their_tester, lead, their_lead, subagent })
 }
 
 /// The view of `s1` for `reader`, read through `graph`, as JSON.
@@ -260,9 +261,10 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
 }
 
 /// The session's active intentions are those assigned to the principals of its own thread, of any
-/// project: each titled by its title, its line its speaker's name and the day in bold before its
-/// words, another project's name a tag, and one since fulfilled saying so in a second line and a
-/// tag; no path and no action. What is assigned to its subagent is not among them.
+/// project, each once, however many of them hold it: each titled by its title, its line its
+/// speaker's name and the day in bold before its words, another project's name a tag, and one since
+/// fulfilled saying so in a second line and a tag; no path and no action. What is assigned to its
+/// subagent is not among them.
 #[tokio::test]
 async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -> Result<()> {
     let t = two().await?;
@@ -275,6 +277,7 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
     for it in [&ours, &theirs, &done] {
         intentions::assign(&t.alpha, t.lead, it, t.lead).await?;
     }
+    intentions::assign(&t.beta, t.their_lead, &ours, t.their_lead).await?;
     intentions::assign(&t.alpha, t.subagent, &subagents, t.subagent).await?;
     intentions::close(&t.alpha, ines, &done, IntentionStatus::Fulfilled, None, None).await?;
 

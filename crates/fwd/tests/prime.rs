@@ -821,13 +821,15 @@ async fn sparse_records_prime_as_they_did() -> Result<()> {
 }
 
 /// What a reset gives back first: the hook prints the agent's active intentions before everything
-/// else, each in its speaker's words with the day they were written down, one of another project
-/// named with it, and one since fulfilled in one line with the command that takes it off; an
-/// unassigned one is gone; and the JSON gives them as records of kind `intention`.
+/// else, each once though two of its principals hold one, each in its speaker's words with the day
+/// they were written down, one of another project named with it, and one since fulfilled in one
+/// line with the command that takes it off; an unassigned one is gone; and the JSON gives them as
+/// records of kind `intention`.
 #[test]
 fn the_hook_prints_the_agents_active_intentions_first_in_their_speakers_words() -> Result<()> {
     let s = Scratch::new()?;
     s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    s.json(&s.beta, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
     let create =
         |dir: &Path, title: &str, words: &str| s.made(dir, None, &["intention", "create", title, "--words", words]);
     let ours = create(&s.alpha, "Readers keep their place", "the list stays\nwhere I left it")?;
@@ -837,6 +839,7 @@ fn the_hook_prints_the_agents_active_intentions_first_in_their_speakers_words() 
     for id in [&ours, &theirs, &done, &dropped] {
         s.json(&s.alpha, Some("main"), &["intention", "assign", id])?;
     }
+    s.json(&s.beta, Some("main"), &["intention", "assign", &ours])?;
     s.json(&s.alpha, None, &["intention", "fulfil", &done])?;
     s.json(&s.alpha, Some("main"), &["intention", "unassign", &dropped])?;
     let shown = s.json(&s.alpha, None, &["intention", "show", &ours])?;

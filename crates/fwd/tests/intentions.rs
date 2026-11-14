@@ -90,6 +90,13 @@ fn an_agent_records_what_the_person_said_and_an_intention_of_another_project_sho
     let shown = s.json(&s.alpha, None, &["intention", "show", &it])?;
     assert_eq!((shown["words"].as_str(), shown["speaker_handle"].as_str()), (Some(words), Some("tester")));
     assert_eq!(shown["created_by_handle"], "impl-sam");
+    let text = String::from_utf8(s.run(&s.alpha, None, &["--format", "text", "intention", "show", &it], "")?.stdout)?;
+    let day = fwd_core::decision_log::date(shown["created"].as_i64().ok_or_else(|| anyhow!("no created"))?);
+    let short: String = it.chars().take(8).collect();
+    let said = "    - the list keeps its place\n    - and its selection";
+    let expected =
+        format!("{short} Readers keep their place [open]\n  @tester, {day}, written down by @impl-sam:\n{said}\n");
+    assert_eq!(text, expected, "built from the intention's views, whose words and who wrote them down");
 
     let theirs = s.made(&s.beta, None, &["intention", "create", "Builds stay under a minute", "--words", ""], "")?;
     let shown = s.json(&s.alpha, None, &["intention", "show", &theirs])?;

@@ -183,10 +183,11 @@ async fn assigned_at(w: &World, intention: EntityId, principal: EntityId, create
     Ok(())
 }
 
-/// What is assigned to impl-tide: the first assigned first, one since fulfilled among them, and
-/// neither what is assigned to Omar nor what was taken off.
+/// What is assigned to impl-tide: the first assigned first, one two relations assign listed once,
+/// one since fulfilled among them, and neither what is assigned to Omar nor what was taken off.
 #[tokio::test]
-async fn the_intentions_assigned_to_a_principal_come_the_first_assigned_first_ended_ones_included() -> Result<()> {
+async fn the_intentions_assigned_to_a_principal_come_once_each_the_first_assigned_first_ended_ones_included(
+) -> Result<()> {
     let w = world().await?;
     let first = intention(&w, w.ines, "first", None).await?;
     let second = intention(&w, w.ines, "second", None).await?;
@@ -194,6 +195,7 @@ async fn the_intentions_assigned_to_a_principal_come_the_first_assigned_first_en
     let dropped = intention(&w, w.ines, "dropped", None).await?;
     assigned_at(&w, second.0.id(), w.tide, 10).await?;
     assigned_at(&w, first.0.id(), w.tide, 20).await?;
+    assigned_at(&w, first.0.id(), w.tide, 30).await?;
     assigned_at(&w, omars.0.id(), w.omar, 5).await?;
     intentions::assign(&w.alpha, w.tide, &dropped, w.tide).await?;
     intentions::unassign(&w.alpha, w.tide, &dropped, w.tide).await?;
