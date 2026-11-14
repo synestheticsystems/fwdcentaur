@@ -223,6 +223,28 @@ fn a_subagents_group_is_folded_unless_something_in_it_waits_on_the_person() {
     assert_eq!(json["lines"], json!([]));
 }
 
+/// A row's lines never repeat its title: a short question, whose title is its whole text, opens
+/// into its actions alone, even when its text breaks lines the title joins; a question whose title
+/// is a cut of its text keeps the whole text as its line.
+#[test]
+fn a_title_that_holds_the_whole_text_is_not_said_again_beneath_it() {
+    let mut short = ask(10, "lead-sam", to(1, "tester"), 0);
+    short.text = "May I cap the backoff\nat two seconds?".into();
+    short.title = "May I cap the backoff at two seconds?".into();
+    let mut long = ask(11, "lead-sam", to(1, "tester"), 0);
+    long.text = "Should the primer name the page? It costs every session about forty characters.".into();
+    long.title = "Should the primer name the page? It costs…".into();
+    let sections = vec![section(SectionKind::YouAsked, vec![short, long])];
+    let json = printed(&held(vec![holding(20, "lead-sam", "main", sections, 0)], person(&[])).document(PAGE));
+    let rows = &json["principals"][0]["sections"][0]["records"];
+    assert_eq!(rows[0]["lines"], json!([]));
+    assert_eq!(rows[0]["actions"][0]["label"], "Answer");
+    assert_eq!(
+        rows[1]["lines"],
+        json!(["Should the primer name the page? It costs every session about forty characters."])
+    );
+}
+
 /// A session no principal is bound to says so in one line; with the daemon out of reach, the last
 /// principals stay, with no page and a line saying so; a read that failed says why, and keeps them
 /// too.

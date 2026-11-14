@@ -106,7 +106,7 @@ pub struct Row {
     pub title: String,
     pub tags: Vec<Tag>,
     /// The record's own text as one Markdown block, cut where it is long; none for a task with no
-    /// what.
+    /// what, and none where the title holds the whole text, which `lines` never repeats.
     pub lines: Vec<String>,
     /// Where the page shows it, after the page's address.
     pub path: Option<String>,
@@ -381,12 +381,15 @@ impl Held {
             ListKind::WaitsOnYou => vec![self.answer(r)],
             _ => Vec::new(),
         };
+        let title = text::plain(&r.title);
+        // A title that holds the whole text, a short question's, is not said again beneath it.
+        let lines = if text::plain(&r.text) == title { None } else { text::block(&r.text) };
         Row {
             id: r.id.to_base64(),
             kind: row_kind,
-            title: text::plain(&r.title),
+            title,
             tags,
-            lines: text::block(&r.text).into_iter().collect(),
+            lines: lines.into_iter().collect(),
             path: r.route.as_ref().map(|route| page_path(r.project.uuid, route)),
             actions,
         }

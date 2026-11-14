@@ -1,22 +1,31 @@
 //! `fwd session view`: the person's view of a Claude Code session, for a pane beside the chat, as
-//! one JSON document on one line (`fwd_core::session_view` makes it). It reads every project of
-//! the node, so it runs from any directory and joins the daemon through any project it hosts, and
-//! it reads for the person, whatever agent runs it.
+//! one JSON document on one line (`fwd_core::session_view` makes it), and with `--follow` again
+//! whenever it changes ([`follow`]). It reads every project of the node, so it runs from any
+//! directory and joins the daemon through any project it hosts, and it reads for the person,
+//! whatever agent runs it.
+
+mod follow;
 
 use crate::{autostart, load_identity, Cli, Format};
 use anyhow::{bail, Context as _, Result};
 use fwd_core::daemon::{self, Autostart, Client};
 use fwd_core::project::{NamedProject, Paths};
-use fwd_core::session_view::{self, Document};
+use fwd_core::session_view::{self, Document, Held};
 use fwd_core::subject;
 use std::io::Write;
 
-/// Prints the view of the session `session` once.
-pub(crate) async fn print_once(cli: &Cli, paths: &Paths, session: &str) -> Result<()> {
-    let viewing = Viewing::of(cli, paths, session)?;
-    let client = join(paths, &autostart(cli)?).await?;
-    let document = client.while_connected(viewing.document(&client)).await?;
-    print(&document)
+/// Prints the view of the session `session` once, or with `follow` for as long as the process
+/// runs, which then ends only by itself ([`follow::run`]).
+pub(crate) async fn print(cli: &Cli, paths: Paths, session: &str, follow: bool) -> Result<()> {
+    let viewing = Viewing::of(cli, &paths, session)?;
+    let autostart = autostart(cli)?;
+    if follow {
+        let Err(error) = follow::run(viewing, paths, autostart).await;
+        crate::fail(error, 1)
+    }
+    let client = join(&paths, &autostart).await?;
+    let held = client.while_connected(viewing.read(&client)).await?;
+    write_line(&line_of(&held.document(&page(&client))))
 }
 
 /// Whose view is read, and for whom.
@@ -43,11 +52,16 @@ impl Viewing {
         Ok(Viewing { session: session.to_string(), person })
     }
 
-    /// The view as the daemon `client` joined has it now.
-    async fn document(&self, client: &Client) -> Result<Document> {
-        let held = session_view::read(&client.graph, &self.session, &self.person).await?;
-        Ok(held.document(&format!("http://127.0.0.1:{}/", client.port)))
+    /// What the view is drawn from, as the daemon `client` joined has it now.
+    async fn read(&self, client: &Client) -> Result<Held> {
+        session_view::read(&client.graph, &self.session, &self.person).await
     }
+}
+
+/// The page's address on the daemon `client` joined, as `fwd ui --no-open` prints it without a
+/// project.
+fn page(client: &Client) -> String {
+    format!("http://127.0.0.1:{}/", client.port)
 }
 
 /// Joins the daemon, started first when `autostart` says so, through the first project it hosts:
@@ -58,9 +72,14 @@ async fn join(paths: &Paths, autostart: &Autostart) -> Result<Client> {
     daemon::ensure_daemon(paths, &NamedProject { id: hosted.id, name: hosted.name }, autostart.clone()).await
 }
 
-/// Prints `document` on one line, flushed, so that a reader that reads line by line has it whole.
-fn print(document: &Document) -> Result<()> {
-    let line = serde_json::to_string(document).context("writing the view as JSON")?;
+/// Writes `line` and a newline on standard output, flushed, so that a reader that reads line by
+/// line has it whole at once.
+fn write_line(line: &str) -> Result<()> {
     let mut out = std::io::stdout().lock();
     writeln!(out, "{line}").and_then(|()| out.flush()).context("writing the view on standard output")
+}
+
+/// The document as the view prints it: one line, whatever its text holds.
+fn line_of(document: &Document) -> String {
+    serde_json::to_string(document).expect("the view's document always serializes: its keys are strings")
 }

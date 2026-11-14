@@ -1603,6 +1603,13 @@ enum SessionCommand {
     View {
         /// The Claude Code session's id.
         session: String,
+        /// Print the document again whenever it differs from the last one printed, as the daemon's
+        /// live queries tell of a change, never on a timer, until the process is stopped; an empty
+        /// line every 30 seconds while the connection to the daemon is healthy; while the daemon
+        /// is out of reach, the last document saying so, and the fresh one when it answers again.
+        /// It ends by itself, with exit 0, only when the daemon answers running another build.
+        #[arg(long)]
+        follow: bool,
     },
 }
 
@@ -2368,8 +2375,8 @@ async fn run_cli() -> Result<()> {
 
     match &cli.command {
         command if refuse_before_running(command).is_err() => return refuse_before_running(command),
-        Command::Session { command: SessionCommand::View { session } } => {
-            return session_view::print_once(&cli, &paths, session).await
+        Command::Session { command: SessionCommand::View { session, follow } } => {
+            return session_view::print(&cli, paths, session, *follow).await
         }
         Command::Capabilities => {
             println!(
