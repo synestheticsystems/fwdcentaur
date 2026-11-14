@@ -67,7 +67,7 @@ use ankurah::model::MutableBorrow;
 use ankurah::property::PropertyError;
 use ankurah::transaction::Transaction;
 use ankurah::{Context, EntityId, LiveQuery, MatchArgs, Model, Ref, Value, View};
-use ankurah_commons::intention_graph::{IntentionStatus, IntentionView};
+use ankurah_commons::intention_graph::IntentionView;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -595,7 +595,7 @@ impl ProjectGraph {
         }
         if let Some(i) = absent(self.ctx.get::<IntentionView>(id).await)? {
             let placement: PlacementView = self.ctx.get(id).await?;
-            return at(placement.project_id(), Referent::Intention { title: i.title()?, status: i.status()? });
+            return at(placement.project_id(), Referent::Intention { title: i.title()? });
         }
         Ok(None)
     }
@@ -937,7 +937,6 @@ pub enum Referent {
     },
     Intention {
         title: String,
-        status: IntentionStatus,
     },
 }
 

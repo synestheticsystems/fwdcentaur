@@ -94,7 +94,7 @@ impl Cited {
             },
             Referent::Principal { handle } => format!("@{handle}"),
             Referent::Relation { kind } => format!("a {} relation", kind.to_string().replace('_', " ")),
-            Referent::Intention { title, .. } => title.clone(),
+            Referent::Intention { title } => title.clone(),
         }
     }
 

@@ -3835,7 +3835,7 @@ pub fn named(referent: &Referent) -> (Kind, String) {
         Referent::Message { words, .. } => (Kind::Message, format!("“{words}”")),
         Referent::Relation { kind } => (Kind::Relation, format!("a {kind} relation")),
         Referent::Principal { handle } => (Kind::Principal, format!("@{handle}")),
-        Referent::Intention { title, .. } => (Kind::Intention, title.clone()),
+        Referent::Intention { title } => (Kind::Intention, title.clone()),
     }
 }
 
