@@ -346,6 +346,25 @@ async fn an_intention_is_named_by_the_start_of_its_id_in_any_project() -> Result
     Ok(())
 }
 
+/// An intention named in a text by the first eight characters of its id, as prime prints it, is the
+/// intention the text names, in its own project and from another, whose name a reader gives beside it.
+#[tokio::test]
+async fn an_intention_named_in_a_text_by_the_start_of_its_id_is_named_in_any_project() -> Result<()> {
+    let t = two().await?;
+    let ours = intention(&t.alpha, t.alice, "Readers keep their place").await?;
+    let theirs = intention(&t.beta, t.their_alice, "Builds stay under a minute").await?;
+    let start = |id: EntityId| id.to_base64()[..8].to_string();
+    let text = format!("serves [[{}]] and [[{}]]", start(ours), start(theirs));
+    let posted = ops::post_message(&t.alpha, t.daniel, &text, Priority::Next, MessageContext::default()).await?;
+    let stored = ops::text(t.alpha.get::<MessageView>(posted).await?.content())?;
+    assert_eq!(stored, format!("serves [[{}]] and [[{}]]", ours.to_base64(), theirs.to_base64()));
+    assert_eq!(
+        ops::render_references(&t.alpha, &stored).await?,
+        "serves [Readers keep their place] and [Builds stay under a minute in beta]"
+    );
+    Ok(())
+}
+
 /// A start of an id names an intention of the command's project before one of another, as it names
 /// a task; a start two of alpha's intentions share, one by a former id, is refused naming both.
 #[tokio::test]

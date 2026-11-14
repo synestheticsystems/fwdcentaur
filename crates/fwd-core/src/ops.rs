@@ -3786,13 +3786,23 @@ async fn resolve_reference(graph: &ProjectGraph, written: &crate::references::Wr
     }
 }
 
-/// The kinds an inline reference may name: every kind a command line names, and people.
-pub const MENTIONABLE: &[Kind] =
-    &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scope, Kind::Anchor, Kind::Relation, Kind::Principal];
+/// The kinds an inline reference may name: every kind of [`ANY`], which a command line names by id,
+/// and people.
+pub const MENTIONABLE: &[Kind] = &[
+    Kind::Task,
+    Kind::Message,
+    Kind::Decision,
+    Kind::Scope,
+    Kind::Anchor,
+    Kind::Relation,
+    Kind::Intention,
+    Kind::Principal,
+];
 
-/// Which of the [`MENTIONABLE`] kinds the record `id` is, wherever in the node it is: an id names
-/// a record of any project (docs/DECISIONS.md, D176, D181). None when the node holds no record by
-/// that id, or holds it by an id it had before it was renumbered rather than as its id.
+/// Which of the [`MENTIONABLE`] kinds the record `id` is, as [`ProjectGraph::follow_any`] reads
+/// it, wherever in the node it is: an id names a record of any project (docs/DECISIONS.md, D176,
+/// D181). None when the node holds no record by that id, or holds it by an id it had before it was
+/// renumbered rather than as its id.
 pub async fn kind_of(graph: &ProjectGraph, id: EntityId) -> Result<Option<Kind>> {
     Ok(match reference(graph, id).await? {
         Reference::Followed { record, kind, .. } if record == id => Some(kind),
