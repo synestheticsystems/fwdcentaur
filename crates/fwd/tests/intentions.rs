@@ -121,6 +121,28 @@ fn the_list_holds_the_intentions_of_the_project_it_runs_in_alone() -> Result<()>
     Ok(())
 }
 
+/// `list --active` reads every principal bound to the agent, as `fwd prime` does: run in alpha, it
+/// lists an intention assigned to the agent's principal of beta alone, and one both its principals
+/// hold once.
+#[test]
+fn the_active_list_covers_every_principal_bound_to_the_agent() -> Result<()> {
+    let s = Scratch::new()?;
+    for dir in [&s.alpha, &s.beta] {
+        s.json(dir, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    }
+    let create = |dir: &Path, title: &str| s.made(dir, None, &["intention", "create", title, "--words", ""], "");
+    let both = create(&s.alpha, "Readers keep their place")?;
+    let betas = create(&s.beta, "Builds stay under a minute")?;
+    for dir in [&s.alpha, &s.beta] {
+        s.json(dir, Some("main"), &["intention", "assign", &both])?;
+    }
+    s.json(&s.beta, Some("main"), &["intention", "assign", &betas])?;
+    let active = s.json(&s.alpha, Some("main"), &["intention", "list", "--active"])?;
+    let ids: Vec<&Value> = active.as_array().into_iter().flatten().map(|r| &r["id"]).collect();
+    assert_eq!(ids, [&Value::from(both), &Value::from(betas)], "{active}");
+    Ok(())
+}
+
 /// impl-sam, an agent of alpha, assigns itself an intention of beta: it is among its active
 /// intentions, named with beta, until it is fulfilled, and is unassigned all the same afterwards;
 /// assigning it to someone else is refused.

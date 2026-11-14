@@ -128,11 +128,7 @@ pub(crate) async fn for_agent(
 /// thread an MCP call comes from, which is an agent and is read as one.
 pub(crate) async fn for_app(app: &App, max_chars: Option<usize>, include: &[Section]) -> Result<()> {
     let graph = app.graph();
-    let holder = match &app.subject {
-        Some(agent) => Holder::Agent(agent),
-        None => Holder::Principal(app.me),
-    };
-    let holdings = working_set::read(graph, holder, &extent(include, Some(graph.record()))).await?;
+    let holdings = working_set::read(graph, app.holder(), &extent(include, Some(graph.record()))).await?;
     let notices = Notices::to(graph, app.me, app.scope).await?;
     // An MCP call runs in the daemon, whose directory is no caller's.
     let directory = match app.out {

@@ -13,7 +13,9 @@ use fwd_core::model::{PlacementView, RelationView};
 use fwd_core::ops::{self, Kind};
 use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
 use fwd_core::rules::short_id;
+use fwd_core::working_set::{self, Extent};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 const INTENTION: &[Kind] = &[Kind::Intention];
 
@@ -104,13 +106,19 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
             print_intentions(app, &listed).await
         }
         IntentionCommand::List { active: true } => {
-            let mut active = Vec::new();
-            let mut not_held = Vec::new();
-            for (id, assigned) in intentions::assigned_to(graph, app.me).await? {
-                match assigned {
-                    Followed::Held { found, .. } if !intentions::ended(found.1 .0.status()?) => active.push(found),
-                    Followed::Held { .. } => {}
-                    Followed::NotHeld => not_held.push(id),
+            // The principals `fwd prime` reads for the caller, in every project, without their sections.
+            let principals = Extent { sections: Vec::new(), ready_in: None, ready: 0, unread: 0 };
+            let (mut listed, mut active, mut not_held) = (HashSet::new(), Vec::new(), Vec::new());
+            for h in working_set::read(graph, app.holder(), &principals).await? {
+                for (id, assigned) in intentions::assigned_to(graph, h.principal).await? {
+                    if !listed.insert(id) {
+                        continue;
+                    }
+                    match assigned {
+                        Followed::Held { found, .. } if !intentions::ended(found.1 .0.status()?) => active.push(found),
+                        Followed::Held { .. } => {}
+                        Followed::NotHeld => not_held.push(id),
+                    }
                 }
             }
             if let Some(first) = not_held.iter().min() {

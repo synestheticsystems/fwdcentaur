@@ -21,6 +21,7 @@ use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
 use fwd_core::rules::{self, DecisionMove, Verb};
 use fwd_core::subject;
 use fwd_core::task_move;
+use fwd_core::working_set::Holder;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::IsTerminal;
@@ -1713,6 +1714,16 @@ impl App {
 
     fn graph(&self) -> &ProjectGraph {
         &self.graph
+    }
+
+    /// Whose working set the command reads (`fwd prime`, `fwd intention list --active`): every
+    /// principal bound to the agent its subject names, in every project, else the principal it acts
+    /// as.
+    fn holder(&self) -> Holder<'_> {
+        match &self.subject {
+            Some(agent) => Holder::Agent(agent),
+            None => Holder::Principal(self.me),
+        }
     }
 
     /// The CLI's connection to the daemon, for what only the daemon's local routes answer (the
