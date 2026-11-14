@@ -188,8 +188,8 @@ pub struct Relation {
 | `step_of` | anything -> Task | `from` is a step of the task: a highlight to look at, a message, another task | acyclic between tasks, as `subtask_of` is (a checked step counts); made once per thing and task; `position` orders the checklist; checked by moving it to `resolved`, with `closed_by` and `closed` saying who and when, and unchecked by moving it back to `accepted` with them cleared; no other kind is ever `resolved`; a highlight's steps move with the first thread on it (Rules, Steps); taken off the checklist by moving it to `retracted` with the reason in `closed_reason`, by the task's creator or its assignee (Rules, "Taking a step off a checklist") |
 | `mention` | Message -> anything | the message's text names `to` inline, stored there as `[[<full id>]]` (a whole file at a version as its whole-file highlight's, `[[<full id>@<version>]]`) | one per reference in the text, written with the message when it is posted and never by `fwd link`; `via` is `{"inline": true, "ordinal": n}`, its place among the text's references from 1, with `"edited": true` added on one an edit of the text wrote; an edit keeps the relations of what the new text still names, taking their new places, and retracts those of what it no longer names, with the reason (Message, "Editing"); a page leaves it out of the message's own lozenges, since the text shows it, and lists it as "mentioned in" on what it names |
 | `concerns` | Message -> Task, Relation, Scope | the triage agent's linking of a human utterance to graph nodes | none |
-| `works_under` | Principal -> Intention | what governs the principal's current work: an intention of any project, which `fwd intention list --mine` reads back with the principal's reading of it | made once per principal and intention |
-| `serves` | Task or Intention -> Intention | the work, or the narrower aim, is for the broader one | made once per pair |
+| `works_under` | Principal -> Intention | what governs the principal's current work: an intention of any project, which `fwd intention list --mine` reads back with the principal's reading of it | made once per principal and intention: linking again answers the relation that stands, and accepts one only proposed |
+| `serves` | Task or Intention -> Intention | the work, or the narrower aim, is for the broader one | made once per pair, as `works_under` is; acyclic, as `subtask_of` is, and never from an intention to itself |
 | `cites` | Task, Message or Decision -> Decision; Decision -> Task or Message | `from` rests on the ruling `to`, so it needs re-justifying when the ruling is repealed or superseded; from a decision to a task or a message, the ruling was made in that task's or that question's context | a decision at one end or both, never the same entity at both; made once (citing again answers the relation that stands, and accepts it, with the new note when one is given, when it was only proposed) |
 
 `fwd link`, and `fwd task create` for the relations its `--after`, `--under`, `--from` and `--motivated-by` make, refuse a relation whose ends are not of the kinds its row gives (`ops::joins`), naming them and what the ends are, since what every page reads from a relation rests on them (`cli.md`, "Relations").
@@ -382,8 +382,8 @@ What a person or an agent wants to be true, in their own words, and one party's 
 
     an intention  Intention + Creation + Placement, Attribution when someone else wrote the words
                   down, later LastEdit once reworded and Closure once fulfilled or withdrawn
-    a reading     Reading + Creation + Placement, Attribution when written down for someone else,
-                  later LastEdit once reworded
+    a reading     Reading + Creation + Placement + WordingRead, Attribution when written down for
+                  someone else, later LastEdit once reworded
 
 `Intention` holds a title, the words and a status (wished, committed, fulfilled, withdrawn); `Reading` holds the record it reads (`of`, an intention or another reading), the words and a stance (agree, disagree, question). `Creation` says who wrote the record down and when, `Attribution` whose words they are when someone else wrote them down (the speaker; without it, whoever wrote them down), `LastEdit` when and by whom the words last changed, and `Closure` when, by whom and why an intention was closed. Each reference to a principal in them (`created_by`, `speaker`, `edited_by`, `closed_by`) holds a fwd principal's id (Principal, above), which does not carry the Commons' principal component yet. fwd's node mints the Commons' definitions itself, under ids of its own, until the Commons keeps a mint, so nothing reads a definition's id as lasting.
 
@@ -398,7 +398,24 @@ pub struct Placement {
 
 A project's lists read such a record through its `Placement` and its other components in one query that carries the project, so no list leaves the project out; a record read by its id is the project's, and one an id names elsewhere is followed into its project, as fwd's own records are (`crates/fwd-core/src/project_graph/placed.rs`). An intention is placed in the project of the command that records it, and a reading in the project of the command that writes it, whichever project holds what it reads; a record's readings are read wherever they were placed.
 
-A party has one reading of a record, which a later one rewords. The intention's speaker confirms an agent's reading of it with a reading of that reading, stance agree; the agent's reading is confirmed while that confirmation is not older than the reading's last change. A reading of a reading names the revision it read (`cli.md`, Intentions), and is refused when the reading changed since.
+Every reading also carries fwd's `WordingRead`, which names the wording of the record it read, so that a confirmation counts only for the words it answered; a reading that lacks it is a broken record, refused as one that lacks `Creation` is:
+
+```rust
+#[derive(Model)]
+pub struct WordingRead {
+    #[active_type(LWW)] pub revision: String, // the revision of the intention or reading read, as it stood when the reading was last written
+}
+```
+
+A revision is the start of the SHA-256 of a wording's parts, each its length and its bytes, 12 hex characters: of an intention, its title and its words; of a reading, the revision it read, its stance and its words, so that a reading that read a new wording is a new revision even when its own words stay. A party has one standing reading of a record, which a later one rewords; two first readings that raced resolve to the first by id for every reader. Only a record's speaker or party changes its words, in person or through someone who writes them down for them (`cli.md`, Intentions). Where an intention stands for a principal that works under it is judged by revisions, never by clocks, from the principal's standing reading of it and the speaker's standing reading of that: ended, then to discuss (a question or a disagreement on either side), then reworded since the principal read it, then unread, then unconfirmed, then confirmed, where confirmed means the speaker's reading agrees and read the principal's reading as it reads now.
+
+**Where fwd departs from the Commons' doc comments**, so that a later dump and load into a Commons store loses nothing:
+
+- A reading may read a reading, where `Reading.of` names an intention, a claim or a decision: it is how a person confirms or corrects an agent's account.
+- A speaker's own confirmation may have no words, where a reading is an account in its party's own words.
+- `LastEdit` is recorded when a reading's stance alone changes, not only its words.
+- `Creation.created_by`, `Attribution.speaker`, `LastEdit.edited_by` and `Closure.closed_by` hold the ids of fwd's principals (Principal, above), which do not carry the Commons' principal component yet.
+- `WordingRead` is fwd's own, and must be carried over with each reading: without it no confirmation can be judged.
 
 ### FormerId
 
