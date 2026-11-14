@@ -212,13 +212,20 @@ pub async fn assign(
 
 /// Takes the intention `record` off the principal `to`, as `by` does: retracts each accepted
 /// `assigned_to` from the intention to the principal, in the intention's project, where they live.
-/// How many it retracted, none when the intention was not assigned to them.
+/// Anyone takes an intention off themselves and a person takes one off anyone, but an agent taking
+/// one off another principal is refused. How many it retracted, none when the intention was not
+/// assigned to them.
 pub async fn unassign(
     graph: &ProjectGraph,
     by: EntityId,
     (placement, _): &(PlacementView, Parts),
     to: EntityId,
 ) -> Result<usize> {
+    if to != by && graph.get::<PrincipalView>(by).await?.kind()? != PrincipalKind::Human {
+        bail!(
+            "refused: an agent takes an intention off itself alone, since whether one stays assigned to another principal is for that principal or a person to decide; leave out --to"
+        );
+    }
     let holding = assignments(graph, placement.id(), to).await?;
     if holding.is_empty() {
         return Ok(0);

@@ -1508,9 +1508,7 @@ pub async fn link(
     via: Value,
 ) -> Result<EntityId> {
     match kind {
-        RelationKind::AssignedTo => bail!(
-            "an intention is assigned with `fwd intention assign <intention>`, not linked; who does a task is its assignee (`fwd task assign <task> @handle`)"
-        ),
+        RelationKind::AssignedTo => bail!(ASSIGNED_NOT_LINKED),
         RelationKind::Mention => bail!(
             "a mention is written in a message's text (`@handle`, `[[<id>]]`, `[[D<number>]]`) and made when the message is posted; it is not linked"
         ),
@@ -1574,6 +1572,10 @@ pub async fn link(
     Ok(id)
 }
 
+/// Why [`link`] and [`unlink`] refuse an `assigned_to`: `intentions::assign` alone makes one, and
+/// `intentions::unassign` alone takes one off, by its rule of who may take an intention off whom.
+const ASSIGNED_NOT_LINKED: &str = "an intention is assigned with `fwd intention assign <intention>`, not linked; who does a task is its assignee (`fwd task assign <task> @handle`)";
+
 /// A relation of `kind` from the first of `ends` to the second, with `status`, that `by` makes
 /// now, as [`link`] writes one, and `add_highlight_step` the step of a new highlight.
 #[allow(clippy::too_many_arguments)]
@@ -1608,9 +1610,10 @@ pub(crate) fn new_relation(
 /// reason. Returns how many. A supersession of one decision by another is refused: retracting it
 /// would leave the old decision Superseded with no successor, and nothing moves a superseded
 /// decision back, so a supersession is never undone; a new decision supersedes the successor
-/// instead. The relations are changed in the graph's project, which a command that retracts them
-/// runs in, whichever project their ends are in (docs/DECISIONS.md, D181); one of another project
-/// is refused by the transaction (`ProjectGraphError::OfAnotherProject`).
+/// instead. An `assigned_to` is refused as [`link`] refuses one. The relations are changed in the
+/// graph's project, which a command that retracts them runs in, whichever project their ends are
+/// in (docs/DECISIONS.md, D181); one of another project is refused by the transaction
+/// (`ProjectGraphError::OfAnotherProject`).
 pub async fn unlink(
     graph: &ProjectGraph,
     by: EntityId,
@@ -1619,6 +1622,9 @@ pub async fn unlink(
     to: EntityId,
     reason: &str,
 ) -> Result<usize> {
+    if kind == RelationKind::AssignedTo {
+        bail!(ASSIGNED_NOT_LINKED);
+    }
     if kind == RelationKind::Supersedes {
         if let (Ok(old), Ok(new)) = (graph.get::<DecisionView>(to).await, graph.get::<DecisionView>(from).await) {
             let (old, new) = (old.number()?, new.number()?);

@@ -80,10 +80,11 @@ pub(crate) enum IntentionCommand {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Take an intention off yourself, or off the principal --to names.
+    /// Take an intention off yourself, or, as a person, off the principal --to names.
     Unassign {
         #[arg(allow_hyphen_values = true)]
         id: String,
+        /// Whom to take it off: yourself, or, for a person, anyone.
         #[arg(long)]
         to: Option<String>,
     },

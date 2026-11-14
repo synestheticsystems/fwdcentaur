@@ -1,7 +1,7 @@
 //! Intention records (`fwd_core::intentions`) on one store in memory holding two projects, alpha
 //! and beta: an intention holds the words of whoever it was written down for, and only they change
 //! them or end it; a principal assigns an intention of any project to itself, and reads back what is
-//! assigned to it.
+//! assigned to it; an agent takes one off itself alone, and a person off anyone.
 
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_commons::intention_graph::IntentionStatus;
@@ -138,6 +138,25 @@ async fn a_principal_assigns_an_intention_to_itself_alone() -> Result<()> {
     let to_omar = intentions::assign(&w.alpha, w.tide, &it, w.omar).await;
     assert!(refusal(to_omar).contains("leave out --to"));
     assert!(intentions::assigned_to(&w.alpha, w.omar).await?.is_empty());
+    Ok(())
+}
+
+/// An agent takes an intention off another principal not at all, a refusal saying why, and a
+/// person takes one off anyone; `unlink` takes none off, refusing as `link` does.
+#[tokio::test]
+async fn an_agent_takes_an_intention_off_itself_alone_and_a_person_off_anyone() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w, w.ines, "Readers keep their place", None).await?;
+    intentions::assign(&w.alpha, w.tide, &it, w.tide).await?;
+    intentions::assign(&w.alpha, w.omar, &it, w.omar).await?;
+    let by_tide = intentions::unassign(&w.alpha, w.tide, &it, w.omar).await;
+    assert!(refusal(by_tide).contains("is for that principal or a person to decide"));
+    let unlinked = ops::unlink(&w.alpha, w.omar, RelationKind::AssignedTo, it.0.id(), w.tide, "done").await;
+    assert!(refusal(unlinked).contains("`fwd intention assign <intention>`, not linked"));
+    assert_eq!(ids(&intentions::assigned_to(&w.alpha, w.omar).await?), vec![it.0.id()], "still Omar's");
+
+    assert_eq!(intentions::unassign(&w.alpha, w.ines, &it, w.tide).await?, 1, "a person takes it off an agent");
+    assert!(intentions::assigned_to(&w.alpha, w.tide).await?.is_empty());
     Ok(())
 }
 
