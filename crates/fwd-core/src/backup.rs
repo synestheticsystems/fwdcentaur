@@ -399,9 +399,8 @@ fn verify(from: &Path, files: &[(PathBuf, &Entry)]) -> Result<()> {
 fn copy_database(from: &Path, to: &Path) -> Result<()> {
     // Opened as the daemon opens it (to read and write, never created), so that closing it leaves
     // the files as SQLite leaves them; the backup only reads through it.
-    let source =
-        Connection::open_with_flags(from, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    let mut copy = Connection::open(to)?;
+    let source = open_database(from, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    let mut copy = open_database(to, OpenFlags::default())?;
     {
         let backup = Backup::new(&source, &mut copy)?;
         let mut waits = 0;
@@ -427,7 +426,7 @@ fn copy_database(from: &Path, to: &Path) -> Result<()> {
 /// Opens the database at `path` to read only and runs SQLite's integrity check, which reads every
 /// page and index; anything but its one answer `ok` is an error that says what it found.
 fn check_integrity(path: &Path) -> Result<()> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    let conn = open_database(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .with_context(|| format!("opening {}", path.display()))?;
     let found = conn
         .prepare("PRAGMA integrity_check")?
@@ -437,6 +436,16 @@ fn check_integrity(path: &Path) -> Result<()> {
         bail!("{} does not pass SQLite's integrity check: {}", path.display(), found.join("; "));
     }
     Ok(())
+}
+
+/// Opens the database at `path` with Ankurah's id decoder registered, as every connection here is
+/// opened. The store indexes its entities on `ankurah_id_bytes("id")`, which Ankurah's engine
+/// registers only on the connections it opens itself, and the integrity check evaluates every
+/// index, so on a connection without the decoder it fails with "unknown function".
+fn open_database(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
+    let conn = Connection::open_with_flags(path, flags)?;
+    ankurah_storage_sqlite::register_id_bytes(&conn)?;
+    Ok(conn)
 }
 
 /// True when the file begins with the header every SQLite database begins with.
