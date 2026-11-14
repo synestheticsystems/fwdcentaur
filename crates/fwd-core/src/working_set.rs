@@ -1,19 +1,22 @@
 //! What an agent holds, read in one go so that an agent whose context was reset (a new session, a
-//! compaction) gets back what it was working on without a command for each part (`fwd prime`; the
-//! page is to show the same). For each principal bound to the agent, in every project of the node,
-//! it holds the questions that wait on the principal, the questions the principal asked that wait
-//! on someone else, the tasks assigned to it that are not finished, its unread notifications, and,
-//! where the reader works, the ready tasks it could start: each a [`Section`], most important
-//! first, each a list of records named by the one line a reader knows them by. A task moved to
-//! another project keeps its assignee, and its messages their authors and addressees
-//! (`task_move`), so what names the principal is read wherever it now is, with its project.
+//! compaction) gets back what it was working on without a command for each part (`fwd prime`), and
+//! so that the person sees what a session holds (`session_view`). For each principal bound to the
+//! agent, in every project of the node, it holds the questions that wait on the principal, the
+//! questions the principal asked that wait on someone else, the tasks assigned to it that are not
+//! finished, its unread notifications, and, where the reader works, the ready tasks it could start:
+//! each a [`Section`], most important first, each a list of records with what a reader names and
+//! shows them by. A task moved to another project keeps its assignee, and its messages their
+//! authors and addressees (`task_move`), so what names the principal is read wherever it now is,
+//! with its project.
 
+use crate::live_read::LiveRead;
 use crate::model::*;
 use crate::ops::{self, MessageContext, ASKS_KEY, ASKS_PROJECT};
 use crate::project_graph::{InProjectView, ProjectGraph, ProjectRecord};
 use crate::query::with_strings;
 use crate::route::Route;
 use crate::{reason, routing, subject};
+use ankurah::ankql::ast::{Parsed, Selection};
 use ankurah::EntityId;
 use anyhow::{anyhow, Result};
 use std::cmp::Reverse;
@@ -25,14 +28,20 @@ pub enum Holder<'a> {
     /// Every principal bound to the agent this subject names (`subject`), in every project of the
     /// node, as a command the agent runs acts as each of them in its project.
     Agent(&'a str),
+    /// Every principal bound to an agent of the Claude Code session this id names, in every project
+    /// of the node: those of its own thread first, then its subagents', each by its project's name,
+    /// then by its own name, then by id. What the person's view of a session shows
+    /// (`session_view`).
+    Session(&'a str),
     /// One principal of the graph's project, for a command that names a principal rather than an
     /// agent (`--as`, or the person).
     Principal(EntityId),
 }
 
-/// What a working set reads.
+/// How much of a working set one read takes: which sections, and how many of the records of those
+/// that grow without bound.
 #[derive(Debug, Clone)]
-pub struct Reading {
+pub struct Extent {
     /// The sections read, of [`SectionKind::ALL`].
     pub sections: Vec<SectionKind>,
     /// The project, by its record, whose ready tasks are read: a task is started where one works,
@@ -55,9 +64,37 @@ pub struct Holding {
     pub handle: String,
     pub kind: PrincipalKind,
     pub role: Option<AgentRole>,
+    /// The agent the principal is bound to (`subject`), if any.
+    pub subject: Option<String>,
     /// The sections read for it, in [`SectionKind::ALL`]'s order: the ready tasks only in the
-    /// project they are read for ([`Reading::ready_in`]).
+    /// project they are read for ([`Extent::ready_in`]).
     pub sections: Vec<Section>,
+}
+
+impl Holding {
+    /// The live queries whose changes can change what this holding's sections hold: the live form
+    /// of each read the sections came from, given the principal's id, or in its project its name.
+    /// The ready tasks have none, since the frontier is read across the project's whole graph.
+    pub fn live_reads(&self) -> Vec<LiveRead> {
+        let has = |kind| self.sections.iter().any(|s| s.kind == kind);
+        let mut reads = Vec::new();
+        if has(SectionKind::AskedOfYou) || has(SectionKind::YouAsked) {
+            reads.push(LiveRead::QuestionsTo(self.principal));
+            reads.push(LiveRead::QuestionsBy(self.principal));
+            reads.push(LiveRead::QuestionsByName {
+                project: self.project.clone(),
+                handle: self.handle.clone(),
+                of_no_one: self.role == Some(AgentRole::Triage),
+            });
+        }
+        if has(SectionKind::Assigned) {
+            reads.push(LiveRead::TasksAssignedTo(self.principal));
+        }
+        if has(SectionKind::Unread) {
+            reads.push(LiveRead::Unread { project: self.project.clone(), principal: self.principal });
+        }
+        reads
+    }
 }
 
 /// A kind of record a working set lists, by how much it matters to an agent coming back to its
@@ -105,35 +142,64 @@ pub struct Section {
     pub unreadable: Vec<EntityId>,
 }
 
-/// A record as a working set lists it: what it is, where it is, and the one line a reader knows it
-/// by.
+/// A record as a working set lists it: what it is, where it is, what a reader names it by and its
+/// own text, each reader composing its own line from them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub id: EntityId,
     pub kind: RecordKind,
-    /// Its whitespace collapsed, so that a record is one line whatever its text holds.
+    /// Its own name, its whitespace collapsed so that it is one line whatever its text holds: a
+    /// task's title, a question's first words (`reason::NAME_WORDS`), a notification's inbox
+    /// sentence.
     pub title: String,
+    /// Its own text, whole: a task's what, a question's text; none for a notification, whose
+    /// sentence is its title.
+    pub text: String,
+    /// When it was made, in milliseconds since the epoch.
+    pub created: i64,
     /// The project the record is in, which a moved record has as another than its principal's.
     pub project: ProjectRecord,
     /// Where the page shows it; none where the page has no route of its own for it.
     pub route: Option<Route>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum RecordKind {
-    Ask,
-    Task,
+    /// A question: who asked it and whom it asks, each named as a reader in its principal's
+    /// project is shown them (`ops::handle_of`).
+    Ask {
+        from: String,
+        to: Addressee,
+    },
+    Task {
+        status: TaskStatus,
+    },
     Notification,
 }
 
-/// The working set of `holder`, read through `graph`, as `reading` says: one [`Holding`] per
+/// Whom a question asks, as its context says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Addressee {
+    /// A principal by its id, and its name as a reader is shown it.
+    Principal { id: EntityId, handle: String },
+    /// A name that is no principal's id, as the question was written: a principal's name, with or
+    /// without the at-sign, which routing reads in the question's project.
+    Name(String),
+    /// No one in particular, which the triage agent of the scope it concerns answers.
+    NoOne,
+}
+
+/// The working set of `holder`, read through `graph`, as `extent` says: one [`Holding`] per
 /// principal, the graph's own project first and the others by name, then by id, since two may
-/// share a name; none for an agent no active principal is bound to.
-pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, reading: &Reading) -> Result<Vec<Holding>> {
+/// share a name (a session's in the order [`Holder::Session`] says); none for an agent no active
+/// principal is bound to.
+pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> Result<Vec<Holding>> {
     let mut projects = graph.projects().await?;
-    projects.sort_by_key(|p| (p.record != graph.record(), p.name.clone(), p.uuid));
-    let mut read = Read { projects: &projects, reading, handles: HashMap::new() };
+    // A session's view is the same whichever project the reader joined the daemon through.
+    let first = |p: &ProjectRecord| !matches!(holder, Holder::Session(_)) && p.record == graph.record();
+    projects.sort_by_key(|p| (!first(p), p.name.clone(), p.uuid));
+    let mut read = Read { projects: &projects, extent, handles: HashMap::new() };
     let mut held = Vec::new();
     match holder {
         Holder::Agent(agent) => {
@@ -146,6 +212,27 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, reading: &Reading) -
                     _ => {}
                 }
             }
+        }
+        Holder::Session(session) => {
+            let mut subagents = Vec::new();
+            for project in &projects {
+                let there = graph.graph_of_project(project);
+                let principals = ops::principals(&there).await?;
+                let mut bound: Vec<&PrincipalView> = subject::of_session(&principals, session);
+                bound.sort_by_key(|p| (p.handle().unwrap_or_default(), p.id()));
+                for p in bound {
+                    if !p.active()? {
+                        continue;
+                    }
+                    let holding = read.holding(&there, project, p, &principals).await?;
+                    if holding.subject.as_deref().is_some_and(subject::is_main_thread) {
+                        held.push(holding);
+                    } else {
+                        subagents.push(holding);
+                    }
+                }
+            }
+            held.extend(subagents);
         }
         Holder::Principal(id) => {
             let project = projects
@@ -162,7 +249,7 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, reading: &Reading) -
 /// One read of a working set: what it reads, and what it has read once and names records by.
 struct Read<'a> {
     projects: &'a [ProjectRecord],
-    reading: &'a Reading,
+    extent: &'a Extent,
     /// Each principal's handle as a reader in a project is shown it, by that project's record and
     /// the principal's id.
     handles: HashMap<(EntityId, EntityId), String>,
@@ -184,7 +271,7 @@ impl Read<'_> {
         principals: &[PrincipalView],
     ) -> Result<Holding> {
         let me = p.id();
-        let wanted = self.reading.sections.clone();
+        let wanted = self.extent.sections.clone();
         let (mut asked_of_you, mut you_asked) =
             if wanted.contains(&SectionKind::AskedOfYou) || wanted.contains(&SectionKind::YouAsked) {
                 self.questions(graph, p, principals).await?
@@ -201,7 +288,7 @@ impl Read<'_> {
                 SectionKind::YouAsked => whole(kind, std::mem::take(&mut you_asked)),
                 SectionKind::Assigned => whole(kind, std::mem::take(&mut assigned)),
                 SectionKind::Unread => self.unread(graph, project, me).await?,
-                SectionKind::Ready if self.reading.ready_in == Some(project.record) => {
+                SectionKind::Ready if self.extent.ready_in == Some(project.record) => {
                     self.ready(graph, project, me, &listed_as_assigned).await?
                 }
                 SectionKind::Ready => continue,
@@ -213,6 +300,7 @@ impl Read<'_> {
             handle: p.handle()?,
             kind: p.kind()?,
             role: ops::role_of(p),
+            subject: p.subject()?,
             sections,
         })
     }
@@ -232,14 +320,8 @@ impl Read<'_> {
     ) -> Result<(Listed, Listed)> {
         let me = p.id();
         let mut asked: Vec<MessageView> = graph.open_questions_to(me).await?;
-        let mut by_rule = format!("status = '{}' AND (context.to = ? OR context.to = ?", MessageStatus::Active);
-        if ops::holds(p, AgentRole::Triage) {
-            by_rule.push_str(&format!(" OR context.{ASKS_KEY} = '{ASKS_PROJECT}'"));
-        }
-        by_rule.push(')');
-        let handle = p.handle()?;
         let mut candidates: Vec<MessageView> =
-            graph.fetch(with_strings(&by_rule, &[&handle, &format!("@{handle}")])?).await?;
+            graph.fetch(questions_by_name(&p.handle()?, ops::holds(p, AgentRole::Triage))?).await?;
         candidates.retain(|m| asked.iter().all(|a| a.id() != m.id()));
         let mut asked_of_you = Listed::default();
         for m in candidates {
@@ -254,19 +336,18 @@ impl Read<'_> {
         }
         let wrote = graph.open_questions_by(me).await?;
         let mut you_asked = Listed::default();
-        self.questions_as_records(graph, asked, true, &mut asked_of_you).await?;
-        self.questions_as_records(graph, wrote, false, &mut you_asked).await?;
+        self.questions_as_records(graph, asked, &mut asked_of_you).await?;
+        self.questions_as_records(graph, wrote, &mut you_asked).await?;
         Ok((asked_of_you, you_asked))
     }
 
-    /// `messages` as records in `listed`, each titled by whom it is from (`from_whom`) or to and its
-    /// first words, as a message is named elsewhere (`reason::NAME_WORDS`); one whose fields cannot
-    /// be read among `listed`'s unreadable.
+    /// `messages` as records in `listed`, each named by its first words, as a message is named
+    /// elsewhere (`reason::NAME_WORDS`), with whom it is from and whom it asks; one whose fields
+    /// cannot be read among `listed`'s unreadable.
     async fn questions_as_records(
         &mut self,
         graph: &ProjectGraph,
         messages: Vec<MessageView>,
-        from_whom: bool,
         listed: &mut Listed,
     ) -> Result<()> {
         let mut keyed = Vec::new();
@@ -278,23 +359,19 @@ impl Read<'_> {
         }
         keyed.sort_by_key(|(f, m)| (f.priority, Reverse(f.created), m.id()));
         for (facts, m) in keyed {
-            let whom = if from_whom {
-                format!("from @{}", self.handle(graph, facts.author).await?)
-            } else {
-                match facts.to.as_deref().map(|to| (to, to.parse::<EntityId>())) {
-                    Some((_, Ok(id))) => format!("to @{}", self.handle(graph, id).await?),
-                    Some((to, Err(_))) => format!("to @{to}"),
-                    None => "to no one in particular".to_string(),
-                }
+            let from = self.handle(graph, facts.author).await?;
+            let to = match facts.to.map(|to| (to.parse::<EntityId>(), to)) {
+                Some((Ok(id), _)) => Addressee::Principal { id, handle: self.handle(graph, id).await? },
+                Some((Err(_), name)) => Addressee::Name(name),
+                None => Addressee::NoOne,
             };
-            let words = reason::first_words(&facts.content, reason::NAME_WORDS);
-            let route = Some(Route::question(m.id()));
+            let title = reason::first_words(&facts.content, reason::NAME_WORDS);
             listed.records.push(self.record(
                 m.id(),
-                RecordKind::Ask,
-                &format!("{whom}: {words}"),
+                RecordKind::Ask { from, to },
+                Written { title: &title, text: facts.content, created: facts.created },
                 m.project_id()?,
-                route,
+                Some(Route::question(m.id())),
             )?);
         }
         Ok(())
@@ -321,11 +398,10 @@ impl Read<'_> {
         };
         keyed.sort_by_key(|(f, t)| (stage(f.status), f.priority.unwrap_or(i64::MAX), f.created, t.id()));
         for (facts, t) in keyed {
-            let title = format!("{} [{}]", facts.title, facts.status);
             listed.records.push(self.record(
                 t.id(),
-                RecordKind::Task,
-                &title,
+                RecordKind::Task { status: facts.status },
+                Written { title: &facts.title, text: facts.what, created: facts.created },
                 t.project_id()?,
                 Some(Route::task(t.id())),
             )?);
@@ -334,13 +410,14 @@ impl Read<'_> {
     }
 
     /// `me`'s unread notifications, in the inbox's order, each by its inbox sentence without the
-    /// way to answer it, the first [`Reading::unread`] of them read.
+    /// way to answer it, the first [`Extent::unread`] of them read.
     async fn unread(&mut self, graph: &ProjectGraph, project: &ProjectRecord, me: EntityId) -> Result<Section> {
         let unread = ops::inbox(graph, me, true).await?;
         let mut records = Vec::new();
-        for n in unread.iter().take(self.reading.unread) {
+        for n in unread.iter().take(self.extent.unread) {
             let sentence = reason::plain(&reason::gather(graph, n, None).await?);
-            records.push(self.record(n.id(), RecordKind::Notification, &sentence, project.record, None)?);
+            let written = Written { title: &sentence, text: String::new(), created: n.created()? };
+            records.push(self.record(n.id(), RecordKind::Notification, written, project.record, None)?);
         }
         Ok(Section {
             kind: SectionKind::Unread,
@@ -352,7 +429,7 @@ impl Read<'_> {
     }
 
     /// The ready tasks `me` could start in `project`, less those `listed` as assigned, the first
-    /// [`Reading::ready`] of them read.
+    /// [`Extent::ready`] of them read.
     async fn ready(
         &mut self,
         graph: &ProjectGraph,
@@ -365,12 +442,12 @@ impl Read<'_> {
             frontier.into_iter().partition(|t| listed.contains(&t.id()));
         let mut records = Vec::new();
         let mut unreadable = Vec::new();
-        for t in ready.iter().take(self.reading.ready) {
-            match t.title() {
-                Ok(title) => records.push(self.record(
+        for t in ready.iter().take(self.extent.ready) {
+            match task_facts(t) {
+                Ok(facts) => records.push(self.record(
                     t.id(),
-                    RecordKind::Task,
-                    &title,
+                    RecordKind::Task { status: facts.status },
+                    Written { title: &facts.title, text: facts.what, created: facts.created },
                     project.record,
                     Some(Route::task(t.id())),
                 )?),
@@ -386,7 +463,7 @@ impl Read<'_> {
         &self,
         id: EntityId,
         kind: RecordKind,
-        title: &str,
+        written: Written<'_>,
         project: EntityId,
         route: Option<Route>,
     ) -> Result<Record> {
@@ -396,7 +473,9 @@ impl Read<'_> {
             .find(|p| p.record == project)
             .ok_or_else(|| anyhow!("{} is a record of a project the node holds no record of", id.to_base64()))?
             .clone();
-        Ok(Record { id, kind, title: title.split_whitespace().collect::<Vec<_>>().join(" "), project, route })
+        let Written { title, text, created } = written;
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        Ok(Record { id, kind, title, text, created, project, route })
     }
 
     /// The handle of `principal` as a reader in `graph`'s project is shown it (`ops::handle_of`),
@@ -443,14 +522,42 @@ fn question_facts(m: &MessageView) -> Result<QuestionFacts> {
     })
 }
 
-/// What an assigned task is listed by.
+/// What a task is listed by.
 struct TaskFacts {
     title: String,
+    what: String,
     status: TaskStatus,
     priority: Option<i64>,
     created: i64,
 }
 
 fn task_facts(t: &TaskView) -> Result<TaskFacts> {
-    Ok(TaskFacts { title: t.title()?, status: t.status()?, priority: t.priority()?, created: t.created()? })
+    // A task made with a title alone may have no what stored at all, which says the same as an
+    // empty one.
+    let what = match t.what() {
+        Err(ankurah::property::PropertyError::Missing) => String::new(),
+        read => read?,
+    };
+    Ok(TaskFacts { title: t.title()?, what, status: t.status()?, priority: t.priority()?, created: t.created()? })
+}
+
+/// What a record says of itself, from which [`Read::record`] makes it.
+struct Written<'a> {
+    title: &'a str,
+    text: String,
+    created: i64,
+}
+
+/// The open questions of a project that ask the principal named `handle` by that name, with or
+/// without the at-sign routing reads it with, and, when it answers for them (`of_no_one`, a triage
+/// agent's), those asked of no one in particular, which routing's rule then weighs
+/// (`routing::asked_of`): what [`Read::questions`] reads beside the questions asked by its id, and
+/// the live form of it ([`LiveRead::QuestionsByName`]).
+pub fn questions_by_name(handle: &str, of_no_one: bool) -> Result<Selection<Parsed>> {
+    let mut by_rule = format!("status = '{}' AND (context.to = ? OR context.to = ?", MessageStatus::Active);
+    if of_no_one {
+        by_rule.push_str(&format!(" OR context.{ASKS_KEY} = '{ASKS_PROJECT}'"));
+    }
+    by_rule.push(')');
+    with_strings(&by_rule, &[handle, &format!("@{handle}")])
 }

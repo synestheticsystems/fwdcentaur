@@ -33,7 +33,10 @@
 //!   ([`ProjectGraph::unfinished_tasks_assigned_to`]), the open questions it asked
 //!   ([`ProjectGraph::open_questions_by`]) and those asked of it by its id
 //!   ([`ProjectGraph::open_questions_to`]) in every project, each with its project, which the
-//!   reader names beside it (`working_set`). No read takes a caller's selection across projects.
+//!   reader names beside it (`working_set`); and a fourth, given a question's id, the answers in
+//!   its thread ([`ProjectGraph::answers_to`]), wherever they were written (`session_view`). Each
+//!   has a live form that follows the same rule. No read takes a caller's selection across
+//!   projects.
 //!
 //! - A page shows one project's lists from live queries that carry the project, and names what
 //!   their records hold the ids of through live reads that carry none ([`ProjectGraph::follow_live`],
@@ -52,7 +55,7 @@
 
 use crate::model::*;
 use crate::ops::{ASKS_KEY, ASKS_PROJECT};
-use crate::query::{with_id, with_string};
+use crate::query::{with_id, with_ids, with_string};
 use ankurah::ankql::ast::{ComparisonOperator, Expr, Parsed, PathExpr, Predicate, Selection};
 use ankurah::error::{MutationError, RetrievalError};
 use ankurah::model::MutableBorrow;
@@ -221,6 +224,31 @@ fn touching(end: &str, id: EntityId, kind: Option<RelationKind>) -> Selection<Pa
         Some(kind) => Predicate::And(Box::new(at), Box::new(equals("kind", Value::String(kind.to_string())))),
         None => at,
     })
+}
+
+/// The tasks assigned to `principal` that are not done, cancelled or rejected, of every project:
+/// what [`ProjectGraph::unfinished_tasks_assigned_to`] reads, and its live form.
+fn unfinished_tasks_assigned_to(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    with_id("assignee = ? AND status != 'done' AND status != 'cancelled' AND status != 'rejected'", principal)
+}
+
+/// The open messages `principal` wrote that ask someone, or no one in particular, of every project.
+fn open_questions_by(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    let asking = format!(
+        "author = ? AND status = '{}' AND (context.to IS NOT NULL OR context.{ASKS_KEY} = '{ASKS_PROJECT}')",
+        MessageStatus::Active
+    );
+    with_id(&asking, principal)
+}
+
+/// The open messages that ask `principal` by its id, of every project.
+fn open_questions_to(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    with_string(&format!("status = '{}' AND context.to = ?", MessageStatus::Active), &principal.to_base64())
+}
+
+/// The messages that reply to `message` or are of the thread it opens, of every project.
+fn answers_to(message: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    with_ids("reply_to = ? OR thread = ?", &[message, message])
 }
 
 /// None for a record the node does not hold, or holds as a record of another model.
@@ -559,25 +587,26 @@ impl ProjectGraph {
     /// The tasks assigned to `principal` that are not done, cancelled or rejected, of every
     /// project: a task moved to another project keeps its assignee.
     pub async fn unfinished_tasks_assigned_to(&self, principal: EntityId) -> anyhow::Result<Vec<TaskView>> {
-        let held = "assignee = ? AND status != 'done' AND status != 'cancelled' AND status != 'rejected'";
-        Ok(self.ctx.fetch(with_id(held, principal)?).await?)
+        Ok(self.ctx.fetch(unfinished_tasks_assigned_to(principal)?).await?)
     }
 
     /// The open messages `principal` wrote that ask someone, or no one in particular, of every
     /// project: a message moved with its task keeps its author.
     pub async fn open_questions_by(&self, principal: EntityId) -> anyhow::Result<Vec<MessageView>> {
-        let asking = format!(
-            "author = ? AND status = '{}' AND (context.to IS NOT NULL OR context.{ASKS_KEY} = '{ASKS_PROJECT}')",
-            MessageStatus::Active
-        );
-        Ok(self.ctx.fetch(with_id(&asking, principal)?).await?)
+        Ok(self.ctx.fetch(open_questions_by(principal)?).await?)
     }
 
     /// The open messages that ask `principal` by its id, of every project: a message moved with its
     /// task keeps its addressee.
     pub async fn open_questions_to(&self, principal: EntityId) -> anyhow::Result<Vec<MessageView>> {
-        let asked = format!("status = '{}' AND context.to = ?", MessageStatus::Active);
-        Ok(self.ctx.fetch(with_string(&asked, &principal.to_base64())?).await?)
+        Ok(self.ctx.fetch(open_questions_to(principal)?).await?)
+    }
+
+    /// The messages that answer `message` in its thread, whichever project wrote them: those that
+    /// reply to it, and those of the thread it opens. A question asked of the person has been
+    /// answered once one of these is theirs (`session_view`), as the page's Waiting on you counts it.
+    pub async fn answers_to(&self, message: EntityId) -> anyhow::Result<Vec<MessageView>> {
+        Ok(self.ctx.fetch(answers_to(message)?).await?)
     }
 
     /// The project of each of `projects`, project records as [`ProjectGraph::ids_in_every_project`]
@@ -684,6 +713,31 @@ impl ProjectGraph {
     }
 }
 
+/// The live forms of the reads of what an agent holds, each given one principal's id, or one
+/// message's, and building its own selection, as the reads do: what a view that follows a working
+/// set listens to, to read it again when one of them changes (`live_read`).
+impl ProjectGraph {
+    /// A live query on what [`ProjectGraph::unfinished_tasks_assigned_to`] reads.
+    pub fn query_unfinished_tasks_assigned_to(&self, principal: EntityId) -> anyhow::Result<LiveQuery<TaskView>> {
+        Ok(self.ctx.query(unfinished_tasks_assigned_to(principal)?)?)
+    }
+
+    /// A live query on what [`ProjectGraph::open_questions_by`] reads.
+    pub fn query_open_questions_by(&self, principal: EntityId) -> anyhow::Result<LiveQuery<MessageView>> {
+        Ok(self.ctx.query(open_questions_by(principal)?)?)
+    }
+
+    /// A live query on what [`ProjectGraph::open_questions_to`] reads.
+    pub fn query_open_questions_to(&self, principal: EntityId) -> anyhow::Result<LiveQuery<MessageView>> {
+        Ok(self.ctx.query(open_questions_to(principal)?)?)
+    }
+
+    /// A live query on what [`ProjectGraph::answers_to`] reads.
+    pub fn query_answers_to(&self, message: EntityId) -> anyhow::Result<LiveQuery<MessageView>> {
+        Ok(self.ctx.query(answers_to(message)?)?)
+    }
+}
+
 /// What a [`LiveFollow`] reads for the ids it is given.
 #[derive(Clone, Copy)]
 enum Reads {
@@ -757,7 +811,7 @@ pub enum Whose {
 
 /// A project of the node: its record, the UUID the index and the daemon's routes name it by, and
 /// its name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectRecord {
     pub record: EntityId,
     pub uuid: Uuid,

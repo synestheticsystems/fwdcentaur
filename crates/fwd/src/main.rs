@@ -36,6 +36,7 @@ mod prime;
 mod runs_in;
 mod serve;
 mod services;
+mod session_view;
 mod watch;
 
 /// The build this binary is, as crates/fwd/build.rs names it (`0.0.1-646.g184fd78`), so that one
@@ -135,6 +136,10 @@ enum Format {
     /// for no one, printing nothing, as the hook of a retired principal does; without the hook's
     /// JSON, --as and FWD_AS name the principal.
     Hook,
+    /// What an action of `fwd session view` prints, which a pane runs when the person presses it:
+    /// nothing when the command succeeds, since the view shows what changed, and when it fails one
+    /// plain line on standard error saying why, and a non-zero exit. Only `reply` takes it.
+    Pane,
 }
 
 #[derive(Subcommand, Debug)]
@@ -329,8 +334,13 @@ enum Command {
     Reply {
         #[arg(allow_hyphen_values = true)]
         id: String,
-        #[arg(allow_hyphen_values = true)]
-        text: String,
+        #[arg(allow_hyphen_values = true, required_unless_present = "text_from_stdin")]
+        text: Option<String>,
+        /// Read the text from standard input, whole and as it is, in place of the argument: what a
+        /// program that passes a person's words on uses (the Answer of `fwd session view`), so that
+        /// no text, whatever it holds, is read as a flag or needs quoting.
+        #[arg(long, conflicts_with = "text")]
+        text_from_stdin: bool,
     },
     /// Forward a message (or the message behind a notification) to someone who can act on it.
     /// The forward is a reply in the same thread, addressed to them, quoting the original. Its
@@ -1581,6 +1591,19 @@ enum SessionCommand {
     /// which fwd reads as the agent that runs it. For any other command it prints nothing, and the
     /// command runs as it would without the plugin. It needs no project and starts no daemon.
     Stamp,
+    /// The person's view of a Claude Code session, for a pane beside the chat: what each principal
+    /// bound to the session's own thread, then to its subagents, holds, in every project, as one
+    /// JSON document on one line, each record with its text and what the person can do from it.
+    ///
+    /// For each principal: the questions it asked the person that the person has not answered,
+    /// what it holds (the questions asked of it, then the tasks assigned to it), and the questions
+    /// it asked anyone else or no one in particular; its unread notifications are counted. It reads
+    /// for the person this machine's identity names (`fwd init --handle`), or the principal --as or
+    /// FWD_AS names, from any directory, and writes nothing.
+    View {
+        /// The Claude Code session's id.
+        session: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1689,6 +1712,8 @@ impl App {
     fn note(&self, line: impl Into<String>) {
         let line = line.into();
         match &self.out {
+            // A pane's press that succeeds says nothing; what it changed shows in the view.
+            Output::Stdout if self.format == Format::Pane => {}
             // A line that cannot be written has no reader left, and fails no command.
             Output::Stdout => {
                 let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("{line}\n"));
@@ -1776,7 +1801,9 @@ impl App {
         }
         match self.format {
             Format::Text => println!("{}", to_text(&value)),
-            _ => println!("{}", serde_json::to_string_pretty(&value)?),
+            // The view the pane draws shows what the command changed.
+            Format::Pane => {}
+            Format::Json | Format::Hook => println!("{}", serde_json::to_string_pretty(&value)?),
         }
         Ok(())
     }
@@ -2203,6 +2230,7 @@ const JOINING: &[(&str, Writes)] = &[
     ("graph", Writes::No),
     ("session stop-check", Writes::No),
     ("session stamp", Writes::No),
+    ("session view", Writes::No),
     ("admin migrate", Writes::No),
     ("admin bind", Writes::No),
     ("admin backup", Writes::No),
@@ -2239,11 +2267,13 @@ async fn main() -> Result<()> {
     if let Some(deadline) = prime::deadline() {
         prime::within(deadline, run_cli()).await
     }
+    let pane = Cli::try_parse().is_ok_and(|cli| cli.format == Some(Format::Pane));
     match run_cli().await {
         // A command whose daemon went away while it ran ends at once, with the exit of a command
         // that finds no daemon (docs/design/cli.md, the exit codes), and not through the runtime's
         // shutdown: its node, left without the daemon, can leave a thread stuck inside Ankurah,
         // which the shutdown would wait for (`watch::end` says how).
+        Err(error) if pane => fail_in_one_line(error),
         Err(error) if error.is::<daemon::Lost>() => fail(error, 7),
         ran => ran,
     }
@@ -2258,6 +2288,18 @@ fn fail(error: anyhow::Error, code: i32) -> ! {
     let mut err = std::io::stderr().lock();
     // A line that cannot be written has no reader left; the exit status still tells the end.
     let _ = writeln!(err, "Error: {error:?}").and_then(|()| err.flush());
+    std::process::exit(code)
+}
+
+/// Ends a command given `--format pane` after an error, as [`fail`] does, with the error as one
+/// plain line, its causes after it on the same line, which a pane shows under the row whose action
+/// failed; exit 7 for a daemon that went away, 1 for anything else.
+fn fail_in_one_line(error: anyhow::Error) -> ! {
+    use std::io::Write;
+    let code = if error.is::<daemon::Lost>() { 7 } else { 1 };
+    let said = format!("{error:#}").split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "{said}").and_then(|()| err.flush());
     std::process::exit(code)
 }
 
@@ -2296,10 +2338,14 @@ async fn run_cli() -> Result<()> {
     // directory would otherwise place (`runs_in::runs_in`).
     let project_typed = matches.value_source("project") == Some(ValueSource::CommandLine);
     let serving = matches!(cli.command, Command::Daemon { command: DaemonCommand::Serve { .. } });
+    let pane = cli.format == Some(Format::Pane);
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             if serving {
                 "info".into()
+            } else if pane {
+                // A press that succeeds prints nothing at all, and one that fails its one line.
+                "off".into()
             } else {
                 // A daemon restart is routine, and says nothing on a command's standard error
                 // (Daniel, 2026-09-26): each client loses its socket, and Ankurah's socket client
@@ -2315,9 +2361,16 @@ async fn run_cli() -> Result<()> {
         .init();
     let paths = Paths::from_env()?;
     let format = format_of(&cli);
+    // A pane runs only the commands the view's actions name, and the others print outside it.
+    if pane && !matches!(cli.command, Command::Reply { .. }) {
+        bail!("--format pane is for the commands a session view's actions run, `reply` alone; leave it off");
+    }
 
     match &cli.command {
         command if refuse_before_running(command).is_err() => return refuse_before_running(command),
+        Command::Session { command: SessionCommand::View { session } } => {
+            return session_view::print_once(&cli, &paths, session).await
+        }
         Command::Capabilities => {
             println!(
                 "{}",
@@ -5655,7 +5708,14 @@ async fn run(app: &App, command: Command) -> Result<()> {
             say_waiting(app, &m).await;
             Ok(())
         }
-        Command::Reply { id, text } => {
+        Command::Reply { id, text, text_from_stdin } => {
+            let text = match (text, text_from_stdin) {
+                (Some(text), false) => text,
+                (None, true) => {
+                    std::io::read_to_string(std::io::stdin()).context("reading the reply's text from standard input")?
+                }
+                _ => unreachable!("clap takes the text from the argument or standard input, never both or neither"),
+            };
             let (reply_to, notification) = message_behind(app, &id, true).await?;
             let posted = ops::post_settling(
                 graph,
@@ -5922,7 +5982,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                                 )?
                             );
                         }
-                        Format::Text | Format::Json => {
+                        Format::Text | Format::Json | Format::Pane => {
                             if let Some(guidance) = guidance {
                                 app.note(format!("fwd: {guidance}"));
                             }
@@ -6009,7 +6069,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 }
                 Ok(())
             }
-            SessionCommand::Stamp => unreachable!("handled before connecting"),
+            SessionCommand::Stamp | SessionCommand::View { .. } => unreachable!("handled before connecting"),
         },
     }
 }
