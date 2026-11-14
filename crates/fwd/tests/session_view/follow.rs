@@ -113,6 +113,54 @@ fn the_view_is_printed_again_when_what_it_shows_changes_and_only_then() -> Resul
     Ok(())
 }
 
+/// Each part of what the view is made from is followed, each change here reaching the stream
+/// through one live read alone: a task the agent assigns itself (the tasks assigned to it), a
+/// comment the person makes on it (its unread notifications), a subagent naming itself (the
+/// project's principals), and a project made after the stream started, where the agent then names
+/// itself (the projects, then that project's principals).
+#[test]
+fn each_part_of_what_the_view_is_made_from_is_followed() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    let stream = Stream::start(&s)?;
+    stream.document(SOON)?;
+
+    let task = s.made(&s.alpha, Some("main"), &["task", "create", "Retry on disconnect"])?;
+    s.json(&s.alpha, Some("main"), &["task", "assign", &task, "lead-sam"])?;
+    let assigned = stream.document(SOON)?;
+    assert_eq!(titles(&assigned["principals"][0], "holds"), ["Retry on disconnect"], "{assigned}");
+
+    s.made(&s.alpha, None, &["comment", &task, "Cap the wait at ten seconds."])?;
+    let told = stream.document(SOON)?;
+    assert_eq!(told["principals"][0]["tags"][2]["text"], "1 unread", "{told}");
+
+    s.json(&s.alpha, Some("a1"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let named = stream.document(SOON)?;
+    let groups = |document: &Value| -> Vec<String> {
+        document["principals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|g| format!("{} {}", g["title"], g["tags"][1]["text"]))
+            .collect()
+    };
+    assert_eq!(groups(&named), [r#""lead-sam" "alpha""#, r#""impl-sam" "alpha""#], "{named}");
+
+    let gamma = s.dir.path().join("gamma");
+    std::fs::create_dir_all(&gamma)?;
+    git(&gamma, &["init", "-q", "-b", "main"])?;
+    git(&gamma, &["remote", "add", "origin", "git@example.com:t/gamma.git"])?;
+    s.json(&gamma, None, &["init", "--name", "gamma", "--handle", "tester"])?;
+    s.json(&gamma, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    let joined = stream.document(SOON)?;
+    assert_eq!(
+        groups(&joined),
+        [r#""lead-sam" "alpha""#, r#""lead-sam" "gamma""#, r#""impl-sam" "alpha""#],
+        "{joined}"
+    );
+    Ok(())
+}
+
 /// While the stream is healthy and nothing changes, an empty line comes every 30 seconds. With
 /// the daemon stopped, the last document comes again saying the daemon is out of reach, with no
 /// page and the principals it showed; with the daemon started again, the fresh document follows.

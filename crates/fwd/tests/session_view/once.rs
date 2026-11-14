@@ -168,6 +168,18 @@ fn a_reply_takes_its_text_from_standard_input_whole_and_pane_is_for_actions_alon
     let made: Value = serde_json::from_slice(&empty.stdout)?;
     assert_eq!(made["record"]["content"], "");
 
+    // A question of another project than the one the press names, as a question moved since the
+    // view was printed is: the reply runs there, and with `--format pane` says nothing of it.
+    let elsewhere = s.made(&s.beta, None, &["ask", "--to", "tester", "Was it moved?"])?;
+    let args = ["--project", "alpha", "--as", "tester", "--format", "pane", "reply", &elsewhere, "--text-from-stdin"];
+    let moved = s.press(&args.map(str::to_string), "It was.")?;
+    assert_eq!(
+        (moved.status.code(), moved.stdout.as_slice(), moved.stderr.as_slice()),
+        (Some(0), &b""[..], &b""[..]),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+
     let both = s.command(&s.alpha, None, &["reply", &question, "words", "--text-from-stdin"]).output()?;
     assert!(!both.status.success(), "the argument and standard input are not both taken");
     let neither = s.command(&s.alpha, None, &["reply", &question]).output()?;
