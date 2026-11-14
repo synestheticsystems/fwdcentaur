@@ -140,9 +140,11 @@ async fn the_ids_a_typed_id_may_name_are_every_projects_with_their_project() -> 
     let person = fwd_core::ops::ensure_principal(&alpha, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     let ours = task(&alpha, person, "Cap").await?;
     let theirs = task(&beta, person, "Retry").await?;
-    let every = alpha.ids_in_every_project::<TaskView>().await?;
     let (alpha_record, beta_record) = (*alpha.project(), *beta.project());
-    assert!(every.contains(&(ours, alpha_record)) && every.contains(&(theirs, beta_record)), "{every:?}");
+    for (task, project) in [(ours, alpha_record), (theirs, beta_record)] {
+        let found = alpha.ids_in_every_project::<TaskView>(&task.to_base64()[..6], &[]).await?;
+        assert_eq!(found, vec![(task, project)]);
+    }
     let named = alpha.projects_named(&[alpha_record, beta_record]).await?;
     assert_eq!(named[0], (alpha_record, Whose::This));
     assert!(matches!(&named[1], (record, Whose::Other(p)) if *record == beta_record && p.name == "beta"));

@@ -1187,7 +1187,8 @@ pub async fn rename_principal(graph: &ProjectGraph, principal: EntityId, name: &
         );
     }
     // No other principal has the name; one whose id it is, or starts, is named by it all the same.
-    let by_id: Vec<&PrincipalView> = match naming::resolve(&found, name, None, &FormerIds::of(graph).await?) {
+    let former = FormerIds::from_views(&graph.own_former_ids_starting(naming::bare(name)).await?);
+    let by_id: Vec<&PrincipalView> = match naming::resolve(&found, name, None, &former) {
         naming::Named::One(q) => vec![q],
         naming::Named::Started(several) => several,
         naming::Named::NoOne | naming::Named::Shared(_) => Vec::new(),
@@ -1242,7 +1243,8 @@ pub async fn person_by_handle(graph: &ProjectGraph, name: &str) -> Result<Entity
     if let Some(p) = naming::principal_named(graph, name, Some(PrincipalKind::Human)).await? {
         return Ok(p.id());
     }
-    match naming::resolve(&principals(graph).await?, name, None, &FormerIds::of(graph).await?) {
+    let former = FormerIds::from_views(&graph.own_former_ids_starting(naming::bare(name)).await?);
+    match naming::resolve(&principals(graph).await?, name, None, &former) {
         naming::Named::NoOne => bail!("no one in this project has the handle `@{name}`"),
         _ => bail!(
             "`@{name}` is an agent, not a person: a ruling recorded on someone's word names the person who gave it"
@@ -4792,36 +4794,40 @@ impl Kind {
         }
     }
 
-    /// The id of every record of this kind in `graph`'s project, where [`locate`] looks for a
+    /// The id of each record of this kind in `graph`'s project whose id starts with `prefix`, or
+    /// which is one of `formerly` (`ProjectGraph::ids_starting`), where [`locate`] looks for a
     /// typed id first.
-    async fn ids(self, graph: &ProjectGraph) -> Result<Vec<EntityId>> {
-        fn ids<V: ankurah::model::View>(found: Vec<V>) -> Vec<EntityId> {
-            found.iter().map(|v| v.id()).collect()
-        }
+    async fn ids(self, graph: &ProjectGraph, prefix: &str, formerly: &[EntityId]) -> Result<Vec<EntityId>> {
         Ok(match self {
-            Kind::Task => ids::<TaskView>(graph.all().await?),
-            Kind::Message => ids::<MessageView>(graph.all().await?),
-            Kind::Decision => ids::<DecisionView>(graph.all().await?),
-            Kind::Scope => ids::<ScopeView>(graph.all().await?),
-            Kind::Anchor => ids::<CodeAnchorView>(graph.all().await?),
-            Kind::Relation => ids::<RelationView>(graph.all().await?),
-            Kind::Notification => ids::<NotificationView>(graph.all().await?),
-            Kind::Principal => ids::<PrincipalView>(graph.all().await?),
+            Kind::Task => graph.ids_starting::<TaskView>(prefix, formerly).await?,
+            Kind::Message => graph.ids_starting::<MessageView>(prefix, formerly).await?,
+            Kind::Decision => graph.ids_starting::<DecisionView>(prefix, formerly).await?,
+            Kind::Scope => graph.ids_starting::<ScopeView>(prefix, formerly).await?,
+            Kind::Anchor => graph.ids_starting::<CodeAnchorView>(prefix, formerly).await?,
+            Kind::Relation => graph.ids_starting::<RelationView>(prefix, formerly).await?,
+            Kind::Notification => graph.ids_starting::<NotificationView>(prefix, formerly).await?,
+            Kind::Principal => graph.ids_starting::<PrincipalView>(prefix, formerly).await?,
         })
     }
 
-    /// The id of every record of this kind in the node, with the record of its project: what a
-    /// typed id may name (`ProjectGraph::ids_in_every_project`).
-    async fn ids_in_every_project(self, graph: &ProjectGraph) -> Result<Vec<(EntityId, EntityId)>> {
+    /// The id of each record of this kind in the node whose id starts with `prefix`, or which is
+    /// one of `formerly`, with the record of its project: what a typed id may name
+    /// (`ProjectGraph::ids_in_every_project`).
+    async fn ids_in_every_project(
+        self,
+        graph: &ProjectGraph,
+        prefix: &str,
+        formerly: &[EntityId],
+    ) -> Result<Vec<(EntityId, EntityId)>> {
         Ok(match self {
-            Kind::Task => graph.ids_in_every_project::<TaskView>().await?,
-            Kind::Message => graph.ids_in_every_project::<MessageView>().await?,
-            Kind::Decision => graph.ids_in_every_project::<DecisionView>().await?,
-            Kind::Scope => graph.ids_in_every_project::<ScopeView>().await?,
-            Kind::Anchor => graph.ids_in_every_project::<CodeAnchorView>().await?,
-            Kind::Relation => graph.ids_in_every_project::<RelationView>().await?,
-            Kind::Notification => graph.ids_in_every_project::<NotificationView>().await?,
-            Kind::Principal => graph.ids_in_every_project::<PrincipalView>().await?,
+            Kind::Task => graph.ids_in_every_project::<TaskView>(prefix, formerly).await?,
+            Kind::Message => graph.ids_in_every_project::<MessageView>(prefix, formerly).await?,
+            Kind::Decision => graph.ids_in_every_project::<DecisionView>(prefix, formerly).await?,
+            Kind::Scope => graph.ids_in_every_project::<ScopeView>(prefix, formerly).await?,
+            Kind::Anchor => graph.ids_in_every_project::<CodeAnchorView>(prefix, formerly).await?,
+            Kind::Relation => graph.ids_in_every_project::<RelationView>(prefix, formerly).await?,
+            Kind::Notification => graph.ids_in_every_project::<NotificationView>(prefix, formerly).await?,
+            Kind::Principal => graph.ids_in_every_project::<PrincipalView>(prefix, formerly).await?,
         })
     }
 
@@ -4900,17 +4906,19 @@ pub async fn locate(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result<Loc
         let id = name_to_id(s, kinds, &numbered, &[], &FormerIds::default(), &|_| None)?;
         return Ok(Located { id, project: Whose::This });
     }
-    // The former ids that start with the name, of every project, which are few.
+    // The former ids that start with the name, of every project, which are few, and the records
+    // they name, which are read beside those whose ids start so.
     let former = FormerIds::from_views(&graph.former_ids_starting(s).await?);
+    let formerly: Vec<EntityId> = former.starting(s).map(|(_, record)| record).collect();
     // A start of an id names an entity of the command's project when one of its entities starts
     // so, and one of another project only when none does: the command runs where its caller
     // works, and with short starts of ids, collisions across projects are ordinary, so one here
     // and one elsewhere name the one here, and two here are refused as two, whatever starts so
-    // elsewhere. Every project's ids are read only when none of this project's matches, which
-    // also keeps a typed id of this project cheap.
+    // elsewhere. Every project's ids that start so are read only when none of this project's
+    // matches, which also keeps a typed id of this project cheap.
     let mut here: Vec<(EntityId, Kind)> = Vec::new();
     for kind in kinds {
-        here.extend(kind.ids(graph).await?.into_iter().map(|id| (id, *kind)));
+        here.extend(kind.ids(graph, s, &formerly).await?.into_iter().map(|id| (id, *kind)));
     }
     if !matching(s, kinds, &here, &former).is_empty() {
         let id = name_to_id(s, kinds, &numbered, &here, &former, &|_| None)?;
@@ -4919,7 +4927,7 @@ pub async fn locate(graph: &ProjectGraph, s: &str, kinds: &[Kind]) -> Result<Loc
     let mut found: Vec<(EntityId, Kind)> = Vec::new();
     let mut project_of: std::collections::HashMap<EntityId, EntityId> = std::collections::HashMap::new();
     for kind in kinds {
-        for (id, project) in kind.ids_in_every_project(graph).await? {
+        for (id, project) in kind.ids_in_every_project(graph, s, &formerly).await? {
             found.push((id, *kind));
             project_of.insert(id, project);
         }

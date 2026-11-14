@@ -19,10 +19,10 @@
 //!   its record is ([`ProjectGraph::follow`]), and the record comes with its project, which a
 //!   reader names beside it.
 //! - An id someone types names a record of any project (D181): the resolver reads the former ids
-//!   that start with it ([`ProjectGraph::former_ids_starting`]) and, when no record of the
-//!   project has an id that starts with it, every project's ids
-//!   ([`ProjectGraph::ids_in_every_project`]), and a command that acts on a record of another
-//!   project runs in that project, as if it had been run there.
+//!   that start with it ([`ProjectGraph::former_ids_starting`]), the project's ids that start with
+//!   it ([`ProjectGraph::ids_starting`]) and, when no record of the project has an id that starts
+//!   with it, every project's ([`ProjectGraph::ids_in_every_project`]), and a command that acts on
+//!   a record of another project runs in that project, as if it had been run there.
 //! - The routing service alone hears every project's records, through [`NodeGraph`], whose
 //!   standing queries name no project (D177), and it routes each change through the graph of the
 //!   record's own project ([`ProjectGraph::graph_of`]), so that each rule is read where its subject
@@ -207,6 +207,25 @@ fn starting(field: &str, prefix: &str) -> Predicate<Parsed> {
     let from = comparing(field, ComparisonOperator::GreaterThanOrEqual, Value::String(prefix.to_string()));
     let before = comparing(field, ComparisonOperator::LessThan, Value::String(after));
     Predicate::And(Box::new(from), Box::new(before))
+}
+
+/// The records whose id starts with `prefix`, the start of an id someone typed, read as one range
+/// of ids ([`EntityId::base64_prefix_range`]), and the records `formerly`, which the former ids that
+/// start with it name.
+fn named_by_start(prefix: &str, formerly: &[EntityId]) -> Selection<Parsed> {
+    let started = match EntityId::base64_prefix_range(prefix) {
+        Ok(ids) => Predicate::And(
+            Box::new(comparing("id", ComparisonOperator::GreaterThanOrEqual, Value::EntityId(*ids.start()))),
+            Box::new(comparing("id", ComparisonOperator::LessThanOrEqual, Value::EntityId(*ids.end()))),
+        ),
+        // A character outside an id's alphabet, more characters than an id has, or a 43rd character
+        // no id ends in: no id starts so.
+        Err(_) => Predicate::False,
+    };
+    let named = formerly
+        .iter()
+        .fold(started, |any, record| Predicate::Or(Box::new(any), Box::new(equals("id", Value::EntityId(*record)))));
+    selecting(named)
 }
 
 /// Every record a selection with this predicate is made from.
@@ -527,11 +546,28 @@ impl ProjectGraph {
         Ok(None)
     }
 
-    /// The id of every record of `V`'s model in the node, with the record of the project it is in:
-    /// what an id someone types may name, since a typed id names a record of any project (D181).
-    /// Only the command line's resolver reads it; no screen or list shows it.
-    pub async fn ids_in_every_project<V: InProjectView>(&self) -> Result<Vec<(EntityId, EntityId)>, ProjectGraphError> {
-        let every: Vec<V> = self.ctx.fetch(selecting(Predicate::True)).await?;
+    /// The id of each of the project's records of `V`'s model whose id starts with `prefix`, the
+    /// start of an id someone typed, or which is one of `formerly`, the records the former ids that
+    /// start with it name: what the resolver looks for the typed id among first.
+    pub async fn ids_starting<V: InProjectView>(
+        &self,
+        prefix: &str,
+        formerly: &[EntityId],
+    ) -> Result<Vec<EntityId>, RetrievalError> {
+        let found: Vec<V> = self.fetch(named_by_start(prefix, formerly)).await?;
+        Ok(found.iter().map(View::id).collect())
+    }
+
+    /// The id of each record of `V`'s model in the node whose id starts with `prefix`, or which is
+    /// one of `formerly`, as [`ProjectGraph::ids_starting`] reads the project's, with the record of
+    /// the project it is in: what an id someone types may name, since a typed id names a record of
+    /// any project (D181). Only the command line's resolver reads it; no screen or list shows it.
+    pub async fn ids_in_every_project<V: InProjectView>(
+        &self,
+        prefix: &str,
+        formerly: &[EntityId],
+    ) -> Result<Vec<(EntityId, EntityId)>, ProjectGraphError> {
+        let every: Vec<V> = self.ctx.fetch(named_by_start(prefix, formerly)).await?;
         Ok(every.iter().map(|v| Ok((v.id(), v.project_id()?))).collect::<Result<_, PropertyError>>()?)
     }
 
@@ -554,6 +590,16 @@ impl ProjectGraph {
             return Ok(Vec::new());
         }
         self.ctx.fetch(selecting(starting("former", prefix))).await
+    }
+
+    /// The project's own former ids that start with `prefix`, read as
+    /// [`ProjectGraph::former_ids_starting`] reads every project's: what a name that is its
+    /// project's own, a principal's, may name by a former id.
+    pub async fn own_former_ids_starting(&self, prefix: &str) -> Result<Vec<FormerIdView>, RetrievalError> {
+        if !prefix.is_ascii() {
+            return Ok(Vec::new());
+        }
+        self.fetch(selecting(starting("former", prefix))).await
     }
 
     /// The tasks assigned to `principal` that are not done, cancelled or rejected, of every

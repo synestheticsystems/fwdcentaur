@@ -106,7 +106,7 @@ pub async fn principal_named(
     let principals = ops::principals(graph).await?;
     // The former ids are read only for a name no principal has that may be an id.
     let former = if by_name(&principals, name, kind).is_empty() && ops::may_start_an_id(bare(name)) {
-        FormerIds::of(graph).await?
+        FormerIds::from_views(&graph.own_former_ids_starting(bare(name)).await?)
     } else {
         FormerIds::default()
     };
