@@ -297,3 +297,15 @@ pub(crate) async fn record_edit(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::revision;
+
+    #[test]
+    fn a_revision_tells_apart_parts_that_would_run_together_with_a_separator() {
+        assert_ne!(revision(&["a\n", "b"]), revision(&["a", "\nb"]));
+        assert_eq!(revision(&["a", "b"]).len(), 12);
+        assert_eq!(revision(&["a", "b"]), revision(&["a", "b"]));
+    }
+}

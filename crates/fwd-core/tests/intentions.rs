@@ -118,6 +118,8 @@ async fn an_intention_records_whose_words_it_holds_and_only_they_change_or_close
     assert_eq!(reworded.words, "the list stays where I left it");
     assert_eq!(reworded.authorship.edited.and_then(|e| e.by), Some(w.tide), "who wrote the change down");
     assert_ne!(reworded.revision, read.revision);
+    intentions::reword(&w.alpha, w.ines, theirs, Some("Readers keep their places"), None, None).await?;
+    assert_ne!(intentions::intention(&w.alpha, theirs).await?.revision, reworded.revision, "its title too");
 
     let withdrawn = intentions::close(&w.alpha, w.ines, theirs, IntentionStatus::Withdrawn, None, None).await;
     assert!(refusal(withdrawn).contains("--reason"));
@@ -227,6 +229,11 @@ async fn the_speaker_alone_confirms_an_agents_reading_as_it_reads_and_a_rewordin
     assert_eq!(only(&w.alpha, w.tide).await?.standing(), Standing::Unconfirmed, "reworded since it was confirmed");
     readings::confirm(&w.alpha, w.ines, agents, revision().await?, None, None).await?;
     assert_eq!(only(&w.alpha, w.tide).await?.standing(), Standing::Confirmed, "a second wordless confirmation");
+    // Ines rewords what she wants; the agent's account, read of the new wording, is a new revision.
+    intentions::reword(&w.alpha, w.ines, it, None, Some("the list keeps its place"), None).await?;
+    read(&w.alpha, w.tide, it, "the list keeps its scroll and its selection", Stance::Agree).await?;
+    assert_eq!(only(&w.alpha, w.tide).await?.standing(), Standing::Unconfirmed, "she confirmed the old wording");
+    readings::confirm(&w.alpha, w.ines, agents, revision().await?, None, None).await?;
 
     let corrected = SetReading {
         of: agents,
@@ -253,6 +260,20 @@ async fn a_confirmation_of_a_wording_no_longer_standing_does_not_confirm() -> Re
     // Ines's agreement, checked against the wording before the rewording and written after it.
     written_below(&w.alpha, w.ines, agents, Stance::Agree, &checked).await?;
     assert_eq!(only(&w.alpha, w.tide).await?.standing(), Standing::Unconfirmed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reading_that_does_not_say_which_wording_it_read_is_refused_as_broken() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w.alpha, w.ines, "Readers keep their place", None).await?;
+    let trx = w.alpha.begin();
+    let made =
+        trx.create_placed(&Reading { of: it, words: "as I read it".into(), stance: Some(Stance::Agree) }).await?;
+    let record = ankurah::model::Mutable::entity(&*made);
+    trx.add(record, &Creation { created_by: Ref::new(w.tide), created: 1 }).await?;
+    trx.commit().await?;
+    assert!(refusal(readings::readings_of(&w.alpha, it).await).contains("the wording it read"));
     Ok(())
 }
 
