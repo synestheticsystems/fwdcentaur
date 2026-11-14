@@ -356,6 +356,11 @@ pub enum RelationKind {
     /// `[[D12]]`), one edge per reference, written with the text; `via` records that it was
     /// inline and its place among the message's references.
     Mention,
+    /// Principal -> Intention: what governs the principal's current work, an intention of any
+    /// project (`crate::intentions::works_under`).
+    WorksUnder,
+    /// Task or Intention -> Intention: the work, or the narrower aim, is for the broader one.
+    Serves,
 }
 string_enum_property!(RelationKind);
 

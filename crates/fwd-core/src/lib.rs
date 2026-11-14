@@ -25,6 +25,7 @@ pub mod dormancy;
 pub mod file_mention;
 pub mod former_ids;
 pub mod guidance;
+pub mod intentions;
 pub mod labels;
 pub mod model;
 pub mod naming;

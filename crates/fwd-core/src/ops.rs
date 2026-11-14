@@ -15,6 +15,7 @@ use crate::rules::{self, DecisionMove, Edge, Readiness, TaskSnapshot, Verb};
 use crate::subject;
 use ankurah::property::{Json, Ref};
 use ankurah::EntityId;
+use ankurah_commons::intention_graph::{IntentionView, ReadingView};
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde_json::{json, Value};
 
@@ -1381,6 +1382,7 @@ pub fn joins(kind: RelationKind) -> &'static [Join] {
     const MESSAGE: End = OneOf(&[Kind::Message]);
     const DECISION: End = OneOf(&[Kind::Decision]);
     const TASK_OR_MESSAGE: End = OneOf(&[Kind::Task, Kind::Message]);
+    const INTENTION: End = OneOf(&[Kind::Intention]);
     match kind {
         RelationKind::DependsOn | RelationKind::SubtaskOf | RelationKind::Duplicates => {
             &[Join { from: TASK, to: TASK }]
@@ -1397,6 +1399,8 @@ pub fn joins(kind: RelationKind) -> &'static [Join] {
         ],
         RelationKind::Mention => &[Join { from: MESSAGE, to: Anything }],
         RelationKind::RelatesTo => &[Join { from: Anything, to: Anything }],
+        RelationKind::WorksUnder => &[Join { from: OneOf(&[Kind::Principal]), to: INTENTION }],
+        RelationKind::Serves => &[Join { from: OneOf(&[Kind::Task, Kind::Intention]), to: INTENTION }],
     }
 }
 
@@ -1416,6 +1420,8 @@ pub const LINKED: &[RelationKind] = &[
     RelationKind::StepOf,
     RelationKind::Concerns,
     RelationKind::Cites,
+    RelationKind::WorksUnder,
+    RelationKind::Serves,
 ];
 
 /// What a relation of `kind` joins, as `fwd link --help` and its refusals say it: `a task to a
@@ -1549,8 +1555,8 @@ pub async fn link(
             );
         }
     }
-    if kind == RelationKind::WorkedIn {
-        let existing = relations_from(graph, from, Some(RelationKind::WorkedIn)).await?;
+    if matches!(kind, RelationKind::WorkedIn | RelationKind::WorksUnder | RelationKind::Serves) {
+        let existing = relations_from(graph, from, Some(kind)).await?;
         let accepted = |r: &&RelationView| r.status().ok() == Some(RelationStatus::Accepted);
         if let Some(same) = existing.iter().filter(accepted).find(|r| r.to_id().ok() == Some(to)) {
             return Ok(same.id());
@@ -3826,6 +3832,7 @@ pub fn named(referent: &Referent) -> (Kind, String) {
         Referent::Message { words, .. } => (Kind::Message, format!("“{words}”")),
         Referent::Relation { kind } => (Kind::Relation, format!("a {kind} relation")),
         Referent::Principal { handle } => (Kind::Principal, format!("@{handle}")),
+        Referent::Intention { title, .. } => (Kind::Intention, title.clone()),
     }
 }
 
@@ -4776,6 +4783,8 @@ pub enum Kind {
     Notification,
     /// A person or an agent: named inline in a message's text, never as a command's id argument.
     Principal,
+    Intention,
+    Reading,
 }
 
 impl Kind {
@@ -4789,6 +4798,8 @@ impl Kind {
             Kind::Relation => "relation",
             Kind::Notification => "notification",
             Kind::Principal => "principal",
+            Kind::Intention => "intention",
+            Kind::Reading => "reading",
         }
     }
 
@@ -4797,6 +4808,9 @@ impl Kind {
     async fn ids(self, graph: &ProjectGraph) -> Result<Vec<EntityId>> {
         fn ids<V: ankurah::model::View>(found: Vec<V>) -> Vec<EntityId> {
             found.iter().map(|v| v.id()).collect()
+        }
+        fn placed_ids<V>(found: Vec<(PlacementView, V)>) -> Vec<EntityId> {
+            found.iter().map(|(p, _)| p.id()).collect()
         }
         Ok(match self {
             Kind::Task => ids::<TaskView>(graph.all().await?),
@@ -4807,6 +4821,8 @@ impl Kind {
             Kind::Relation => ids::<RelationView>(graph.all().await?),
             Kind::Notification => ids::<NotificationView>(graph.all().await?),
             Kind::Principal => ids::<PrincipalView>(graph.all().await?),
+            Kind::Intention => placed_ids::<IntentionView>(graph.all_placed().await?),
+            Kind::Reading => placed_ids::<ReadingView>(graph.all_placed().await?),
         })
     }
 
@@ -4822,6 +4838,8 @@ impl Kind {
             Kind::Relation => graph.ids_in_every_project::<RelationView>().await?,
             Kind::Notification => graph.ids_in_every_project::<NotificationView>().await?,
             Kind::Principal => graph.ids_in_every_project::<PrincipalView>().await?,
+            Kind::Intention => graph.placed_ids_in_every_project::<IntentionView>().await?,
+            Kind::Reading => graph.placed_ids_in_every_project::<ReadingView>().await?,
         })
     }
 
@@ -4835,6 +4853,15 @@ impl Kind {
                 Followed::NotHeld => None,
             })
         }
+        async fn placed<V: ankurah::model::View>(
+            graph: &ProjectGraph,
+            id: EntityId,
+        ) -> Result<Option<(EntityId, Whose)>> {
+            Ok(match graph.follow_placed::<V>(id).await? {
+                Followed::Held { record, project, .. } => Some((record, project)),
+                Followed::NotHeld => None,
+            })
+        }
         match self {
             Kind::Task => held::<TaskView>(graph, id).await,
             Kind::Message => held::<MessageView>(graph, id).await,
@@ -4844,12 +4871,15 @@ impl Kind {
             Kind::Relation => held::<RelationView>(graph, id).await,
             Kind::Notification => held::<NotificationView>(graph, id).await,
             Kind::Principal => held::<PrincipalView>(graph, id).await,
+            Kind::Intention => placed::<IntentionView>(graph, id).await,
+            Kind::Reading => placed::<ReadingView>(graph, id).await,
         }
     }
 }
 
 /// Every kind of entity a command line names by id.
-pub const ANY: &[Kind] = &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scope, Kind::Anchor, Kind::Relation];
+pub const ANY: &[Kind] =
+    &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scope, Kind::Anchor, Kind::Relation, Kind::Intention];
 
 /// The shortest prefix of an id that a command line takes for the whole id.
 pub const MIN_PREFIX: usize = 6;

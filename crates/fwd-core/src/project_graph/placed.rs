@@ -5,13 +5,15 @@
 //! project's, or followed into whichever project it is in; a transaction places what it makes in
 //! its own project and changes only that project's records.
 
-use super::{Followed, InProjectView, ProjectGraph, ProjectGraphError, ProjectTransaction};
+use super::{equals, selecting, Followed, InProjectView, ProjectGraph, ProjectGraphError, ProjectTransaction};
 use crate::model::{Placement, PlacementView};
-use ankurah::ankql::ast::Parsed;
+use ankurah::ankql::ast::{Parsed, Predicate};
 use ankurah::entity::LocalTrxEntity;
 use ankurah::error::RetrievalError;
 use ankurah::model::{ComponentViews, MutableBorrow};
-use ankurah::{EntityId, MatchArgs, Model, View};
+use ankurah::property::PropertyError;
+use ankurah::{EntityId, MatchArgs, Model, Value, View};
+use ankurah_commons::intention_graph::ReadingView;
 
 impl ProjectGraph {
     /// The project's placed records that `args` selects, each read through its `Placement` and
@@ -22,6 +24,40 @@ impl ProjectGraph {
     ) -> Result<Vec<(PlacementView, R)>, RetrievalError> {
         let args = args.try_into().map_err(Into::into)?;
         self.ctx.fetch(self.scoped(args)).await
+    }
+
+    /// Every record of the project's placed with `R`'s components.
+    pub async fn all_placed<R: ComponentViews>(&self) -> Result<Vec<(PlacementView, R)>, RetrievalError> {
+        self.ctx.fetch(self.everything()).await
+    }
+
+    /// The id of every record in the node placed with `R`'s components, with the record of its
+    /// project, as [`ProjectGraph::ids_in_every_project`] reads fwd's own models: what an id
+    /// someone types may name (D181).
+    pub async fn placed_ids_in_every_project<R: ComponentViews>(
+        &self,
+    ) -> Result<Vec<(EntityId, EntityId)>, ProjectGraphError> {
+        let every: Vec<(PlacementView, R)> = self.ctx.fetch(selecting(Predicate::True)).await?;
+        Ok(every.iter().map(|(p, _)| Ok((p.id(), p.project_id()?))).collect::<Result<_, PropertyError>>()?)
+    }
+
+    /// The readings of the record `of`, whichever project placed them: a record's readings show on
+    /// it wherever they were written, as its relations do (D176).
+    pub async fn readings_of(&self, of: EntityId) -> Result<Vec<(PlacementView, ReadingView)>, RetrievalError> {
+        self.ctx.fetch(selecting(equals("of", Value::EntityId(of)))).await
+    }
+
+    /// The component `V` of the placed record `placement` is on; none when the record does not
+    /// carry it, as a record carries `LastEdit` only once edited and `Attribution` only when
+    /// someone else wrote its words down.
+    pub async fn component_of<V: View>(&self, placement: &PlacementView) -> Result<Option<V>, RetrievalError> {
+        // A view of a model the node has not bound is refused before it looks at the record.
+        self.ctx.resolve_model_id::<V::Model>().await?;
+        match V::from_entity(placement.entity().clone()) {
+            Ok(component) => Ok(Some(component)),
+            Err(RetrievalError::MissingComponent { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// The project's placed record `id`, read through its `Placement` and `R`'s components. A
