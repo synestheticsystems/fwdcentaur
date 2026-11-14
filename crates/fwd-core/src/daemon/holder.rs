@@ -348,8 +348,9 @@ mod tests {
     #[tokio::test]
     async fn a_lock_held_by_a_process_that_names_no_daemon_is_not_taken_for_no_daemon() {
         let dir = tempfile::tempdir().expect("a temp dir");
+        let never_made = Paths { runtime_dir: dir.path().join("never made"), data_dir: dir.path().join("data") };
+        assert!(matches!(find(&never_made).await.expect("found"), Found::Absent), "no runtime folder, so no lock");
         let paths = paths(dir.path());
-        assert!(matches!(find(&paths).await.expect("found"), Found::Absent), "no lock was ever made");
         drop(try_lock(&paths.lifetime_lock()).expect("the lock").expect("free"));
         assert!(matches!(find(&paths).await.expect("found"), Found::Absent), "a lock no one holds");
 
@@ -363,6 +364,20 @@ mod tests {
             Found::Unreached(daemon) => assert_eq!((daemon.holder, daemon.why), (this, Unreached::NotListening)),
             other => panic!("found {other:?} where the lock names this process"),
         }
+    }
+
+    /// The lifetime lock is tried only under the bootstrap lock, so that a daemon a launcher has just
+    /// spawned never finds it taken for that moment and exits: while another holds the bootstrap
+    /// lock, a free lifetime lock is not taken for no daemon, and the wait for the bootstrap lock
+    /// ends in its own error.
+    #[tokio::test]
+    async fn the_lifetime_lock_is_tried_only_under_the_bootstrap_lock() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let paths = paths(dir.path());
+        drop(try_lock(&paths.lifetime_lock()).expect("the lock").expect("free"));
+        let _bootstrap = try_lock(&paths.bootstrap_lock()).expect("the bootstrap lock").expect("free");
+        let error = find(&paths).await.expect_err("the bootstrap lock stays held");
+        assert!(error.to_string().starts_with("timed out waiting for the bootstrap lock"), "{error:#}");
     }
 
     /// A launcher that gives up waiting for the bootstrap lock, which another launcher holds while
