@@ -60,7 +60,7 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
         trx.add(record, &Creation { created_by: Ref::new(agent), created: 1_700_000_000_000 }).await?;
         trx.add(record, &Attribution { speaker: Ref::new(person) }).await?;
         let twice = trx.add(record, &Attribution { speaker: Ref::new(agent) }).await;
-        assert!(matches!(twice, Err(ProjectGraphError::Carried { .. })), "a component it carries: {twice:?}");
+        assert!(matches!(twice, Err(ProjectGraphError::AlreadyCarried { .. })), "a component it carries: {twice:?}");
         let intention = made.id();
         trx.commit().await?;
 

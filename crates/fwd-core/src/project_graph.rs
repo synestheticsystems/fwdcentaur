@@ -170,7 +170,7 @@ pub enum ProjectGraphError {
     /// A component was to be added to a record that carries it already
     /// ([`ProjectTransaction::add`]).
     #[error("the record carries `{label}` already")]
-    Carried { label: &'static str },
+    AlreadyCarried { label: &'static str },
     #[error(transparent)]
     Retrieval(Box<RetrievalError>),
     #[error(transparent)]

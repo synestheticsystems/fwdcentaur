@@ -940,6 +940,17 @@ pub struct Placement {
     pub project: Ref<Project>,
 }
 
+/// Which wording of a record a reading read: the revision (`crate::intentions::revision`) of the
+/// intention or reading it reads, as it stood when the reading was last written, so that a
+/// confirmation counts only for the words it answered. fwd's own, on the reading's entity, since
+/// the Commons' `Reading` names the record read but not its wording, and leaves which words were
+/// read to clocks.
+#[derive(Model, Debug, Clone, Serialize, Deserialize)]
+pub struct WordingRead {
+    #[active_type(LWW)]
+    pub revision: String,
+}
+
 // ---------------------------------------------------------------------------------------------
 // FormerId
 

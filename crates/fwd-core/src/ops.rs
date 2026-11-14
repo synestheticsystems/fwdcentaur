@@ -1526,8 +1526,10 @@ pub async fn link(
             return Ok(r.id());
         }
     }
-    if kind == RelationKind::Cites {
-        let already = relations_from(graph, from, Some(RelationKind::Cites)).await?;
+    // Made once per pair: linking again answers the relation that stands, and accepts one that was
+    // only proposed.
+    if matches!(kind, RelationKind::Cites | RelationKind::WorksUnder | RelationKind::Serves) {
+        let already = relations_from(graph, from, Some(kind)).await?;
         if let Some(r) = already.iter().find(|r| r.to_id().ok() == Some(to) && standing(r)) {
             if !propose && r.status()? == RelationStatus::Proposed {
                 let trx = graph.begin();
@@ -1555,8 +1557,8 @@ pub async fn link(
             );
         }
     }
-    if matches!(kind, RelationKind::WorkedIn | RelationKind::WorksUnder | RelationKind::Serves) {
-        let existing = relations_from(graph, from, Some(kind)).await?;
+    if kind == RelationKind::WorkedIn {
+        let existing = relations_from(graph, from, Some(RelationKind::WorkedIn)).await?;
         let accepted = |r: &&RelationView| r.status().ok() == Some(RelationStatus::Accepted);
         if let Some(same) = existing.iter().filter(accepted).find(|r| r.to_id().ok() == Some(to)) {
             return Ok(same.id());

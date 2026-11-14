@@ -20,6 +20,7 @@ use ankurah::EntityId;
 use anyhow::{bail, Result};
 use fwd_core::daemon;
 use fwd_core::former_ids::FormerIds;
+use fwd_core::intentions::readings::ChangedSinceRead;
 use fwd_core::model::{RelationKind, RelationView};
 use fwd_core::ops::{self, Kind};
 use fwd_core::project::Paths;
@@ -213,9 +214,10 @@ impl RanIn {
     /// as it is, with the error it caused as its source, for `main` to end the command with its exit
     /// code at once: the daemon's client attaches it to that error as its context
     /// (`Client::while_connected`), which anyhow's typed check finds and a walk of the error's
-    /// sources does not.
+    /// sources does not. So is a record read at a revision that no longer stands
+    /// (`ChangedSinceRead`), whose one line names the record and ends the command with exit 5.
     pub(crate) fn failure(&self, error: anyhow::Error) -> anyhow::Error {
-        if error.is::<daemon::Lost>() {
+        if error.is::<daemon::Lost>() || error.is::<ChangedSinceRead>() {
             return error;
         }
         let moved = error.chain().find_map(|e| match e.downcast_ref::<ProjectGraphError>() {

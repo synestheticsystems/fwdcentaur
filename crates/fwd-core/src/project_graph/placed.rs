@@ -100,8 +100,12 @@ impl ProjectTransaction {
         &'trx self,
         model: &M,
     ) -> Result<MutableBorrow<'rec, M::Mutable>, ProjectGraphError> {
+        // Bound before the record is made, so that nothing that can fail comes between making the
+        // record and placing it.
+        let placement = self.ctx.resolve_model_id::<Placement>().await.map_err(RetrievalError::from)?;
         let made = self.trx.create(model).await?;
-        self.add(ankurah::model::Mutable::entity(&*made), &Placement { project: self.project() }).await?;
+        let record = ankurah::model::Mutable::entity(&*made);
+        Placement { project: self.project() }.initialize_new_entity(record, placement, record.system_epoch())?;
         Ok(made)
     }
 
@@ -110,7 +114,7 @@ impl ProjectTransaction {
     pub async fn add<M: Model>(&self, record: &LocalTrxEntity, component: &M) -> Result<(), ProjectGraphError> {
         let model = self.ctx.resolve_model_id::<M>().await.map_err(RetrievalError::from)?;
         if record.has_membership(&model) {
-            return Err(ProjectGraphError::Carried { label: M::descriptor().label });
+            return Err(ProjectGraphError::AlreadyCarried { label: M::descriptor().label });
         }
         Ok(component.initialize_new_entity(record, model, record.system_epoch())?)
     }

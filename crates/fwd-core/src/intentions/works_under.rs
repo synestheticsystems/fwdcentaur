@@ -1,10 +1,11 @@
 //! What a principal works under, read in one go: the intentions its accepted `works_under`
-//! relations name, of any project, each with the principal's own reading of it and whether the
-//! intention's speaker confirmed that reading, so that an agent coming back to its work sees first
-//! what governs it, and where its understanding is in doubt.
+//! relations name, of any project, each with the principal's own reading of it and the speaker's
+//! reading of that, so that an agent coming back to its work sees first what governs it, and where
+//! its understanding is in doubt or was corrected. Where each stands is judged by revisions, the
+//! wordings each reading read, and never by clocks.
 
-use super::readings::{confirmation, party_reading, readings_of, Confirmation, ReadingRecord};
-use super::{IntentionRecord, Parts};
+use super::readings::{party_reading, readings_of, ReadingRecord};
+use super::{closing, IntentionRecord, Parts};
 use crate::model::RelationKind;
 use crate::project_graph::{Followed, ProjectGraph, Whose};
 use crate::rules;
@@ -19,24 +20,48 @@ pub struct WorkingIntention {
     pub intention: IntentionRecord,
     /// The project it is placed in, which a reader names beside it when it is another.
     pub project: Whose,
-    /// The principal's own reading of it.
+    /// The principal's own standing reading of it.
     pub reading: Option<ReadingRecord>,
-    /// The speaker's confirmation of that reading, while its words stand.
-    pub confirmation: Option<Confirmation>,
-    /// Whether the intention's words changed after the reading last did.
-    pub reworded_since_reading: bool,
+    /// The intention's speaker's standing reading of that reading, whatever its stance.
+    pub speakers_reading: Option<ReadingRecord>,
 }
 
 impl WorkingIntention {
-    /// Where it stands, which orders a list: those to discuss first, meaning a reading that
-    /// questions or disagrees, then those with no reading, then a reading not confirmed, then the
-    /// confirmed ones.
+    /// Whether the principal's reading read a wording of the intention that no longer stands.
+    pub fn reworded_since_reading(&self) -> bool {
+        self.reading.as_ref().is_some_and(|r| r.read != self.intention.revision)
+    }
+
+    /// Whether the speaker agrees with the principal's reading as it reads now.
+    pub fn confirmed(&self) -> bool {
+        match (&self.reading, &self.speakers_reading) {
+            (Some(reading), Some(speakers)) => {
+                speakers.stance == Some(Stance::Agree) && speakers.read == reading.revision
+            }
+            _ => false,
+        }
+    }
+
+    /// Where it stands, which orders a list: an intention since fulfilled or withdrawn first, whose
+    /// link wants reviewing; then what is to discuss, a reading that questions or disagrees, the
+    /// principal's or the speaker's of it; then an intention reworded since the principal read it;
+    /// then one with no reading; then a reading not confirmed; then the confirmed ones.
     pub fn standing(&self) -> Standing {
-        match (&self.reading, &self.confirmation) {
-            (Some(r), _) if matches!(r.stance, Some(Stance::Question | Stance::Disagree)) => Standing::ToDiscuss,
-            (None, _) => Standing::Unread,
-            (Some(_), None) => Standing::Unconfirmed,
-            (Some(_), Some(_)) => Standing::Confirmed,
+        let doubts = |r: &Option<ReadingRecord>| {
+            r.as_ref().is_some_and(|r| matches!(r.stance, Some(Stance::Question | Stance::Disagree)))
+        };
+        if closing(self.intention.status) {
+            Standing::Ended
+        } else if doubts(&self.reading) || doubts(&self.speakers_reading) {
+            Standing::ToDiscuss
+        } else if self.reworded_since_reading() {
+            Standing::Reworded
+        } else if self.reading.is_none() {
+            Standing::Unread
+        } else if self.confirmed() {
+            Standing::Confirmed
+        } else {
+            Standing::Unconfirmed
         }
     }
 }
@@ -45,7 +70,9 @@ impl WorkingIntention {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum Standing {
+    Ended,
     ToDiscuss,
+    Reworded,
     Unread,
     Unconfirmed,
     Confirmed,
@@ -77,14 +104,97 @@ pub async fn works_under(graph: &ProjectGraph, principal: EntityId) -> Result<Wo
         };
         let intention = IntentionRecord::read(graph, &placement, &parts).await?;
         let reading = party_reading(&readings_of(graph, intention.id).await?, principal).cloned();
-        let confirmation = match &reading {
-            Some(r) => confirmation(r, intention.authorship.speaker, &readings_of(graph, r.id).await?),
+        let speakers_reading = match &reading {
+            Some(r) => party_reading(&readings_of(graph, r.id).await?, intention.authorship.speaker).cloned(),
             None => None,
         };
-        let reworded_since_reading =
-            reading.as_ref().is_some_and(|r| intention.authorship.changed() > r.authorship.changed());
-        intentions.push(WorkingIntention { intention, project, reading, confirmation, reworded_since_reading });
+        intentions.push(WorkingIntention { intention, project, reading, speakers_reading });
     }
     intentions.sort_by_key(|w| (w.standing(), w.intention.id));
     Ok(WorksUnder { intentions, not_held })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intentions::Authorship;
+    use ankurah_commons::intention_graph::IntentionStatus;
+
+    fn id(n: u8) -> EntityId {
+        EntityId::from_bytes([n; 32])
+    }
+
+    fn by(party: u8) -> Authorship {
+        Authorship { written_by: id(party), written: 0, speaker: id(party), edited: None }
+    }
+
+    /// An intention of revision `revision`, with `status`.
+    fn intention(revision: &str, status: IntentionStatus) -> IntentionRecord {
+        IntentionRecord {
+            id: id(1),
+            project: id(0),
+            title: String::new(),
+            words: String::new(),
+            status,
+            authorship: by(9),
+            closed: None,
+            revision: revision.into(),
+        }
+    }
+
+    /// A reading of revision `revision` by `party`, with `stance`, that read `read`.
+    fn reading(party: u8, stance: Stance, read: &str, revision: &str) -> ReadingRecord {
+        ReadingRecord {
+            id: id(party),
+            project: id(0),
+            of: id(1),
+            words: String::new(),
+            stance: Some(stance),
+            authorship: by(party),
+            read: read.into(),
+            revision: revision.into(),
+        }
+    }
+
+    fn working(
+        status: IntentionStatus,
+        own: Option<ReadingRecord>,
+        speakers: Option<ReadingRecord>,
+    ) -> WorkingIntention {
+        WorkingIntention {
+            intention: intention("i2", status),
+            project: Whose::This,
+            reading: own,
+            speakers_reading: speakers,
+        }
+    }
+
+    #[test]
+    fn the_speakers_agreement_confirms_the_reading_it_read_and_no_later_one() {
+        let open = IntentionStatus::Committed;
+        let agents = || Some(reading(7, Stance::Agree, "i2", "r2"));
+        let agreeing = |read: &str| Some(reading(9, Stance::Agree, read, "s"));
+        assert_eq!(working(open, agents(), agreeing("r2")).standing(), Standing::Confirmed);
+        assert_eq!(working(open, agents(), agreeing("r1")).standing(), Standing::Unconfirmed, "an earlier wording");
+        assert_eq!(working(open, agents(), None).standing(), Standing::Unconfirmed);
+    }
+
+    #[test]
+    fn standing_puts_an_ended_intention_first_then_doubts_then_rewordings_then_the_rest() {
+        let open = IntentionStatus::Committed;
+        let agrees = Some(reading(7, Stance::Agree, "i2", "r2"));
+        let confirms = Some(reading(9, Stance::Agree, "r2", "s"));
+        let ended = working(IntentionStatus::Withdrawn, agrees.clone(), confirms.clone());
+        assert_eq!(ended.standing(), Standing::Ended);
+        let disputed = working(open, agrees.clone(), Some(reading(9, Stance::Disagree, "r2", "s")));
+        assert_eq!(disputed.standing(), Standing::ToDiscuss, "the speaker's disagreement");
+        let questioning = working(open, Some(reading(7, Stance::Question, "i2", "r2")), None);
+        assert_eq!(questioning.standing(), Standing::ToDiscuss, "the principal's own question");
+        let reworded = working(open, Some(reading(7, Stance::Agree, "i1", "r2")), confirms);
+        assert!(reworded.reworded_since_reading());
+        assert_eq!(reworded.standing(), Standing::Reworded, "read an earlier wording of the intention");
+        assert_eq!(working(open, None, None).standing(), Standing::Unread);
+        let order = [Standing::Ended, Standing::ToDiscuss, Standing::Reworded, Standing::Unread, Standing::Unconfirmed];
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]) && Standing::Unconfirmed < Standing::Confirmed);
+    }
 }

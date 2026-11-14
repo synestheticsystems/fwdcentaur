@@ -9,9 +9,10 @@
 pub mod readings;
 pub mod works_under;
 
-use crate::model::PlacementView;
+use crate::model::{PlacementView, PrincipalKind, PrincipalView};
 use crate::now_ms;
-use crate::project_graph::{InProjectView, ProjectGraph, ProjectTransaction};
+use crate::project_graph::{Followed, InProjectView, ProjectGraph, ProjectTransaction};
+use crate::rules;
 use ankurah::entity::LocalTrxEntity;
 use ankurah::property::Ref;
 use ankurah::EntityId;
@@ -21,6 +22,7 @@ use ankurah_commons::records::{
     Attribution, AttributionView, Closure, ClosureView, Creation, CreationView, LastEdit, LastEditView,
 };
 use anyhow::{bail, Result};
+use sha2::{Digest, Sha256};
 
 /// The components every intention carries, which a list reads it through.
 pub type Parts = (IntentionView, CreationView);
@@ -30,6 +32,34 @@ pub type Parts = (IntentionView, CreationView);
 /// principal (`model::Principal`), which does not carry the Commons' principal component yet.
 pub(crate) fn principal_ref(id: EntityId) -> Ref<CommonsPrincipal> {
     Ref::new(id)
+}
+
+/// How many bytes of the SHA-256 a revision gives, as hex: enough to tell one wording from the
+/// next, short enough to pass back on a command line.
+const REVISION_BYTES: usize = 6;
+
+/// The revision of a wording made of `parts`: the start of the SHA-256 of each part's length and
+/// bytes in turn, so that no two lists of parts run together into one.
+pub fn revision(parts: &[&str]) -> String {
+    let mut hash = Sha256::new();
+    for part in parts {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    hash.finalize()[..REVISION_BYTES].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The principal `said_by` names, with its kind, wherever in the node it is: whose words a write
+/// records ([`rules::party_of`]).
+pub(crate) async fn said_by(
+    graph: &ProjectGraph,
+    said_by: Option<EntityId>,
+) -> Result<Option<(EntityId, PrincipalKind)>> {
+    let Some(id) = said_by else { return Ok(None) };
+    match graph.follow::<PrincipalView>(id).await? {
+        Followed::Held { record, found, .. } => Ok(Some((record, found.kind()?))),
+        Followed::NotHeld => bail!("--said-by names no principal the node holds: {}", id.to_base64()),
+    }
 }
 
 /// When a record's words last changed, and who changed them.
@@ -94,6 +124,8 @@ pub struct IntentionRecord {
     pub status: IntentionStatus,
     pub authorship: Authorship,
     pub closed: Option<Closed>,
+    /// [`revision`] of its title and words, which a reading of it records as the wording it read.
+    pub revision: String,
 }
 
 impl IntentionRecord {
@@ -107,11 +139,13 @@ impl IntentionRecord {
             Some(c) => Some(Closed { at: c.closed()?, by: c.closed_by()?.map(|r| *r), reason: c.reason()? }),
             None => None,
         };
+        let (title, words) = (intention.title()?, intention.words()?);
         Ok(IntentionRecord {
             id: placement.id(),
             project: placement.project_id()?,
-            title: intention.title()?,
-            words: intention.words()?,
+            revision: revision(&[&title, &words]),
+            title,
+            words,
             status: intention.status()?,
             authorship: Authorship::of(graph, placement, creation).await?,
             closed,
@@ -140,7 +174,7 @@ pub async fn intention(graph: &ProjectGraph, id: EntityId) -> Result<IntentionRe
 pub struct NewIntention {
     pub title: String,
     pub words: String,
-    /// Whose words they are, when the principal writing them down is someone else.
+    /// Whose words they are, a person's, when the principal writing them down is someone else.
     pub said_by: Option<EntityId>,
     /// Wished or committed: an intention is fulfilled or withdrawn afterwards.
     pub status: IntentionStatus,
@@ -155,11 +189,12 @@ pub async fn create(graph: &ProjectGraph, by: EntityId, new: NewIntention) -> Re
     if closing(new.status) {
         bail!("an intention is recorded wished or committed, and fulfilled or withdrawn afterwards");
     }
+    let speaker = rules::party_of(by, said_by(graph, new.said_by).await?)?;
     let trx = graph.begin();
     let made = trx.create_placed(&Intention { title: title.to_string(), words: new.words, status: new.status }).await?;
     let record = ankurah::model::Mutable::entity(&*made);
     trx.add(record, &Creation { created_by: principal_ref(by), created: now_ms() }).await?;
-    if let Some(speaker) = new.said_by.filter(|speaker| *speaker != by) {
+    if speaker != by {
         trx.add(record, &Attribution { speaker: principal_ref(speaker) }).await?;
     }
     let id = made.id();
@@ -167,24 +202,30 @@ pub async fn create(graph: &ProjectGraph, by: EntityId, new: NewIntention) -> Re
     Ok(id)
 }
 
-/// Gives the intention `id` a new title, new words, or both, as `by` rewords it; whatever is
-/// given as it stands changes nothing, and nothing at all is written when nothing changes. True
-/// when it changed.
+/// Gives the intention `id` a new title, new words, or both, as `by` rewords it, in its speaker's
+/// words: `by`'s own, or those of the person `said_by` names ([`rules::can_change_words`]). One
+/// fulfilled or withdrawn is not reworded. Whatever is given as it stands changes nothing, and
+/// nothing at all is written when nothing changes. True when it changed.
 pub async fn reword(
     graph: &ProjectGraph,
     by: EntityId,
     id: EntityId,
     title: Option<&str>,
     words: Option<&str>,
+    said_by: Option<EntityId>,
 ) -> Result<bool> {
-    let (placement, intention) = graph.get_placed::<IntentionView>(id).await?;
+    let (placement, parts) = graph.get_placed::<Parts>(id).await?;
+    let intention = IntentionRecord::read(graph, &placement, &parts).await?;
+    if closing(intention.status) {
+        bail!("the intention is {}, and is not reworded", intention.status);
+    }
+    rules::can_change_words(intention.authorship.speaker, rules::party_of(by, self::said_by(graph, said_by).await?)?)?;
     let title = title.map(str::trim);
     if title.is_some_and(str::is_empty) {
         bail!("an intention's title cannot be blank");
     }
-    let (old_title, old_words) = (intention.title()?, intention.words()?);
-    let new_title = title.filter(|t| *t != old_title);
-    let new_words = words.filter(|w| *w != old_words);
+    let new_title = title.filter(|t| *t != intention.title);
+    let new_words = words.filter(|w| *w != intention.words);
     if new_title.is_none() && new_words.is_none() {
         return Ok(false);
     }
@@ -201,22 +242,28 @@ pub async fn reword(
     Ok(true)
 }
 
-/// Marks the intention `id` fulfilled or withdrawn, as `by` closes it, with why.
+/// Marks the intention `id` fulfilled or withdrawn, as `by` closes it in its speaker's words, as
+/// [`reword`] takes them, with why: a withdrawal says why, as a task's cancellation does.
 pub async fn close(
     graph: &ProjectGraph,
     by: EntityId,
     id: EntityId,
     status: IntentionStatus,
     reason: Option<String>,
+    said_by: Option<EntityId>,
 ) -> Result<()> {
     if !closing(status) {
         bail!("an intention is closed as fulfilled or withdrawn, not {status}");
     }
-    let (placement, intention) = graph.get_placed::<IntentionView>(id).await?;
-    let now = intention.status()?;
-    if closing(now) {
-        bail!("the intention is {now} already");
+    if status == IntentionStatus::Withdrawn && reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+        bail!("an intention is withdrawn with a reason: give --reason");
     }
+    let (placement, parts) = graph.get_placed::<Parts>(id).await?;
+    let intention = IntentionRecord::read(graph, &placement, &parts).await?;
+    if closing(intention.status) {
+        bail!("the intention is {} already", intention.status);
+    }
+    rules::can_change_words(intention.authorship.speaker, rules::party_of(by, self::said_by(graph, said_by).await?)?)?;
     let trx = graph.begin();
     let m = trx.edit_placed::<Intention>(&placement)?;
     m.status()?.set(&status)?;
@@ -226,7 +273,7 @@ pub async fn close(
 }
 
 /// Whether `status` is one an intention ends in.
-fn closing(status: IntentionStatus) -> bool {
+pub(crate) fn closing(status: IntentionStatus) -> bool {
     matches!(status, IntentionStatus::Fulfilled | IntentionStatus::Withdrawn)
 }
 

@@ -31,8 +31,8 @@ impl Scratch {
         Ok(s)
     }
 
-    /// `fwd --format json <args>` in `dir`, reaching this scratch daemon only, as the person, or,
-    /// stamped as the fwd plugin stamps a command, as the session's agent `agent`, with `stdin`.
+    /// `fwd <args>` in `dir`, reaching this scratch daemon only, as the person, or, stamped as the
+    /// fwd plugin stamps a command, as the session's agent `agent`, with `stdin`.
     fn run(&self, dir: &Path, agent: Option<&str>, args: &[&str], stdin: &str) -> Result<Output> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fwd"));
         command
@@ -48,20 +48,15 @@ impl Scratch {
         if let Some(agent) = agent {
             command.env("FWD_CLAUDE_SESSION", SESSION).env("FWD_CLAUDE_AGENT", agent);
         }
-        let mut child = command
-            .args(["--format", "json"])
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut child =
+            command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?.write_all(stdin.as_bytes())?;
         Ok(child.wait_with_output()?)
     }
 
     /// What `fwd <args>` answers, which must succeed, given `stdin`.
     fn json_in(&self, dir: &Path, agent: Option<&str>, args: &[&str], stdin: &str) -> Result<Value> {
-        let out = self.run(dir, agent, args, stdin)?;
+        let out = self.run(dir, agent, &[&["--format", "json"], args].concat(), stdin)?;
         if !out.status.success() {
             return Err(anyhow!("`fwd {}` failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr)));
         }
@@ -137,7 +132,20 @@ fn an_agent_works_under_what_the_person_said_and_the_person_confirms_the_reading
     let revision = unconfirmed["reading"]["revision"].as_str().ok_or_else(|| anyhow!("no revision"))?;
     s.json(&s.alpha, None, &["reading", "confirm", &reading, "--as-read", revision])?;
     let confirmed = only_one(&s)?;
-    assert_eq!((&confirmed["standing"], &confirmed["confirmed"]["by_handle"]), (&"confirmed".into(), &"tester".into()));
+    assert_eq!((&confirmed["standing"], &confirmed["confirmed"]), (&"confirmed".into(), &true.into()));
+    assert_eq!(confirmed["speakers_reading"]["speaker_handle"], "tester");
+
+    // The person disagrees, in their own words, and the agent reads it first, with those words.
+    let current = confirmed["reading"]["revision"].as_str().ok_or_else(|| anyhow!("no revision"))?;
+    s.json(
+        &s.alpha,
+        None,
+        &["reading", "set", &reading, "no, the board list", "--stance", "disagree", "--as-read", current],
+    )?;
+    let corrected = s.run(&s.alpha, Some("main"), &["--format", "text", "intention", "list", "--mine"], "")?;
+    let corrected = String::from_utf8(corrected.stdout)?;
+    assert!(corrected.starts_with("to discuss:"), "{corrected}");
+    assert!(corrected.contains("disagree by @tester:\n    no, the board list"), "{corrected}");
 
     s.json(&s.alpha, Some("main"), &["unlink", "me", "works_under", &it, "--reason", "done with it"])?;
     let mine = s.json(&s.alpha, Some("main"), &["intention", "list", "--mine"])?;
@@ -156,6 +164,24 @@ fn an_agent_works_under_an_intention_of_another_project_and_a_text_reaches_a_com
     assert_eq!(held["standing"], "unread");
     let shown = s.json(&s.alpha, None, &["intention", "show", &theirs])?;
     assert_eq!((&shown["from_project"], &shown["title"]), (&"beta".into(), &"Builds stay under a minute".into()));
+
+    // impl-sam reads it and writes down the beta person's confirmation, naming them by their id.
+    let reading =
+        s.made(&s.alpha, Some("main"), &["reading", "set", &theirs, "a release build", "--stance", "agree"], "")?;
+    let revision = only_one(&s)?["reading"]["revision"].as_str().ok_or_else(|| anyhow!("no revision"))?.to_string();
+    let beta_tester = s.json(&s.beta, None, &["whoami"])?["principal"]["id"].as_str().unwrap_or_default().to_string();
+    let relayed = ["reading", "confirm", &reading, "--as-read", &revision, "--words", "yes", "--said-by", &beta_tester];
+    s.json(&s.alpha, Some("main"), &relayed)?;
+    assert_eq!(only_one(&s)?["standing"], "confirmed");
+    let listed = s.run(&s.beta, None, &["--format", "text", "reading", "list", "--of", &theirs], "")?;
+    let listed = String::from_utf8(listed.stdout)?;
+    assert!(listed.contains(" in alpha:"), "a reading of another project is named with it: {listed}");
+
+    // A stale revision ends with exit 5 also where the command ran in another project.
+    let scope = s.made(&s.beta, None, &["scope", "create", "Builds"], "")?;
+    let routed = ["--scope", &scope, "reading", "set", &reading, "x", "--stance", "agree", "--as-read", "000000000000"];
+    let stale = s.run(&s.alpha, None, &routed, "")?;
+    assert_eq!(stale.status.code(), Some(5), "{}", String::from_utf8_lossy(&stale.stderr));
 
     let asked = s.made(&s.alpha, Some("main"), &["ask", "--to", "tester", "which build?"], "")?;
     let text = "- the release build\n- not the debug one";

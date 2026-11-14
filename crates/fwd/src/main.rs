@@ -2269,7 +2269,7 @@ async fn main() -> Result<()> {
         // which the shutdown would wait for (`watch::end` says how).
         Err(error) if error.is::<daemon::Lost>() => fail(error, 7),
         // A reading read at a revision that no longer stands is a stale precondition (docs/design/cli.md, the exit codes).
-        Err(error) if error.is::<fwd_core::intentions::readings::ReadingChanged>() => fail(error, 5),
+        Err(error) if error.is::<fwd_core::intentions::readings::ChangedSinceRead>() => fail(error, 5),
         ran => ran,
     }
 }

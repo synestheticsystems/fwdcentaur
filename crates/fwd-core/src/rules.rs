@@ -5,7 +5,9 @@
 //! committing) and in the daemon's validation service (to catch races and misbehaving clients after
 //! the fact). See docs/design/data-model.md, "Rules".
 
-use crate::model::{DecisionStatus, MessageStatus, RelationKind, RelationStatus, ScopeStatus, TaskStatus};
+use crate::model::{
+    DecisionStatus, MessageStatus, PrincipalKind, RelationKind, RelationStatus, ScopeStatus, TaskStatus,
+};
 use ankurah::EntityId;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
@@ -207,9 +209,9 @@ pub fn readiness(task: &TaskSnapshot, deps: &[Dependency], now: i64) -> Readines
 }
 
 /// The relation kinds that must stay acyclic over the edges that hold ([`holds`]): a step may be
-/// a task, and a task cannot be a step of itself, however far round.
+/// a task, and a task cannot be a step of itself, however far round; nor can an aim serve itself.
 pub fn must_be_acyclic(kind: RelationKind) -> bool {
-    matches!(kind, RelationKind::DependsOn | RelationKind::SubtaskOf | RelationKind::StepOf)
+    matches!(kind, RelationKind::DependsOn | RelationKind::SubtaskOf | RelationKind::StepOf | RelationKind::Serves)
 }
 
 /// If adding an accepted `from -> to` edge of `kind` would close a cycle, returns the cycle as a
@@ -355,6 +357,10 @@ pub enum RuleError {
     SupersedesItself,
     #[error("the superseding decision is {status}; accept it first, so that a ruling stays in force")]
     SuccessorNotAccepted { status: DecisionStatus },
+    #[error("--said-by names the person whose words you write down, and {} is an agent, which writes its own words", short_id(.agent))]
+    SaidByAnAgent { agent: EntityId },
+    #[error("these words are {}'s, which only they change, or someone writing down what they say with --said-by; write a reading of it instead", short_id(.owner))]
+    NotTheirWords { owner: EntityId },
     #[error("{}", neither_author_nor_successor(.author, .successor.as_ref()))]
     NeitherAuthorNorSuccessor {
         author: EntityId,
@@ -389,6 +395,28 @@ pub fn can_edit_message(author: EntityId, successors: &[EntityId], editor: Entit
         Ok(())
     } else {
         Err(RuleError::NeitherAuthorNorSuccessor { author, successor: successors.last().copied() })
+    }
+}
+
+/// Whose words a write records: its writer's own, or, named with `--said-by`, the person's whose
+/// words the writer writes down. An agent writes its own words, so naming one is refused.
+pub fn party_of(writer: EntityId, said_by: Option<(EntityId, PrincipalKind)>) -> Result<EntityId, RuleError> {
+    match said_by {
+        None => Ok(writer),
+        Some((person, PrincipalKind::Human)) => Ok(person),
+        Some((agent, PrincipalKind::Agent)) => Err(RuleError::SaidByAnAgent { agent }),
+    }
+}
+
+/// Whether a write may change the words of a record that holds `owner`'s, an intention's speaker's
+/// or a reading's party's: only when they are `party`'s, whose words the write records
+/// ([`party_of`]), so that who said what stays true, as [`can_edit_message`] keeps it. Anyone else
+/// says what they make of the record in a reading of it.
+pub fn can_change_words(owner: EntityId, party: EntityId) -> Result<(), RuleError> {
+    if party == owner {
+        Ok(())
+    } else {
+        Err(RuleError::NotTheirWords { owner })
     }
 }
 
