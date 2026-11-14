@@ -54,6 +54,9 @@ const TITLE: &str = "fwd Current Session";
 /// What the section of the active intentions says when none is assigned to the session.
 const NO_INTENTIONS: &str = "No active intentions recorded for this session yet.";
 
+/// What the section of the active intentions says before fwd has read them.
+const INTENTIONS_NOT_READ: &str = "fwd cannot read the intentions assigned to this session right now.";
+
 /// How a principal the view cannot find is named, without its id.
 const NOT_FOUND: &str = "someone fwd cannot find";
 
@@ -400,17 +403,7 @@ impl Held {
                 LINE_LIMIT,
             ));
         }
-        let kind = ListKind::ActiveIntentions;
-        List {
-            section: kind,
-            prominence: kind.prominence(),
-            title: kind.title().into(),
-            lines,
-            shown: self.intentions.len(),
-            of: self.intentions.len(),
-            more: None,
-            records: self.intentions.clone(),
-        }
+        ListKind::ActiveIntentions.list(lines, self.intentions.clone())
     }
 
     /// The page's own list of what the list `kind` of `h` holds, where the page has one that lists
@@ -471,16 +464,7 @@ impl Held {
         let sections: Vec<List> = lists
             .into_iter()
             .filter(|(_, rows, lines)| !rows.is_empty() || !lines.is_empty())
-            .map(|(kind, records, lines)| List {
-                section: kind,
-                prominence: kind.prominence(),
-                title: kind.title().into(),
-                lines,
-                shown: records.len(),
-                of: records.len(),
-                more: None,
-                records,
-            })
+            .map(|(kind, records, lines)| kind.list(lines, records))
             .collect();
         let own_thread = h.subject.as_deref().is_some_and(subject::is_main_thread);
         Group {
@@ -613,6 +597,20 @@ impl ListKind {
             ListKind::WaitsOnYou | ListKind::Holds | ListKind::WaitsOnOthers => Prominence::Secondary,
         }
     }
+
+    /// The list of this kind that shows every one of `records`, with `lines` said of it.
+    fn list(self, lines: Vec<String>, records: Vec<Row>) -> List {
+        List {
+            section: self,
+            prominence: self.prominence(),
+            title: self.title().into(),
+            lines,
+            shown: records.len(),
+            of: records.len(),
+            more: None,
+            records,
+        }
+    }
 }
 
 impl Tag {
@@ -668,10 +666,19 @@ impl Document {
         }
     }
 
-    /// The document before anything was read: the daemon out of reach, and nothing to show.
+    /// The document before anything was read: the daemon out of reach, and nothing to show but the
+    /// section of the session's active intentions, which stands in every document, saying fwd
+    /// cannot read them yet.
     pub fn never_read() -> Document {
-        Document { title: TITLE.into(), page: None, lines: Vec::new(), sections: Vec::new(), principals: Vec::new() }
-            .out_of_reach()
+        let intentions = ListKind::ActiveIntentions.list(vec![INTENTIONS_NOT_READ.into()], Vec::new());
+        Document {
+            title: TITLE.into(),
+            page: None,
+            lines: Vec::new(),
+            sections: vec![intentions],
+            principals: Vec::new(),
+        }
+        .out_of_reach()
     }
 }
 

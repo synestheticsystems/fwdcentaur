@@ -332,8 +332,10 @@ fn the_own_threads_group_comes_first_and_a_subagents_says_what_it_is_doing() {
 }
 
 /// A session no principal is bound to says so in one line; with the daemon out of reach, the last
-/// principals stay, with no page and a line saying so; a read that failed says why in plain words
-/// with no id, and keeps them too; what keeps the reader from answering is said on the document.
+/// principals stay, with no page and a line saying so; before anything was read, the section of the
+/// active intentions stands all the same, saying fwd cannot read them, not that none is assigned; a
+/// read that failed says why in plain words with no id, and keeps them too; what keeps the reader
+/// from answering is said on the document.
 #[test]
 fn the_documents_other_states_say_what_they_are_and_keep_the_last_principals() {
     let unbound = held(Vec::new(), person(&[])).document(PAGE);
@@ -350,8 +352,16 @@ fn the_documents_other_states_say_what_they_are_and_keep_the_last_principals() {
         lost.lines,
         ["fwd's daemon is out of reach; this is what it last said, and it will show again when the daemon answers."]
     );
-    assert_eq!(Document::never_read().lines, lost.lines);
-    assert!(Document::never_read().principals.is_empty());
+    let never = Document::never_read();
+    assert_eq!((&never.lines, never.principals.is_empty()), (&lost.lines, true));
+    assert_eq!(
+        printed(&never)["sections"],
+        json!([{
+            "section": "active_intentions", "prominence": "primary", "title": "Active Intentions",
+            "lines": ["fwd cannot read the intentions assigned to this session right now."], "shown": 0, "of": 0,
+            "more": null, "records": [],
+        }])
+    );
 
     let error = anyhow::Error::new(PropertyError::Missing).context(format!("reading {}", id(9).to_base64()));
     let failed = shown.unreadable(&error);
