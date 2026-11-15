@@ -107,8 +107,10 @@ mod tests {
             id: format!("r{n}"),
             kind: RowKind::Task,
             title: format!("Task {n}"),
+            title_is_cut: false,
             tags: Vec::new(),
             lines: vec!["word ".repeat(words)],
+            attribution: None,
             path: None,
             actions: Vec::new(),
         }

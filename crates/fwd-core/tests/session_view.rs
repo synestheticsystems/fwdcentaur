@@ -273,13 +273,16 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
 
 /// The session's active intentions are those assigned to the principals of its own thread, of any
 /// project, each once, however many of them hold it, one its principal of beta alone holds among
-/// them: each titled by its title, its line its speaker's name and the day in bold before its
-/// words, another project's name a tag, and one since fulfilled saying so in a second line and a
-/// tag; no path and no action. What is assigned to its subagent is not among them.
+/// them: each titled by its title, its words alone its line, one with no words with no line, and
+/// attributed apart from them to its speaker, by name, on the day its words were last written
+/// down; another project's name a tag, and one since fulfilled saying so in a line after its words
+/// and a tag; no path and no action. What is assigned to its subagent is not among them.
 #[tokio::test]
 async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -> Result<()> {
     let t = two().await?;
-    let ines = ops::ensure_principal(&t.alpha, "ines", "Ines Moreau", PrincipalKind::Human, None).await?;
+    // An attribution names her in plain text: her name's whitespace made single spaces, and
+    // nothing escaped as a line's Markdown would escape it.
+    let ines = ops::ensure_principal(&t.alpha, "ines", "Ines\tMoreau (design)", PrincipalKind::Human, None).await?;
     let words = "The list stays where I left it.".to_string();
     let ours = intentions::create(&t.alpha, t.lead, "Readers keep their place", words, Some(ines)).await?;
     let theirs = intentions::create(&t.beta, t.their_tester, "Builds stay under a minute", String::new(), None).await?;
@@ -305,11 +308,15 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
     assert_eq!(
         row(&ours),
         json!({
-            "id": ours.0.id().to_base64(), "kind": "intention", "title": "Readers keep their place", "tags": [],
-            "lines": [format!("**Ines Moreau, {day}:** The list stays where I left it.")], "path": null, "actions": [],
+            "id": ours.0.id().to_base64(), "kind": "intention", "title": "Readers keep their place",
+            "title_is_cut": false, "tags": [], "lines": ["The list stays where I left it."],
+            "attribution": {"by": "Ines Moreau (design)", "at": day}, "path": null, "actions": [],
         })
     );
-    assert_eq!(row(&theirs)["tags"], json!([{"text": "beta", "tone": null, "at": null}]));
+    assert_eq!(
+        (&row(&theirs)["tags"], &row(&theirs)["lines"]),
+        (&json!([{"text": "beta", "tone": null, "at": null}]), &json!([]))
+    );
     assert_eq!((&row(&betas)["title"], &row(&betas)["tags"]), (&json!("Logs name their run"), &json!([])));
     let closure = t.alpha.component_of::<ClosureView>(&done.0).await?.expect("closed");
     let closed = date(closure.closed()?.expect("when it closed"));

@@ -258,8 +258,7 @@ fn the_active_intentions_are_followed_as_they_are_assigned_reworded_and_taken_of
     assert_eq!(records(&stream.document(SOON)?)[0]["title"], "Readers keep their places");
     s.json(&s.alpha, None, &["intention", "reword", &it, "--words", "the list stays where I left it"])?;
     let reworded = stream.document(SOON)?;
-    let line = records(&reworded)[0]["lines"][0].as_str().unwrap_or_default().to_string();
-    assert!(line.ends_with(":** the list stays where I left it"), "{reworded}");
+    assert_eq!(records(&reworded)[0]["lines"], json!(["the list stays where I left it"]), "{reworded}");
 
     s.json(&s.alpha, None, &["intention", "unassign", &it, "--to", "lead-sam"])?;
     assert_eq!(records(&stream.document(SOON)?), json!([]));

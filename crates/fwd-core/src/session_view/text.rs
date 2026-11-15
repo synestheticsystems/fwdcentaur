@@ -1,9 +1,9 @@
 //! The two kinds of string the view's document holds, so that whatever draws it can trust them: a
-//! title or a tag's text is plain text on one line, and each of `lines` one Markdown block. Neither
-//! holds a control character but the newline between a block's own lines, nor a bidirectional
-//! embedding, override or isolate, since a pane renders the strings as they are and those would draw
-//! a text as something other than it is. Each kind has a cap, so that the document's size is bounded
-//! whatever the records hold.
+//! title, a tag's text or a byline is plain text on one line, and each of `lines` one Markdown
+//! block. Neither holds a control character but the newline between a block's own lines, nor a
+//! bidirectional embedding, override or isolate, since a pane renders the strings as they are and
+//! those would draw a text as something other than it is. Each kind has a cap, so that the
+//! document's size is bounded whatever the records hold.
 
 use super::markdown;
 
