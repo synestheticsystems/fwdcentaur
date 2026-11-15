@@ -22,15 +22,20 @@ mod record;
 mod section;
 
 use crate::app::NewerBuild;
-use crate::empty;
+use crate::{empty, session};
+use ankurah::signals::Get as AnkurahGet;
 use ankurah::EntityId;
 use follow::Follow;
-use fwd_core::session_view::{Document, ListKind, TITLE};
+use fwd_core::session_view::{Document, ListKind, OUT_OF_REACH, TITLE};
 use leptos::prelude::*;
 use record::Minute;
 use section::{Lines, Section, SectionAt};
 use send_wrapper::SendWrapper;
 use std::time::Duration;
+
+/// Whether the page's connection to the daemon is up, for the parts that write.
+#[derive(Clone, Copy)]
+pub struct Connected(pub Signal<bool>);
 
 /// The companion view of the Claude Code session `session`.
 #[component]
@@ -38,6 +43,22 @@ pub fn Companion(session: String) -> impl IntoView {
     let follow = Follow::start(session);
     let doc: Signal<Option<Document>> = follow.shown().into();
     let follow = SendWrapper::new(follow);
+    // While the connection to the daemon is lost the page keeps what it shows, says so, and lets
+    // nothing be sent; drafts stay where they are written.
+    let connected = Memo::new(move |_| session::client().connection_state().get().to_string() == "Connected");
+    provide_context(Connected(connected.into()));
+    Effect::new({
+        let follow = follow.clone();
+        move |was: Option<bool>| {
+            let now = connected.get();
+            match (was, now) {
+                (None | Some(true), false) => follow.lost(),
+                (Some(false), true) => follow.back(),
+                _ => {}
+            }
+            now
+        }
+    });
     on_cleanup(move || follow.stop());
     keep_ages();
     let title = Memo::new(move |_| doc.with(|d| d.as_ref().map_or_else(|| TITLE.to_string(), |d| d.title.clone())));
@@ -59,6 +80,7 @@ pub fn Companion(session: String) -> impl IntoView {
         <div class="companion">
             <NewerBuild/>
             <header class="companion-header">{move || view! { <Title title=title.get()/> }}</header>
+            {move || (!connected.get()).then(|| view! { <p class="connection-note" role="status">{OUT_OF_REACH}</p> })}
             <main class="companion-content">
                 {move || doc.with(Option::is_none).then(|| view! { <p class="muted">{empty::LOADING}</p> })}
                 <Lines class="document-lines" lines=lines.into()/>

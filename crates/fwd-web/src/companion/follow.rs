@@ -6,7 +6,9 @@
 //! changes that arrive while a read runs lead to one more read, not one per change, and after each
 //! read the live queries it needs are opened and those it no longer needs dropped. A read that
 //! fails keeps what the view last showed, saying why, and is tried again after 1 s, then 2 s,
-//! doubling up to 30 s, as the CLI tries it ([`Reads`]).
+//! doubling up to 30 s, as the CLI tries it ([`Reads`]). While the connection to the daemon is
+//! lost nothing is read, and the view keeps what it showed; once it is back, the live queries
+//! Ankurah gave up on are opened again and the view is read at once, for what changed meanwhile.
 
 use crate::session::{self, graph};
 use fwd_core::live_read::{Listening, LiveRead};
@@ -76,6 +78,24 @@ impl Follow {
         inner.listening.clear();
     }
 
+    /// The connection to the daemon is lost: nothing is read until it is back.
+    pub fn lost(&self) {
+        self.0.inner.borrow_mut().reads.lost();
+    }
+
+    /// The connection to the daemon is back: the live queries Ankurah gave up on are opened again
+    /// by the read that starts now, which reads what changed meanwhile.
+    pub fn back(&self) {
+        let start = {
+            let mut inner = self.0.inner.borrow_mut();
+            inner.listening.retain(|_, listening| listening.failure().is_none());
+            inner.reads.back()
+        };
+        if start {
+            spawn_local(self.clone().reading());
+        }
+    }
+
     /// What it reads may have changed: reads it now, or once the read that runs is done.
     fn changed(&self) {
         if self.0.inner.borrow_mut().reads.changed() {
@@ -93,9 +113,11 @@ impl Follow {
             }
             let read = read.and_then(|held| self.listen(held));
             let next = self.0.inner.borrow_mut().reads.finished(read.is_ok());
-            match read {
-                Ok(document) => self.show(document),
-                Err(error) => {
+            match (read, &next) {
+                (Ok(document), _) => self.show(document),
+                // The page says the daemon is out of reach, and reads again once it is back.
+                (Err(_), Next::Lost) => {}
+                (Err(error), _) => {
                     tracing::warn!("the view of the session could not be read: {error:#}");
                     let last = self.0.shown.get_untracked().unwrap_or_else(Document::never_read);
                     self.show(last.unreadable(&error));
@@ -103,7 +125,7 @@ impl Follow {
             }
             match next {
                 Next::Now => continue,
-                Next::Idle => return,
+                Next::Idle | Next::Lost => return,
                 Next::After(wait) => {
                     session::sleep_ms(wait).await;
                     let mut inner = self.0.inner.borrow_mut();
@@ -150,13 +172,14 @@ impl Follow {
     }
 }
 
-/// Where the reads stand: whether one runs, whether a change came that it may not have read, and
-/// after a read that failed, the wait before it is tried again.
+/// Where the reads stand: whether one runs, whether a change came that it may not have read, after
+/// a read that failed the wait before it is tried again, and whether the connection is lost.
 #[derive(Debug, Default)]
 struct Reads {
     running: bool,
     again: bool,
     retry: Option<i32>,
+    lost: bool,
 }
 
 /// What follows a read.
@@ -168,13 +191,15 @@ enum Next {
     Idle,
     /// The read tried again after this many milliseconds.
     After(i32),
+    /// Nothing until the connection is back: the read failed while it was lost.
+    Lost,
 }
 
 impl Reads {
-    /// Something changed: whether a read starts now. While one runs, or waits to be tried again,
-    /// the change is read once that one is done.
+    /// Something changed: whether a read starts now. While one runs, waits to be tried again, or
+    /// the connection is lost, the change is read once that is over.
     fn changed(&mut self) -> bool {
-        if self.running || self.retry.is_some() {
+        if self.running || self.retry.is_some() || self.lost {
             self.again = true;
             return false;
         }
@@ -184,25 +209,49 @@ impl Reads {
 
     /// The read that ran is done, and `succeeded` or not: what follows it.
     fn finished(&mut self, succeeded: bool) -> Next {
+        self.running = false;
+        if !succeeded && self.lost {
+            self.again = true;
+            return Next::Lost;
+        }
         if !succeeded {
             let wait = self.retry.map_or(FIRST_RETRY_MS, |wait| (wait * 2).min(MAX_RETRY_MS));
             self.retry = Some(wait);
-            self.running = false;
             return Next::After(wait);
         }
         self.retry = None;
-        if std::mem::take(&mut self.again) {
-            Next::Now
-        } else {
-            self.running = false;
-            Next::Idle
+        if self.again && !self.lost {
+            self.again = false;
+            self.running = true;
+            return Next::Now;
         }
+        Next::Idle
     }
 
     /// The wait before a read that failed is tried again is over: whether it starts now, which it
-    /// does unless a read already runs. It reads every change made until it starts.
+    /// does unless a read already runs or the connection is lost. It reads every change made until
+    /// it starts.
     fn retry(&mut self) -> bool {
+        if self.running || self.lost {
+            return false;
+        }
+        self.running = true;
+        self.again = false;
+        true
+    }
+
+    /// The connection to the daemon is lost.
+    fn lost(&mut self) {
+        self.lost = true;
+    }
+
+    /// The connection to the daemon is back: whether a read starts now, which reads what changed
+    /// meanwhile, with no wait left over from a read that failed. One that runs is read again.
+    fn back(&mut self) -> bool {
+        self.lost = false;
+        self.retry = None;
         if self.running {
+            self.again = true;
             return false;
         }
         self.running = true;
@@ -250,5 +299,33 @@ mod tests {
         assert_eq!(reads.finished(true), Next::Idle, "the try read it");
         assert!(reads.changed());
         assert_eq!(reads.finished(false), Next::After(1_000), "a read that succeeded starts the waits over");
+    }
+
+    /// While the connection is lost nothing is read, a read that fails is neither shown nor tried
+    /// again, and the wait of one that failed before is dropped; once it is back one read starts,
+    /// for every change meanwhile.
+    #[test]
+    fn nothing_is_read_while_the_connection_is_lost_and_one_read_starts_once_it_is_back() {
+        let mut reads = Reads::default();
+        assert!(reads.changed());
+        reads.lost();
+        assert_eq!(reads.finished(false), Next::Lost, "the read under way fails with the connection");
+        assert!(!reads.changed() && !reads.changed(), "no change is read meanwhile");
+        assert!(reads.back(), "once it is back, one read starts");
+        assert!(!reads.changed());
+        assert_eq!(reads.finished(true), Next::Now, "and a change during it is read after it");
+        assert_eq!(reads.finished(true), Next::Idle);
+
+        assert!(reads.changed());
+        assert_eq!(reads.finished(false), Next::After(1_000));
+        reads.lost();
+        assert!(!reads.retry(), "the try waits for the connection");
+        assert!(reads.back(), "which starts a read at once");
+        assert_eq!(reads.finished(false), Next::After(1_000), "with the waits started over");
+
+        assert!(reads.retry());
+        reads.lost();
+        assert!(!reads.back(), "back while a read runs");
+        assert_eq!(reads.finished(true), Next::Now, "it is read again, for what changed while it was lost");
     }
 }

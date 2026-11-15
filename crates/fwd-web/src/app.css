@@ -720,6 +720,12 @@ table.list.decisions td.title { width: 34%; }
 .companion-header { padding: 11px 16px; border-bottom: 1px solid var(--line); }
 .companion-header h1 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 1rem; font-weight: 400; }
 .companion-header .brand { order: 0; }
+/* While the connection to the daemon is lost: a quiet line under the title, above what the page
+   last showed. */
+.connection-note { margin: 0; padding: 8px 16px; color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--line); font-size: calc(12rem / 14); }
+@media (min-width: 600px) {
+  .connection-note { padding-inline: 20px; }
+}
 .companion-content { padding: 18px 16px 24px; }
 @media (min-width: 600px) {
   .companion-header, .companion-content { padding-inline: 20px; }

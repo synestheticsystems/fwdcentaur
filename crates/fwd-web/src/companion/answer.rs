@@ -8,6 +8,7 @@
 //! beside them.
 
 use super::record::PageLink;
+use super::Connected;
 use crate::keys;
 use crate::session::{self, graph};
 use ankurah::EntityId;
@@ -29,10 +30,13 @@ pub fn Answer(question: EntityId, action: Action, writing: bool, link: Signal<Op
     let words = RwSignal::new(String::new());
     let sending = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    // Nothing is sent while the connection to the daemon is lost; the words stay in the box.
+    let Connected(connected) = use_context::<Connected>().unwrap_or(Connected(Signal::stored(true)));
     let field_id = format!("answer-{}", question.to_base64());
     let send = move || {
         let text = words.get_untracked().trim().to_string();
-        let Some(me) = session::me().filter(|_| !text.is_empty() && !sending.get_untracked()) else { return };
+        let ready = !text.is_empty() && !sending.get_untracked() && connected.get_untracked();
+        let Some(me) = session::me().filter(|_| ready) else { return };
         sending.set(true);
         error.set(None);
         spawn_local(async move {
@@ -100,7 +104,9 @@ pub fn Answer(question: EntityId, action: Action, writing: bool, link: Signal<Op
                         <label for=field_id.clone()>{input.prompt.clone()}</label>
                         {field}
                         <div class="record-footer">
-                            <button type="submit" class="btn primary" disabled=move || sending.get()>{label.clone()}</button>
+                            <button type="submit" class="btn primary" disabled=move || sending.get() || !connected.get()>
+                                {label.clone()}
+                            </button>
                             <PageLink link=link/>
                         </div>
                         {move || error.get().map(|why| view! { <p class="error" role="status">{why}</p> })}

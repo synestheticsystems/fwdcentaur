@@ -57,6 +57,10 @@ const NO_INTENTIONS: &str = "No active intentions recorded for this session yet.
 /// What the section of the active intentions says before fwd has read them.
 const INTENTIONS_NOT_READ: &str = "fwd cannot read the intentions assigned to this session right now.";
 
+/// What the view says while the daemon is out of reach, above what it last showed.
+pub const OUT_OF_REACH: &str =
+    "fwd's daemon is out of reach; this is what it last said, and it will show again when the daemon answers.";
+
 /// How a principal the view cannot find is named, without its id.
 const NOT_FOUND: &str = "someone fwd cannot find";
 
@@ -654,12 +658,10 @@ impl Document {
     /// The document while the daemon is out of reach: what was last shown, saying so, and no page
     /// to open.
     pub fn out_of_reach(&self) -> Document {
-        let said =
-            "fwd's daemon is out of reach; this is what it last said, and it will show again when the daemon answers.";
         Document {
             title: TITLE.into(),
             page: None,
-            lines: vec![said.into()],
+            lines: vec![OUT_OF_REACH.into()],
             sections: self.sections.clone(),
             principals: self.principals.clone(),
         }
