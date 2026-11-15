@@ -1,8 +1,9 @@
 //! Keeping the view's document well under 100,000 characters, as the pane that reads it line by
 //! line expects: past a budget, rows are left out from the least important end, each list that lost
-//! rows saying so, with the page's own list of them where there is one; and should the groups alone
-//! still pass it, the last groups are left out, the document saying how many. Every other string is
-//! capped where it is made (`text`), so the budget holds whatever the records hold.
+//! rows saying so, with the page's own list of them where there is one; should the groups alone
+//! still pass it, the last groups are left out, the document saying how many; and should the
+//! session's own sections pass it alone, their rows go last of all. Every other string is capped
+//! where it is made (`text`), so the budget holds whatever the records hold.
 
 use super::text::{plain, LINE_LIMIT};
 use super::{Document, ListKind};
@@ -16,7 +17,8 @@ pub(super) const BUDGET: usize = 60_000;
 /// last group's before the first's. Each list that lost rows says how many it shows of how many,
 /// and gives `more(group, list)`, the page's own list of them, where there is one. Should the
 /// document still pass the budget with no rows, groups are left out from the end, and a line says
-/// how many.
+/// how many; and should it pass it with no group, the rows of the session's own sections go, the
+/// last section's first, from its end.
 pub(super) fn within_budget(document: &mut Document, more: impl Fn(usize, ListKind) -> Option<String>) {
     let mut total = json_len(document);
     if total <= BUDGET {
@@ -69,6 +71,16 @@ pub(super) fn within_budget(document: &mut Document, more: impl Fn(usize, ListKi
         document.lines.push(line);
         said = true;
     }
+    for s in (0..document.sections.len()).rev() {
+        let kept = document.sections[s].lines.len();
+        while json_len(document) > BUDGET && !document.sections[s].records.is_empty() {
+            let list = &mut document.sections[s];
+            list.records.pop();
+            list.shown = list.records.len();
+            list.lines.truncate(kept);
+            list.lines.push(cut_line(list.shown, list.of, &None));
+        }
+    }
 }
 
 /// What a list that shows `shown` of its `of` rows says, given the page's list of them, `more`.
@@ -87,7 +99,7 @@ fn json_len(value: &impl serde::Serialize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Group, List, Row, RowKind, TITLE};
+    use super::super::{Group, List, Prominence, Row, RowKind, TITLE};
     use super::*;
 
     fn row(n: usize, words: usize) -> Row {
@@ -107,14 +119,13 @@ mod tests {
             id: "g".into(),
             title: "impl-sam".into(),
             tags: Vec::new(),
-            folded: false,
             lines: Vec::new(),
             sections: lists
                 .iter()
                 .map(|&(kind, rows)| List {
                     section: kind,
+                    prominence: Prominence::Secondary,
                     title: String::new(),
-                    folded: false,
                     lines: Vec::new(),
                     shown: rows,
                     of: rows,
@@ -126,7 +137,8 @@ mod tests {
     }
 
     fn document(principals: Vec<Group>) -> Document {
-        Document { title: TITLE.into(), page: Some("http://127.0.0.1:1/".into()), lines: Vec::new(), principals }
+        let page = Some("http://127.0.0.1:1/".into());
+        Document { title: TITLE.into(), page, lines: Vec::new(), sections: Vec::new(), principals }
     }
 
     /// Past the budget the least important rows go first, the last group's before the first's, and
@@ -180,6 +192,31 @@ mod tests {
             doc.lines,
             [format!("{} more principals of this session are left out to keep this view short.", 400 - kept)]
         );
+    }
+
+    /// The session's own section goes last of all: with a group beside intentions that pass the
+    /// budget alone, the group goes first, then the intentions' rows from the end, the section
+    /// saying how many it shows, and the document stays within the budget.
+    #[test]
+    fn the_sessions_own_section_loses_rows_only_once_every_group_is_gone() {
+        let mut doc = document(vec![group(&[(ListKind::Holds, 1)])]);
+        let intentions = List {
+            section: ListKind::ActiveIntentions,
+            prominence: Prominence::Primary,
+            title: String::new(),
+            lines: Vec::new(),
+            shown: 80,
+            of: 80,
+            more: None,
+            records: (0..80).map(|n| row(n, 250)).collect(),
+        };
+        doc.sections = vec![intentions];
+        within_budget(&mut doc, |_, _| None);
+        assert!(serde_json::to_string(&doc).unwrap().len() <= BUDGET);
+        assert!(doc.principals.is_empty(), "the group went first");
+        let kept = &doc.sections[0];
+        assert!(kept.shown > 0 && kept.shown < 80 && kept.records.len() == kept.shown, "{}", kept.shown);
+        assert_eq!(kept.lines, [format!("{} of 80 shown; the rest are left out to keep this view short.", kept.shown)]);
     }
 
     /// Within the budget nothing is left out, and nothing is said.

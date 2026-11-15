@@ -234,6 +234,38 @@ fn each_part_of_what_the_view_is_made_from_is_followed() -> Result<()> {
     Ok(())
 }
 
+/// The session's active intentions are followed: one its agent assigns itself shows; the person's
+/// rewording of it reaches the stream through the intention's own live read, and the person taking
+/// it off the agent through the read of what is assigned to it, neither writer stamping a principal
+/// of the session. The intention's read opens once the assignment shows, and its first result may
+/// stand in for the first rewording, which the stream shows by the time it shows it; so the second
+/// rewording is the one only that read can bring.
+#[test]
+fn the_active_intentions_are_followed_as_they_are_assigned_reworded_and_taken_off() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    let it =
+        s.made(&s.alpha, None, &["intention", "create", "Readers keep their place", "--words", "the list stays"])?;
+    let stream = Stream::start(&s)?;
+    let records = |document: &Value| document["sections"][0]["records"].clone();
+    assert_eq!(records(&stream.document(SOON)?), json!([]));
+
+    s.json(&s.alpha, Some("main"), &["intention", "assign", &it])?;
+    let assigned = stream.document(SOON)?;
+    assert_eq!(records(&assigned)[0]["title"], "Readers keep their place", "{assigned}");
+
+    s.json(&s.alpha, None, &["intention", "reword", &it, "--title", "Readers keep their places"])?;
+    assert_eq!(records(&stream.document(SOON)?)[0]["title"], "Readers keep their places");
+    s.json(&s.alpha, None, &["intention", "reword", &it, "--words", "the list stays where I left it"])?;
+    let reworded = stream.document(SOON)?;
+    let line = records(&reworded)[0]["lines"][0].as_str().unwrap_or_default().to_string();
+    assert!(line.ends_with(":** the list stays where I left it"), "{reworded}");
+
+    s.json(&s.alpha, None, &["intention", "unassign", &it, "--to", "lead-sam"])?;
+    assert_eq!(records(&stream.document(SOON)?), json!([]));
+    Ok(())
+}
+
 /// While the stream is healthy and nothing changes, an empty line comes every 30 seconds. With
 /// the daemon stopped, the last document comes again saying the daemon is out of reach, with no
 /// page and the principals it showed; with the daemon started again, the fresh document follows.

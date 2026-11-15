@@ -122,8 +122,7 @@ impl Holding {
 }
 
 /// A kind of record a working set lists, by how much it matters to an agent coming back to its
-/// work, most first. The intentions an agent works under are to come before all of them once how
-/// they are recorded is settled.
+/// work, most first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum SectionKind {

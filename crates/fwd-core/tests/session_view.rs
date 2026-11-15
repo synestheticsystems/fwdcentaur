@@ -1,13 +1,17 @@
 //! Reading the person's view of a session from a node (`session_view::read`), over two projects of
 //! one store in memory: whose groups it holds and in what order whichever project it is read
 //! through, the person it is for resolved once and strictly in each project, the questions they
-//! answered, and the records a text cites named, never shown by id. How a read becomes a document
-//! is tested beside it (src/session_view/tests.rs).
+//! answered, the records a text cites named, never shown by id, and the session's active
+//! intentions. How a read becomes a document is tested beside it (src/session_view/tests.rs).
 
 use ankurah::property::{Json, Ref};
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
+use ankurah_commons::intention_graph::IntentionStatus;
+use ankurah_commons::records::ClosureView;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::decision_log::date;
+use fwd_core::intentions;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateTask, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
@@ -20,11 +24,15 @@ const PAGE: &str = "http://127.0.0.1:4242/";
 /// alpha and beta over one store in memory, each with its person `tester`; the session `s1`'s own
 /// thread is `lead-sam` in both, and its subagent `a1` is `impl-sam` in alpha.
 struct Two {
+    /// The node's context, through which a test writes what fwd's own writes never make.
+    node: Context,
     alpha: ProjectGraph,
     beta: ProjectGraph,
     tester: EntityId,
     their_tester: EntityId,
     lead: EntityId,
+    their_lead: EntityId,
+    subagent: EntityId,
 }
 
 async fn two() -> Result<Two> {
@@ -33,7 +41,7 @@ async fn two() -> Result<Two> {
     node.system.create().await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
-    let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
+    let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;
     let tester = ops::ensure_principal(&alpha, "tester", "tester", PrincipalKind::Human, None).await?;
     let their_tester = ops::ensure_principal(&beta, "tester", "tester", PrincipalKind::Human, None).await?;
     let agent = |graph: &ProjectGraph, name: &'static str, subject: &'static str| {
@@ -41,11 +49,19 @@ async fn two() -> Result<Two> {
         async move { ops::add_principal(&graph, name, Some(AgentRole::Lead), None, None, None, Some(subject)).await }
     };
     // In beta first, so that a read that kept the order things were made in would put beta first.
-    agent(&beta, "lead-sam", "claude-code:s1/main").await?;
+    let their_lead = agent(&beta, "lead-sam", "claude-code:s1/main").await?;
     let lead = agent(&alpha, "lead-sam", "claude-code:s1/main").await?;
-    ops::add_principal(&alpha, "impl-sam", Some(AgentRole::Implementer), None, None, None, Some("claude-code:s1/a1"))
-        .await?;
-    Ok(Two { alpha, beta, tester, their_tester, lead })
+    let subagent = ops::add_principal(
+        &alpha,
+        "impl-sam",
+        Some(AgentRole::Implementer),
+        None,
+        None,
+        None,
+        Some("claude-code:s1/a1"),
+    )
+    .await?;
+    Ok(Two { node: ctx, alpha, beta, tester, their_tester, lead, their_lead, subagent })
 }
 
 /// The view of `s1` for `reader`, read through `graph`, as JSON.
@@ -176,8 +192,9 @@ async fn a_question_the_person_answered_waits_on_them_no_more() -> Result<()> {
 }
 
 /// A question that cites a task names it, in its title by its title and in its text as a link to
-/// its page, and a reference that names nothing fwd holds is named without an id: no id shows in
-/// any text of the document.
+/// its page; one that cites an intention names it by its title, with no link, since the page has
+/// no intention; and a reference that names nothing fwd holds is named without an id: no id shows
+/// in any text of the document.
 #[tokio::test]
 async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
     let t = two().await?;
@@ -192,6 +209,10 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
         task.to_base64()
     );
     ops::post_message(&t.alpha, t.lead, &text, Priority::Now, asking(t.tester)).await?;
+    let intention = intentions::create(&t.alpha, t.tester, "Readers keep their place", String::new(), None).await?;
+    let intention = intention.0.id();
+    let about = format!("Is [[{}]] still what you want from the page, or has it changed?", intention.to_base64());
+    ops::post_message(&t.alpha, t.lead, &about, Priority::Now, asking(t.tester)).await?;
     // A reference stored before what it names was taken away, as a text written in another store
     // can hold.
     let gone = EntityId::from_bytes([7; 32]);
@@ -234,14 +255,137 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
         waiting.iter().find(|r| r["title"].as_str().is_some_and(|t| t.starts_with("Was"))).expect("the other");
     assert_eq!(missing["title"], "Was something fwd cannot find ever finished, and…");
     assert_eq!(missing["lines"], json!(["Was something fwd cannot find ever finished, and by whom?"]));
+    let wanted =
+        waiting.iter().find(|r| r["title"].as_str().is_some_and(|t| t.starts_with("Is"))).expect("the intention's");
+    assert_eq!(
+        wanted["lines"],
+        json!(["Is Readers keep their place still what you want from the page, or has it changed?"])
+    );
     for row in &waiting {
         let shown = format!("{} {}", row["title"], row["lines"]);
         let link = format!("#/tasks/{}", task.to_base64());
         let without_links = shown.replace(&link, "");
-        assert!(
-            !without_links.contains(&task.to_base64()[..8]) && !without_links.contains(&gone.to_base64()[..8]),
-            "{shown}"
-        );
+        let ids = [task, gone, intention].map(|id| id.to_base64()[..8].to_string());
+        assert!(ids.iter().all(|id| !without_links.contains(id)), "{shown}");
     }
+    Ok(())
+}
+
+/// The session's active intentions are those assigned to the principals of its own thread, of any
+/// project, each once, however many of them hold it, one its principal of beta alone holds among
+/// them: each titled by its title, its line its speaker's name and the day in bold before its
+/// words, another project's name a tag, and one since fulfilled saying so in a second line and a
+/// tag; no path and no action. What is assigned to its subagent is not among them.
+#[tokio::test]
+async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -> Result<()> {
+    let t = two().await?;
+    let ines = ops::ensure_principal(&t.alpha, "ines", "Ines Moreau", PrincipalKind::Human, None).await?;
+    let words = "The list stays where I left it.".to_string();
+    let ours = intentions::create(&t.alpha, t.lead, "Readers keep their place", words, Some(ines)).await?;
+    let theirs = intentions::create(&t.beta, t.their_tester, "Builds stay under a minute", String::new(), None).await?;
+    let done = intentions::create(&t.alpha, ines, "Name the page", "A short name.".into(), None).await?;
+    let subagents = intentions::create(&t.alpha, ines, "Draw the panel", String::new(), None).await?;
+    let betas = intentions::create(&t.beta, t.their_tester, "Logs name their run", String::new(), None).await?;
+    for it in [&ours, &theirs, &done] {
+        intentions::assign(&t.alpha, t.lead, it, t.lead).await?;
+    }
+    intentions::assign(&t.beta, t.their_lead, &ours, t.their_lead).await?;
+    intentions::assign(&t.beta, t.their_lead, &betas, t.their_lead).await?;
+    intentions::assign(&t.alpha, t.subagent, &subagents, t.subagent).await?;
+    intentions::close(&t.alpha, ines, &done, IntentionStatus::Fulfilled, None, None).await?;
+
+    let json = view(&t.alpha, Reader::Identity("tester")).await?;
+    let section = &json["sections"][0];
+    assert_eq!((&section["section"], &section["of"]), (&json!("active_intentions"), &json!(4)), "{json}");
+    let row = |record: &(PlacementView, intentions::Parts)| -> Value {
+        let id = json!(record.0.id().to_base64());
+        section["records"].as_array().into_iter().flatten().find(|r| r["id"] == id).cloned().unwrap_or(Value::Null)
+    };
+    let day = date(ours.1 .1.created()?);
+    assert_eq!(
+        row(&ours),
+        json!({
+            "id": ours.0.id().to_base64(), "kind": "intention", "title": "Readers keep their place", "tags": [],
+            "lines": [format!("**Ines Moreau, {day}:** The list stays where I left it.")], "path": null, "actions": [],
+        })
+    );
+    assert_eq!(row(&theirs)["tags"], json!([{"text": "beta", "tone": null, "at": null}]));
+    assert_eq!((&row(&betas)["title"], &row(&betas)["tags"]), (&json!("Logs name their run"), &json!([])));
+    let closure = t.alpha.component_of::<ClosureView>(&done.0).await?.expect("closed");
+    let closed = date(closure.closed()?.expect("when it closed"));
+    assert_eq!(row(&done)["lines"][1], format!("fulfilled on {closed}"));
+    assert_eq!(row(&done)["tags"], json!([{"text": "fulfilled", "tone": null, "at": null}]));
+    assert_eq!(row(&subagents), Value::Null, "the subagent's is not the session's");
+    Ok(())
+}
+
+/// A relation as a writer that left a field out stores one: by a model of the name fwd's relation
+/// is read by, with fewer properties.
+mod sparse {
+    use ankurah::property::{Json, Ref};
+    use ankurah::{EntityId, Model};
+    use fwd_core::model::{Principal, Project, RelationKind, RelationStatus};
+    use serde::{Deserialize, Serialize};
+
+    /// A relation with no creation time.
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[model(no_ffi)]
+    pub struct Relation {
+        pub project: Ref<Project>,
+        #[active_type(LWW)]
+        pub kind: RelationKind,
+        pub from_id: EntityId,
+        pub to_id: EntityId,
+        #[active_type(LWW)]
+        pub status: RelationStatus,
+        pub created_by: Ref<Principal>,
+        pub via: Json,
+    }
+}
+
+/// An assignment that cannot be followed fails nothing: one of an id that names nothing, and one
+/// whose relation has no creation time, as a writer that left the field out stores one, are
+/// counted in the section's line, beside the intention that can be read.
+#[tokio::test]
+async fn an_assignment_that_cannot_be_followed_is_counted_beside_the_rest() -> Result<()> {
+    let t = two().await?;
+    let ours = intentions::create(&t.alpha, t.lead, "Readers keep their place", String::new(), None).await?;
+    intentions::assign(&t.alpha, t.lead, &ours, t.lead).await?;
+    let trx = t.alpha.begin();
+    trx.create(&Relation {
+        project: t.alpha.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: EntityId::from_bytes([0; 32]),
+        to_id: t.lead,
+        status: RelationStatus::Accepted,
+        created_by: Ref::new(t.lead),
+        created: 1,
+        via: Json::new(json!({})),
+        note: None,
+        position: None,
+        closed_by: None,
+        closed: None,
+        closed_reason: None,
+    })
+    .await?;
+    trx.commit().await?;
+    let trx = t.node.begin();
+    trx.create(&sparse::Relation {
+        project: t.alpha.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: ours.0.id(),
+        to_id: t.lead,
+        status: RelationStatus::Accepted,
+        created_by: Ref::new(t.lead),
+        via: Json::new(json!({})),
+    })
+    .await?;
+    trx.commit().await?;
+
+    let json = view(&t.alpha, Reader::Identity("tester")).await?;
+    let section = &json["sections"][0];
+    let titles: Vec<&Value> = section["records"].as_array().into_iter().flatten().map(|r| &r["title"]).collect();
+    assert_eq!(titles, [&json!("Readers keep their place")], "{json}");
+    assert_eq!(section["lines"], json!(["fwd could not read 2 of the intentions assigned to this session."]));
     Ok(())
 }

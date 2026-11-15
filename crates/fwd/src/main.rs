@@ -21,6 +21,7 @@ use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
 use fwd_core::rules::{self, DecisionMove, Verb};
 use fwd_core::subject;
 use fwd_core::task_move;
+use fwd_core::working_set::Holder;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::IsTerminal;
@@ -29,6 +30,7 @@ use std::time::Duration;
 
 mod claude_code;
 mod dev_runner;
+mod intentions;
 mod mcp;
 mod mcp_stdio;
 mod moved;
@@ -387,6 +389,12 @@ enum Command {
         #[arg(long)]
         note: Option<String>,
     },
+    /// What a person or an agent wants to be true, in their own words: create, list, show, reword,
+    /// fulfil, withdraw, assign, unassign.
+    Intention {
+        #[command(subcommand)]
+        command: intentions::IntentionCommand,
+    },
     /// Your notifications.
     Inbox {
         #[command(subcommand)]
@@ -489,9 +497,10 @@ enum AdminCommand {
     /// placed in a scope by their `worked_in` alone (2026-10-03). Prints what it changed; a second
     /// run changes nothing.
     ///
-    /// Each task with an accepted `assigned_to` and no assignee gets whoever made that scope (its
-    /// owner, until scopes lost their owner), and every `assigned_to` is renamed `worked_in`, all
-    /// kept, a task being worked in any number of scopes. Each task whose record names the scope it
+    /// Each task with an accepted `assigned_to` to a scope and no assignee gets whoever made that
+    /// scope (its owner, until scopes lost their owner), and every `assigned_to` from a task to a
+    /// scope is renamed `worked_in`, all kept, a task being worked in any number of scopes; an
+    /// intention's `assigned_to` is left as it is. Each task whose record names the scope it
     /// was made in (`scope_id`, written until 2026-10-03) and which has no `worked_in` at all comes
     /// to be worked in that scope; one whose `worked_in` was taken off stays in none. Of
     /// the principals that held the role word `supervisor`, the one that wrote most recently holds
@@ -658,7 +667,7 @@ fn relation_kinds_help() -> String {
         help.push_str(&format!("  {kind}: {}\n", ops::joins_words(*kind)));
     }
     help.push_str(
-        "`fwd link <x> step_of <task>` is `fwd step add <task> <x>`; a decision supersedes another with `fwd decision supersede`; a mention is made by posting a message whose text names something, and `assigned_to` no more.",
+        "`fwd link <x> step_of <task>` is `fwd step add <task> <x>`; a decision supersedes another with `fwd decision supersede`; a mention is made by posting a message whose text names something, and `assigned_to` by `fwd intention assign`.",
     );
     help
 }
@@ -1707,6 +1716,16 @@ impl App {
         &self.graph
     }
 
+    /// Whose working set the command reads (`fwd prime`, `fwd intention list --active`): every
+    /// principal bound to the agent its subject names, in every project, else the principal it acts
+    /// as.
+    fn holder(&self) -> Holder<'_> {
+        match &self.subject {
+            Some(agent) => Holder::Agent(agent),
+            None => Holder::Principal(self.me),
+        }
+    }
+
     /// The CLI's connection to the daemon, for what only the daemon's local routes answer (the
     /// checkouts it has seen on this machine); refused where the daemon runs the command itself.
     fn client(&self) -> Result<&Client> {
@@ -2229,6 +2248,14 @@ const JOINING: &[(&str, Writes)] = &[
     ("decision supersede", Writes::Yes),
     ("decision export", Writes::No),
     ("cite", Writes::Yes),
+    ("intention create", Writes::Yes),
+    ("intention list", Writes::No),
+    ("intention show", Writes::No),
+    ("intention reword", Writes::Yes),
+    ("intention fulfil", Writes::Yes),
+    ("intention withdraw", Writes::Yes),
+    ("intention assign", Writes::Yes),
+    ("intention unassign", Writes::Yes),
     ("inbox", Writes::No),
     ("inbox pop", Writes::No),
     ("read", Writes::No),
@@ -5829,6 +5856,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
             let posted = ops::post_settling(graph, app.me, &body, original_view.priority()?, mc, notification).await?;
             print_reply(app, "forward", posted).await
         }
+        Command::Intention { command } => intentions::intention(app, command).await,
         Command::Cite { entity, decision, note } => {
             let from = app.id(&entity, &[Kind::Task, Kind::Message, Kind::Decision]).await?;
             let decision = app.id(&decision, &[Kind::Decision]).await?;
@@ -6343,6 +6371,29 @@ mod tests {
                 ],
             ),
         ];
+        rows.extend([
+            (
+                "intention create".into(),
+                vec!["- in short", "--words", "- first, the list"],
+                vec![("title", id("- in short")), ("words", id("- first, the list"))],
+            ),
+            ("intention show".into(), vec![A], vec![("id", id(A))]),
+            (
+                "intention reword".into(),
+                vec![A, "--title", "- in short", "--words", "-"],
+                vec![("id", id(A)), ("title", some("- in short")), ("words", some("-"))],
+            ),
+        ]);
+        for verb in ["fulfil", "withdraw"] {
+            rows.push((
+                format!("intention {verb}"),
+                vec![A, "--reason", "- why"],
+                vec![("id", id(A)), ("reason", some("- why"))],
+            ));
+        }
+        for verb in ["assign", "unassign"] {
+            rows.push((format!("intention {verb}"), vec![A], vec![("id", id(A))]));
+        }
         for verb in ["accept", "reject", "repeal"] {
             rows.push((
                 format!("decision {verb}"),

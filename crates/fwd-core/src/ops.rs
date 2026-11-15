@@ -15,6 +15,7 @@ use crate::rules::{self, DecisionMove, Edge, Readiness, TaskSnapshot, Verb};
 use crate::subject;
 use ankurah::property::{Json, Ref};
 use ankurah::EntityId;
+use ankurah_commons::intention_graph::IntentionView;
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde_json::{json, Value};
 
@@ -1390,7 +1391,8 @@ pub fn joins(kind: RelationKind) -> &'static [Join] {
         RelationKind::MotivatedBy | RelationKind::DiscoveredFrom => &[Join { from: TASK, to: TASK_OR_MESSAGE }],
         RelationKind::Supersedes => &[Join { from: TASK, to: TASK }, Join { from: DECISION, to: DECISION }],
         RelationKind::AnchoredAt => &[Join { from: TASK, to: OneOf(&[Kind::Anchor]) }],
-        RelationKind::WorkedIn | RelationKind::AssignedTo => &[Join { from: TASK, to: OneOf(&[Kind::Scope]) }],
+        RelationKind::WorkedIn => &[Join { from: TASK, to: OneOf(&[Kind::Scope]) }],
+        RelationKind::AssignedTo => &[Join { from: OneOf(&[Kind::Intention]), to: OneOf(&[Kind::Principal]) }],
         RelationKind::StepOf => &[Join { from: Anything, to: TASK }],
         RelationKind::Concerns => &[Join { from: MESSAGE, to: OneOf(&[Kind::Task, Kind::Relation, Kind::Scope]) }],
         RelationKind::Cites => &[
@@ -1404,7 +1406,7 @@ pub fn joins(kind: RelationKind) -> &'static [Join] {
 
 /// The relation kinds [`link`] makes, in the order the table of relations in
 /// docs/design/data-model.md gives them: every kind but `mention`, which posting a message's text
-/// makes, and `assigned_to`, which nothing makes any more.
+/// makes, and `assigned_to`, which `intentions::assign` makes.
 pub const LINKED: &[RelationKind] = &[
     RelationKind::DependsOn,
     RelationKind::SubtaskOf,
@@ -1493,7 +1495,7 @@ async fn end_kind(graph: &ProjectGraph, id: EntityId) -> Result<Option<Kind>> {
 /// its task's checklist ([`add_step`]); a task is worked in each of its scopes once, by one
 /// `worked_in`, and in any number of scopes (docs/DECISIONS.md, D136, "A task may be worked in
 /// several scopes"; until 2026-10-03 a second scope was refused); a mention is made only by posting
-/// the text that holds it, and `assigned_to` not at all any more.
+/// the text that holds it, and `assigned_to` only by `intentions::assign`.
 #[allow(clippy::too_many_arguments)]
 pub async fn link(
     graph: &ProjectGraph,
@@ -1506,9 +1508,7 @@ pub async fn link(
     via: Value,
 ) -> Result<EntityId> {
     match kind {
-        RelationKind::AssignedTo => bail!(
-            "`assigned_to` is no longer made: who does a task is its assignee (`fwd task assign <task> @handle`), and the scope the work happens in is `worked_in` (docs/DECISIONS.md, \"Assignment is an optional field on the task, never an edge\", 2026-09-28)"
-        ),
+        RelationKind::AssignedTo => bail!(ASSIGNED_NOT_LINKED),
         RelationKind::Mention => bail!(
             "a mention is written in a message's text (`@handle`, `[[<id>]]`, `[[D<number>]]`) and made when the message is posted; it is not linked"
         ),
@@ -1572,10 +1572,14 @@ pub async fn link(
     Ok(id)
 }
 
+/// Why [`link`] and [`unlink`] refuse an `assigned_to`: `intentions::assign` alone makes one, and
+/// `intentions::unassign` alone takes one off, by its rule of who may take an intention off whom.
+const ASSIGNED_NOT_LINKED: &str = "an intention is assigned with `fwd intention assign <intention>` and taken off with `fwd intention unassign <intention>`, not linked or unlinked; who does a task is its assignee (`fwd task assign <task> @handle`)";
+
 /// A relation of `kind` from the first of `ends` to the second, with `status`, that `by` makes
 /// now, as [`link`] writes one, and `add_highlight_step` the step of a new highlight.
 #[allow(clippy::too_many_arguments)]
-fn new_relation(
+pub(crate) fn new_relation(
     project: Ref<Project>,
     by: EntityId,
     kind: RelationKind,
@@ -1606,9 +1610,10 @@ fn new_relation(
 /// reason. Returns how many. A supersession of one decision by another is refused: retracting it
 /// would leave the old decision Superseded with no successor, and nothing moves a superseded
 /// decision back, so a supersession is never undone; a new decision supersedes the successor
-/// instead. The relations are changed in the graph's project, which a command that retracts them
-/// runs in, whichever project their ends are in (docs/DECISIONS.md, D181); one of another project
-/// is refused by the transaction (`ProjectGraphError::OfAnotherProject`).
+/// instead. An `assigned_to` is refused as [`link`] refuses one. The relations are changed in the
+/// graph's project, which a command that retracts them runs in, whichever project their ends are
+/// in (docs/DECISIONS.md, D181); one of another project is refused by the transaction
+/// (`ProjectGraphError::OfAnotherProject`).
 pub async fn unlink(
     graph: &ProjectGraph,
     by: EntityId,
@@ -1617,6 +1622,9 @@ pub async fn unlink(
     to: EntityId,
     reason: &str,
 ) -> Result<usize> {
+    if kind == RelationKind::AssignedTo {
+        bail!(ASSIGNED_NOT_LINKED);
+    }
     if kind == RelationKind::Supersedes {
         if let (Ok(old), Ok(new)) = (graph.get::<DecisionView>(to).await, graph.get::<DecisionView>(from).await) {
             let (old, new) = (old.number()?, new.number()?);
@@ -2201,16 +2209,15 @@ pub async fn worked_in(graph: &ProjectGraph, task: EntityId) -> Result<Vec<Entit
 
 /// The scopes `task` is worked in, read from `relations`, which may hold any relations, those of
 /// other kinds, from other entities or not accepted being passed over: the targets of the task's
-/// accepted `worked_in` relations, and of an accepted `assigned_to`, that relation's name until
-/// 2026-09-28, which a graph `fwd admin migrate` has not carried over still holds; each scope once,
-/// in the order the task came to be worked in them (each relation's `created`, then its id). The
-/// one rule [`worked_in`] and the page order a task's scopes by, so that they list them alike.
+/// accepted `worked_in` relations, each scope once, in the order the task came to be worked in them
+/// (each relation's `created`, then its id). The one rule [`worked_in`] and the page order a task's
+/// scopes by, so that they list them alike.
 pub fn scopes_in(task: EntityId, relations: &[RelationView]) -> Vec<EntityId> {
     let mut found: Vec<(i64, EntityId, EntityId)> = relations
         .iter()
         .filter(|r| {
             r.from_id().ok() == Some(task)
-                && matches!(r.kind(), Ok(RelationKind::WorkedIn | RelationKind::AssignedTo))
+                && r.kind().ok() == Some(RelationKind::WorkedIn)
                 && r.status().ok() == Some(RelationStatus::Accepted)
         })
         .filter_map(|r| Some((r.created().ok()?, r.id(), r.to_id().ok()?)))
@@ -2398,20 +2405,26 @@ impl Migration {
 
 /// Carries a graph from the days of assignment as a relation over to the assignee field
 /// (docs/DECISIONS.md, "Assignment is an optional field on the task, never an edge", 2026-09-28):
-/// every `assigned_to` relation, whatever its status, is renamed `worked_in`, which is what it now
-/// means, so that a task is worked in each scope it was assigned to, as it may be in several
+/// every `assigned_to` relation from a task to a scope, whatever its status, is renamed
+/// `worked_in`, which is what it meant, so that a task is worked in each scope it was assigned to,
+/// as it may be in several
 /// (D136, "A task may be worked in several scopes"; until 2026-10-03 the run kept the newest
 /// accepted one and retracted the others). A task with an accepted `assigned_to`, no accepted
 /// `worked_in` already and no assignee gets whoever made the scope of the newest of them as its
 /// assignee (its owner, which was always whoever made it, until scopes lost their owner: D108).
 /// One transaction per task, so a run that stops halfway leaves each task whole; a second run finds
 /// nothing to do. The assignee it sets names [`MIGRATED`] as who assigned it, so routing tells no
-/// one of it.
+/// one of it. Any other `assigned_to`, an intention's assignment to a principal
+/// (`intentions::assign`), is what the kind means now, and is left as it is.
 pub async fn migrate_assignments(graph: &ProjectGraph) -> Result<Migration> {
-    let legacy: Vec<RelationView> = graph.fetch("kind = 'assigned_to'").await?;
+    let assigned: Vec<RelationView> = graph.fetch("kind = 'assigned_to'").await?;
     let mut by_task: Vec<(EntityId, Vec<RelationView>)> = Vec::new();
-    for r in legacy {
+    for r in assigned {
         let task = r.from_id()?;
+        let to_a_scope = matches!(graph.follow::<ScopeView>(r.to_id()?).await?, Followed::Held { .. });
+        if !to_a_scope || !matches!(graph.follow::<TaskView>(task).await?, Followed::Held { .. }) {
+            continue;
+        }
         match by_task.iter_mut().find(|(t, _)| *t == task) {
             Some((_, rels)) => rels.push(r),
             None => by_task.push((task, vec![r])),
@@ -3779,13 +3792,23 @@ async fn resolve_reference(graph: &ProjectGraph, written: &crate::references::Wr
     }
 }
 
-/// The kinds an inline reference may name: every kind a command line names, and people.
-pub const MENTIONABLE: &[Kind] =
-    &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scope, Kind::Anchor, Kind::Relation, Kind::Principal];
+/// The kinds an inline reference may name: every kind of [`ANY`], which a command line names by id,
+/// and people.
+pub const MENTIONABLE: &[Kind] = &[
+    Kind::Task,
+    Kind::Message,
+    Kind::Decision,
+    Kind::Scope,
+    Kind::Anchor,
+    Kind::Relation,
+    Kind::Intention,
+    Kind::Principal,
+];
 
-/// Which of the [`MENTIONABLE`] kinds the record `id` is, wherever in the node it is: an id names
-/// a record of any project (docs/DECISIONS.md, D176, D181). None when the node holds no record by
-/// that id, or holds it by an id it had before it was renumbered rather than as its id.
+/// Which of the [`MENTIONABLE`] kinds the record `id` is, as [`ProjectGraph::follow_any`] reads
+/// it, wherever in the node it is: an id names a record of any project (docs/DECISIONS.md, D176,
+/// D181). None when the node holds no record by that id, or holds it by an id it had before it was
+/// renumbered rather than as its id.
 pub async fn kind_of(graph: &ProjectGraph, id: EntityId) -> Result<Option<Kind>> {
     Ok(match reference(graph, id).await? {
         Reference::Followed { record, kind, .. } if record == id => Some(kind),
@@ -3816,9 +3839,10 @@ pub async fn describe(graph: &ProjectGraph, id: EntityId) -> Result<Option<(Kind
     })
 }
 
-/// A record's kind and the name [`describe`] gives it, from what was read of it.
-pub fn named(referent: &Referent) -> (Kind, String) {
-    match referent {
+/// A record's kind and the name [`describe`] gives it, from what was read of it: an intention's
+/// title read from its view.
+pub fn named(referent: &Referent) -> Result<(Kind, String), ankurah::property::PropertyError> {
+    Ok(match referent {
         Referent::Task { title, .. } => (Kind::Task, title.clone()),
         Referent::Decision { number, title, .. } => (Kind::Decision, format!("D{number} ({title})")),
         Referent::Scope { title, .. } => (Kind::Scope, title.clone()),
@@ -3828,7 +3852,8 @@ pub fn named(referent: &Referent) -> (Kind, String) {
         Referent::Message { words, .. } => (Kind::Message, format!("“{words}”")),
         Referent::Relation { kind } => (Kind::Relation, format!("a {kind} relation")),
         Referent::Principal { handle } => (Kind::Principal, format!("@{handle}")),
-    }
+        Referent::Intention(intention) => (Kind::Intention, intention.title()?),
+    })
 }
 
 /// A record whose id another record holds, as a reader is shown it: what
@@ -3847,7 +3872,7 @@ pub enum Reference {
 pub async fn reference(graph: &ProjectGraph, id: EntityId) -> Result<Reference> {
     Ok(match graph.follow_any(id).await? {
         Followed::Held { record, project, found } => {
-            let (kind, name) = named(&found);
+            let (kind, name) = named(&found)?;
             Reference::Followed { record, kind, name, project }
         }
         Followed::NotHeld => Reference::NotFollowed,
@@ -4776,8 +4801,9 @@ pub enum Kind {
     Anchor,
     Relation,
     Notification,
-    /// A person or an agent: named inline in a message's text, never as a command's id argument.
+    /// A person or an agent: named inline in a message's text, and by id given to `--said-by`.
     Principal,
+    Intention,
 }
 
 impl Kind {
@@ -4791,6 +4817,7 @@ impl Kind {
             Kind::Relation => "relation",
             Kind::Notification => "notification",
             Kind::Principal => "principal",
+            Kind::Intention => "intention",
         }
     }
 
@@ -4807,6 +4834,7 @@ impl Kind {
             Kind::Relation => graph.ids_starting::<RelationView>(prefix, formerly).await?,
             Kind::Notification => graph.ids_starting::<NotificationView>(prefix, formerly).await?,
             Kind::Principal => graph.ids_starting::<PrincipalView>(prefix, formerly).await?,
+            Kind::Intention => graph.placed_ids_starting::<IntentionView>(prefix, formerly).await?,
         })
     }
 
@@ -4828,6 +4856,7 @@ impl Kind {
             Kind::Relation => graph.ids_in_every_project::<RelationView>(prefix, formerly).await?,
             Kind::Notification => graph.ids_in_every_project::<NotificationView>(prefix, formerly).await?,
             Kind::Principal => graph.ids_in_every_project::<PrincipalView>(prefix, formerly).await?,
+            Kind::Intention => graph.placed_ids_in_every_project::<IntentionView>(prefix, formerly).await?,
         })
     }
 
@@ -4841,6 +4870,15 @@ impl Kind {
                 Followed::NotHeld => None,
             })
         }
+        async fn placed<V: ankurah::model::View>(
+            graph: &ProjectGraph,
+            id: EntityId,
+        ) -> Result<Option<(EntityId, Whose)>> {
+            Ok(match graph.follow_placed::<V>(id).await? {
+                Followed::Held { record, project, .. } => Some((record, project)),
+                Followed::NotHeld => None,
+            })
+        }
         match self {
             Kind::Task => held::<TaskView>(graph, id).await,
             Kind::Message => held::<MessageView>(graph, id).await,
@@ -4850,12 +4888,14 @@ impl Kind {
             Kind::Relation => held::<RelationView>(graph, id).await,
             Kind::Notification => held::<NotificationView>(graph, id).await,
             Kind::Principal => held::<PrincipalView>(graph, id).await,
+            Kind::Intention => placed::<IntentionView>(graph, id).await,
         }
     }
 }
 
 /// Every kind of entity a command line names by id.
-pub const ANY: &[Kind] = &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scope, Kind::Anchor, Kind::Relation];
+pub const ANY: &[Kind] =
+    &[Kind::Task, Kind::Message, Kind::Decision, Kind::Scope, Kind::Anchor, Kind::Relation, Kind::Intention];
 
 /// The shortest prefix of an id that a command line takes for the whole id.
 pub const MIN_PREFIX: usize = 6;

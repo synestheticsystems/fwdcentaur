@@ -44,6 +44,11 @@
 //!   [`ProjectGraph::query_projects`]): each holds what a reader names by id, so a record of another
 //!   project is shown with its project and its conversation, and no list reads through them.
 //!
+//! - A record built on the Commons' models names no project: the `Placement` component on its
+//!   entity does (`model::Placement`), and the graph reads it under the same rule (`placed`): a
+//!   list reads its components with its `Placement` in one selection that carries the project, and
+//!   a record read by its id is the project's or followed into its own.
+//!
 //! - A record changes project in one write alone, [`ProjectTransaction::take_in`], which a task's
 //!   move to another project makes (`task_move`); every other write of a project's graph makes and
 //!   changes that project's records alone.
@@ -62,11 +67,14 @@ use ankurah::model::MutableBorrow;
 use ankurah::property::PropertyError;
 use ankurah::transaction::Transaction;
 use ankurah::{Context, EntityId, LiveQuery, MatchArgs, Model, Ref, Value, View};
+use ankurah_commons::intention_graph::IntentionView;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-/// A model whose records each name their project: the nine models of a project's work, and
-/// [`FormerId`].
+mod placed;
+
+/// A model whose records each name their project: the nine models of a project's work,
+/// [`FormerId`], and [`Placement`], which places a record built on the Commons' models.
 pub trait InProject: Model {
     /// The project the record names.
     fn project_id(&self) -> EntityId;
@@ -115,6 +123,7 @@ in_project!(
     Scope => ScopeView,
     Decision => DecisionView,
     FormerId => FormerIdView,
+    Placement => PlacementView,
 );
 
 /// The scope as `fwd admin migrate` reads and clears what it held before D108, which no one makes.
@@ -160,6 +169,10 @@ pub enum ProjectGraphError {
     /// ends with this, and runs there when it is run again.
     #[error("{} is a record of project `{project}`, not of `{here}`, whose graph read it by its id", .record.to_base64())]
     InAnotherProject { record: EntityId, project: String, here: String },
+    /// A component was to be added to a record that carries it already
+    /// ([`ProjectTransaction::add`]).
+    #[error("the record carries `{label}` already")]
+    AlreadyCarried { label: &'static str },
     #[error(transparent)]
     Retrieval(Box<RetrievalError>),
     #[error(transparent)]
@@ -429,6 +442,15 @@ impl ProjectGraph {
         self.ctx.fetch(touching("to_id", to, kind)).await
     }
 
+    /// A live query on what [`ProjectGraph::relations_to`] reads.
+    pub fn query_relations_to(
+        &self,
+        to: EntityId,
+        kind: Option<RelationKind>,
+    ) -> Result<LiveQuery<RelationView>, RetrievalError> {
+        self.ctx.query(touching("to_id", to, kind))
+    }
+
     /// The messages whose `field`, one of the fields that say what a message is about (`task`,
     /// `anchor`, `scope`, `decision`) or which thread it is in (`thread`, `reply_to`), holds the
     /// record `about`, whichever project wrote them: a message about a record is a connection to it,
@@ -571,6 +593,11 @@ impl ProjectGraph {
         if let Some(r) = absent(self.ctx.get::<RelationView>(id).await)? {
             return at(r.project_id(), Referent::Relation { kind: r.kind()? });
         }
+        if let Some(i) = absent(self.ctx.get::<IntentionView>(id).await)? {
+            // One no project placed is no record of fwd's.
+            let Some(placement) = absent(self.ctx.get::<PlacementView>(id).await)? else { return Ok(None) };
+            return at(placement.project_id(), Referent::Intention(i));
+        }
         Ok(None)
     }
 
@@ -669,7 +696,7 @@ impl ProjectGraph {
 
     /// A transaction that makes and edits the project's records alone.
     pub fn begin(&self) -> ProjectTransaction {
-        ProjectTransaction { trx: self.ctx.begin(), project: self.project }
+        ProjectTransaction { trx: self.ctx.begin(), ctx: self.ctx.clone(), project: self.project }
     }
 }
 
@@ -876,7 +903,7 @@ impl ProjectRecord {
 
 /// What a reader needs of a record another record refers to, by its kind: what names it, and
 /// what a dependency on it is judged by.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Referent {
     Task {
         title: String,
@@ -909,12 +936,17 @@ pub enum Referent {
     Relation {
         kind: RelationKind,
     },
+    /// An intention, by its view, whose title a reader reads where it names it.
+    Intention(IntentionView),
 }
 
 /// A transaction in one project's graph: it makes only records that name the project, and edits
 /// only the project's records.
 pub struct ProjectTransaction {
     trx: Transaction,
+    /// The context the transaction began on, which registers the components a placed record is
+    /// given ([`ProjectTransaction::add`]).
+    ctx: Context,
     project: EntityId,
 }
 

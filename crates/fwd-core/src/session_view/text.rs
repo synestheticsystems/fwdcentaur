@@ -47,8 +47,19 @@ pub(super) fn plain(text: &str, limit: usize) -> String {
 /// made newlines, its tabs four spaces, every character [`kept`] refuses but the newline left out,
 /// what could act or mislead shown as text ([`markdown::neutral`]), and, past [`TEXT_LIMIT`]
 /// characters, cut at the last whitespace before the limit, with a code block it cut open closed
-/// again and the cut said after it.
+/// again and the cut said after it, with the page, which shows the record whole.
 pub(super) fn block(text: &str) -> Option<String> {
+    cut_block(text, "; the page shows it whole")
+}
+
+/// [`block`] for the text of a record the page does not show, an intention's: its cut says how
+/// much of it is shown, and names no page.
+pub(super) fn unpaged_block(text: &str) -> Option<String> {
+    cut_block(text, "")
+}
+
+/// [`block`], its cut said with `whole`, where the record is shown whole.
+fn cut_block(text: &str, whole: &str) -> Option<String> {
     let text = text.replace("\r\n", "\n").replace('\r', "\n").replace('\t', "    ");
     let kept: String = text.chars().filter(|c| *c == '\n' || kept(*c)).collect();
     let kept = markdown::neutral(kept.trim());
@@ -71,7 +82,7 @@ pub(super) fn block(text: &str) -> Option<String> {
         block.push_str("\n```");
     }
     let shown = cut.chars().count();
-    block.push_str(&format!("\n\n*Cut at {shown} of {length} characters; the page shows it whole.*"));
+    block.push_str(&format!("\n\n*Cut at {shown} of {length} characters{whole}.*"));
     Some(block)
 }
 
@@ -108,6 +119,11 @@ mod tests {
         assert_eq!(
             said,
             format!("*Cut at {} of {} characters; the page shows it whole.*", kept.len(), words.trim().len())
+        );
+        let unpaged = unpaged_block(&words).expect("a block");
+        assert!(
+            unpaged.ends_with(&format!("*Cut at {} of {} characters.*", kept.len(), words.trim().len())),
+            "no page"
         );
 
         let code = format!("Run this:\n```\n{}", "let x = 1;\n".repeat(TEXT_LIMIT));

@@ -333,10 +333,10 @@ pub enum RelationKind {
     Duplicates,
     /// Task -> CodeAnchor: the code this task concerns.
     AnchoredAt,
-    /// The name `worked_in` had until 2026-09-28, when assignment became a field on the task
-    /// (docs/DECISIONS.md, "Assignment is an optional field on the task, never an edge"). Edges
-    /// written before then keep it until `fwd admin migrate` renames them; nothing new is made
-    /// with it.
+    /// Intention -> Principal: the intention is assigned to the principal, one of the principals it
+    /// is assigned to, each by a relation of its own (`crate::intentions::assign`). Until
+    /// 2026-09-28 the name was a task's link to a scope, now `worked_in`, so a store from before
+    /// then needs `fwd admin migrate` before this build reads it.
     AssignedTo,
     /// Message -> Task, Relation or Scope: a comment linked to what it concerns.
     Concerns,
@@ -922,6 +922,17 @@ pub struct Decision {
     /// transaction, so the notifications the move causes carry that comment and no later one.
     /// Absent on a decision closed before this field existed.
     pub closed_reason_message: Option<Ref<Message>>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Placement
+
+/// The project a record built on the Commons' models is placed in, as a component on the record's
+/// own entity: those models name no project, and a project's lists are read by it as they are by
+/// the `project` field of fwd's own models (`crate::project_graph`).
+#[derive(Model, Debug, Clone, Serialize, Deserialize)]
+pub struct Placement {
+    pub project: Ref<Project>,
 }
 
 // ---------------------------------------------------------------------------------------------

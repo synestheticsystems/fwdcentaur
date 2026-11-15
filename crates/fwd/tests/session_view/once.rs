@@ -8,8 +8,7 @@ use super::*;
 /// works a task the person gave it, and is asked something by the person; impl-sam asks the person
 /// something; in beta, lead-sam holds a task. The view lists the own thread's groups first, by
 /// project, then the subagent at work's, each with what waits on the person, what it holds and what
-/// waits on others, the unread notifications counted on the group, and the subagent's group open
-/// since something in it waits on the person.
+/// waits on others, and the unread notifications counted on the group.
 #[test]
 fn the_view_lists_each_principal_of_the_session_with_what_waits_on_the_person_first() -> Result<()> {
     let s = Scratch::new()?;
@@ -34,18 +33,17 @@ fn the_view_lists_each_principal_of_the_session_with_what_waits_on_the_person_fi
     s.told(&s.alpha, "main", 2)?;
 
     let view = s.view()?;
-    assert_eq!(view["title"], "fwd: what this session holds");
+    assert_eq!(view["title"], "fwd Current Session");
     assert!(view["page"].as_str().is_some_and(|page| page.starts_with("http://127.0.0.1:")), "{view}");
     assert_eq!(view["lines"], json!([]));
     let groups = view["principals"].as_array().ok_or_else(|| anyhow!("no principals in {view}"))?;
-    let named: Vec<(&Value, &Value, &Value)> =
-        groups.iter().map(|g| (&g["title"], &g["tags"][1]["text"], &g["folded"])).collect();
+    let named: Vec<(&Value, &Value)> = groups.iter().map(|g| (&g["title"], &g["tags"][1]["text"])).collect();
     assert_eq!(
         named,
         [
-            (&json!("lead-sam"), &json!("alpha"), &json!(false)),
-            (&json!("lead-sam"), &json!("beta"), &json!(false)),
-            (&json!("impl-sam"), &json!("alpha"), &json!(false)),
+            (&json!("lead-sam"), &json!("alpha")),
+            (&json!("lead-sam"), &json!("beta")),
+            (&json!("impl-sam"), &json!("alpha"))
         ],
         "{view}"
     );
@@ -77,7 +75,6 @@ fn the_view_lists_each_principal_of_the_session_with_what_waits_on_the_person_fi
     );
     assert_eq!(held[1]["lines"], json!([what]));
     let others = &list(lead, "waits_on_others").expect("waits on others");
-    assert_eq!(others["folded"], true);
     let to: Vec<&Value> = others["records"].as_array().into_iter().flatten().map(|r| &r["tags"][0]["text"]).collect();
     assert_eq!(to, [&json!("to no one in particular"), &json!("to impl-sam")]);
     assert_eq!(titles(&groups[1], "holds"), ["Cap the backoff"]);

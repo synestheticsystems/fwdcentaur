@@ -3,8 +3,10 @@
 //! ids. Each cited record is followed wherever it is, and shown by what names it, as the inbox's
 //! sentences name it (`reason`): a task by its title, a decision by its number and title, a scope by
 //! its title, a highlight by its file, a message by its first words, a person or an agent by `@` and
-//! its name; in a Markdown block, as a link to its page where the page has one.
+//! its name, an intention by its title; in a Markdown block, as a link to its page where the page has
+//! one.
 
+use super::markdown;
 use crate::anchor_name::AnchorName;
 use crate::project_graph::{Followed, ProjectGraph, Referent, Whose};
 use crate::references::{self, Named};
@@ -16,6 +18,9 @@ use uuid::Uuid;
 
 /// What a reference that names nothing fwd holds is shown as.
 const NOT_FOUND: &str = "something fwd cannot find";
+
+/// What a reference to an intention whose title cannot be read is shown as.
+const TITLE_NOT_READ: &str = "an intention whose title fwd cannot read";
 
 /// The records the texts of one read cite, followed.
 #[derive(Debug, Clone, Default)]
@@ -69,7 +74,7 @@ impl Cited {
     /// `page`, where the page has one.
     pub(super) fn markdown(&self, text: &str, page: &str) -> String {
         references::render_named(text, |named| {
-            let label = escaped(&self.label(named));
+            let label = markdown::escaped(&self.label(named));
             Some(match self.place(named.id) {
                 Some(path) => format!("[{label}]({page}{path})"),
                 None => label,
@@ -92,6 +97,9 @@ impl Cited {
             },
             Referent::Principal { handle } => format!("@{handle}"),
             Referent::Relation { kind } => format!("a {} relation", kind.to_string().replace('_', " ")),
+            // Read where the view names it. A label cannot fail the document, so a title that
+            // cannot be read is named as such.
+            Referent::Intention(intention) => intention.title().unwrap_or_else(|_| TITLE_NOT_READ.into()),
         }
     }
 
@@ -103,20 +111,11 @@ impl Cited {
             Referent::Decision { .. } => Route::decision(found.record),
             Referent::Scope { .. } => Route::scope_tasks(found.record),
             Referent::Anchor { .. } => Route::Anchor(found.record),
-            Referent::Message { .. } | Referent::Principal { .. } | Referent::Relation { .. } => return None,
+            Referent::Message { .. }
+            | Referent::Principal { .. }
+            | Referent::Relation { .. }
+            | Referent::Intention(_) => return None,
         };
         Some(page_path(found.project, &route))
     }
-}
-
-/// `label` with what Markdown reads as markup escaped, so that it shows as the words it is.
-fn escaped(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    for c in label.chars() {
-        if matches!(c, '\\' | '[' | ']' | '(' | ')' | '<' | '>' | '*' | '_' | '`' | '!' | '#') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
 }

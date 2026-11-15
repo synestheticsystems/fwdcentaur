@@ -12,6 +12,7 @@
 //! acts as, so that its caller is found, or made, in the project it runs in, and nothing is read
 //! for the caller or written in the project it started in.
 
+use crate::intentions::IntentionCommand;
 use crate::{
     AnchorCommand, Command, DecisionCommand, MessageCommand, RelationCommand, ScopeCommand, StepCommand, TaskCommand,
 };
@@ -127,6 +128,18 @@ fn placed_by(command: &Command) -> Option<PlacedBy<'_>> {
             DecisionCommand::Create(_) | DecisionCommand::List { .. } | DecisionCommand::Export => None,
         },
         Command::Cite { entity, .. } => record(entity, &[Kind::Task, Kind::Message, Kind::Decision]),
+        Command::Intention { command } => match command {
+            IntentionCommand::Show { id }
+            | IntentionCommand::Reword { id, .. }
+            | IntentionCommand::Fulfil { id, .. }
+            | IntentionCommand::Withdraw { id, .. } => record(id, &[Kind::Intention]),
+            // Assigned and listed for the caller of the project the command runs in, an intention
+            // of any project.
+            IntentionCommand::Create { .. }
+            | IntentionCommand::List { .. }
+            | IntentionCommand::Assign { .. }
+            | IntentionCommand::Unassign { .. } => None,
+        },
         Command::Read { ids } | Command::Dismiss { ids } => {
             ids.first().map(|id| PlacedBy::Record { typed: id, kinds: &[Kind::Notification] })
         }

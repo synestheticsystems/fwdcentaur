@@ -719,9 +719,26 @@ fn the_command_that_prints_the_rest_reads_the_same_working_set() -> Result<()> {
 /// names and fewer properties make them (`fwd_core::model::before_d108` is one such model).
 mod sparse {
     use ankurah::property::{Json, Ref};
-    use ankurah::Model;
-    use fwd_core::model::{NotificationStatus, NotificationType, Principal, Priority, Project, TaskStatus};
+    use ankurah::{EntityId, Model};
+    use fwd_core::model::{
+        NotificationStatus, NotificationType, Principal, Priority, Project, RelationKind, RelationStatus, TaskStatus,
+    };
     use serde::{Deserialize, Serialize};
+
+    /// A relation with no creation time.
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[model(no_ffi)]
+    pub struct Relation {
+        pub project: Ref<Project>,
+        #[active_type(LWW)]
+        pub kind: RelationKind,
+        pub from_id: EntityId,
+        pub to_id: EntityId,
+        #[active_type(LWW)]
+        pub status: RelationStatus,
+        pub created_by: Ref<Principal>,
+        pub via: Json,
+    }
 
     /// A task with no creation time.
     #[derive(Model, Debug, Clone, Serialize, Deserialize)]
@@ -817,5 +834,130 @@ async fn sparse_records_prime_as_they_did() -> Result<()> {
     assert!(lines.contains(&format!("{} Cap the backoff", short_id(&ready)).as_str()), "{text}");
     assert!(lines.iter().any(|line| line.starts_with(&format!("{} ", short_id(&told)))), "{text}");
     assert!(!text.contains("could not be read"), "{text}");
+    Ok(())
+}
+
+/// What a reset gives back first: the hook prints the agent's active intentions before everything
+/// else, each once though two of its principals hold one, one its principal of beta alone holds
+/// after those of alpha's, each in its speaker's words with the day they were written down, one of
+/// another project named with it, and one since fulfilled in one line with the command that takes
+/// it off; an unassigned one is gone; and the JSON gives them as records of kind `intention`.
+#[test]
+fn the_hook_prints_the_agents_active_intentions_first_in_their_speakers_words() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    s.json(&s.beta, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let create =
+        |dir: &Path, title: &str, words: &str| s.made(dir, None, &["intention", "create", title, "--words", words]);
+    let ours = create(&s.alpha, "Readers keep their place", "the list stays\nwhere I left it")?;
+    let theirs = create(&s.beta, "Builds stay under a minute", "release builds")?;
+    let done = create(&s.alpha, "Name the page", "a short name")?;
+    let dropped = create(&s.alpha, "Draw the panel", "")?;
+    let betas = create(&s.beta, "Logs name their run", "each line")?;
+    for id in [&ours, &theirs, &done, &dropped] {
+        s.json(&s.alpha, Some("main"), &["intention", "assign", id])?;
+    }
+    s.json(&s.beta, Some("main"), &["intention", "assign", &ours])?;
+    s.json(&s.beta, Some("main"), &["intention", "assign", &betas])?;
+    s.json(&s.alpha, None, &["intention", "fulfil", &done])?;
+    s.json(&s.alpha, Some("main"), &["intention", "unassign", &dropped])?;
+    let shown = s.json(&s.alpha, None, &["intention", "show", &ours])?;
+    let day = fwd_core::decision_log::date(shown["created"].as_i64().ok_or_else(|| anyhow!("no created"))?);
+    let short = |id: &String| short_id(&id.parse::<EntityId>().expect("an id"));
+
+    let hook = s.text(&s.alpha, Some("main"), &["prime", "--format", "hook"])?;
+    let expected = format!(
+        "Active Intentions (3):
+{} Readers keep their place
+  @tester, {day}:
+    the list stays
+    where I left it
+{} Builds stay under a minute in beta
+  @tester in beta, {day}:
+    release builds
+{} Name the page [fulfilled]: still assigned to you; `fwd intention unassign {}` takes it off
+{} Logs name their run
+  @tester, {day}:
+    each line
+fwdcentaur context for impl-sam (implementer) in alpha",
+        short(&ours),
+        short(&theirs),
+        short(&done),
+        short(&done),
+        short(&betas)
+    );
+    assert!(hook.starts_with(&expected), "{hook}");
+    assert!(!hook.contains("Draw the panel"), "unassigned: {hook}");
+
+    let json = s.json(&s.alpha, Some("main"), &["prime"])?;
+    let section = &json["sections"][0];
+    assert_eq!(section["section"], "active_intentions", "{json}");
+    let records = section["records"].as_array().ok_or_else(|| anyhow!("no records in {json}"))?;
+    let kinds: Vec<&Value> = records.iter().map(|r| &r["kind"]).collect();
+    assert_eq!(kinds, [&json!("intention"); 4]);
+    assert_eq!(
+        (&records[0]["words"], &records[1]["project"]["name"]),
+        (&json!("the list stays\nwhere I left it"), &json!("beta"))
+    );
+    Ok(())
+}
+
+/// An assignment that cannot be followed costs the agent nothing else: one of an id that names
+/// nothing, and one whose relation has no creation time, as a writer that left the field out
+/// stores one, are counted as intentions that could not be read, the least of their ids named,
+/// and the rest of what the agent holds is printed.
+#[tokio::test]
+async fn an_assignment_that_cannot_be_followed_is_counted_and_the_rest_printed() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    let words = ["intention", "create", "Readers keep their place", "--words", "the list stays"];
+    let ours: EntityId = s.made(&s.alpha, None, &words)?.parse().map_err(|e| anyhow!("{e:?}"))?;
+    s.json(&s.alpha, Some("main"), &["intention", "assign", &ours.to_base64()])?;
+    let client = s.client(&s.alpha).await?;
+    let graph = &client.graph;
+    let agent =
+        naming::principal_named(graph, "impl-sam", None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no agent"))?;
+    let gone = EntityId::from_bytes([0; 32]);
+    let trx = graph.begin();
+    trx.create(&Relation {
+        project: graph.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: gone,
+        to_id: agent,
+        status: RelationStatus::Accepted,
+        created_by: Ref::new(agent),
+        created: 1,
+        via: Json::new(json!({})),
+        note: None,
+        position: None,
+        closed_by: None,
+        closed: None,
+        closed_reason: None,
+    })
+    .await?;
+    trx.commit().await?;
+    let ctx = client.node.context_async(ankurah::policy::DEFAULT_CONTEXT).await?;
+    let trx = ctx.begin();
+    trx.create(&sparse::Relation {
+        project: graph.project(),
+        kind: RelationKind::AssignedTo,
+        from_id: ours,
+        to_id: agent,
+        status: RelationStatus::Accepted,
+        created_by: Ref::new(agent),
+        via: Json::new(json!({})),
+    })
+    .await?;
+    trx.commit().await?;
+    drop(client);
+
+    let text = s.text(&s.alpha, Some("main"), &["prime", "--format", "text"])?;
+    assert!(
+        text.starts_with(&format!("Active Intentions (1):\n{} Readers keep their place\n", short_id(&ours))),
+        "{text}"
+    );
+    let counted = format!("2 intentions assigned to you could not be read, the first {}", short_id(&gone));
+    assert!(text.lines().any(|line| line == counted), "{text}");
+    assert!(text.contains("\nfwdcentaur context for impl-sam (implementer) in alpha."), "{text}");
     Ok(())
 }

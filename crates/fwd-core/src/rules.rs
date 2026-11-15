@@ -5,7 +5,9 @@
 //! committing) and in the daemon's validation service (to catch races and misbehaving clients after
 //! the fact). See docs/design/data-model.md, "Rules".
 
-use crate::model::{DecisionStatus, MessageStatus, RelationKind, RelationStatus, ScopeStatus, TaskStatus};
+use crate::model::{
+    DecisionStatus, MessageStatus, PrincipalKind, RelationKind, RelationStatus, ScopeStatus, TaskStatus,
+};
 use ankurah::EntityId;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
@@ -355,6 +357,10 @@ pub enum RuleError {
     SupersedesItself,
     #[error("the superseding decision is {status}; accept it first, so that a ruling stays in force")]
     SuccessorNotAccepted { status: DecisionStatus },
+    #[error("--said-by names the person whose words you write down, and {} is an agent, which writes its own words", short_id(.agent))]
+    SaidByAnAgent { agent: EntityId },
+    #[error("these words are {}'s, which only they change, or someone writing down what they say with --said-by", short_id(.speaker))]
+    NotTheirWords { speaker: EntityId },
     #[error("{}", neither_author_nor_successor(.author, .successor.as_ref()))]
     NeitherAuthorNorSuccessor {
         author: EntityId,
@@ -389,6 +395,27 @@ pub fn can_edit_message(author: EntityId, successors: &[EntityId], editor: Entit
         Ok(())
     } else {
         Err(RuleError::NeitherAuthorNorSuccessor { author, successor: successors.last().copied() })
+    }
+}
+
+/// Whose words a write records: its writer's own, or, named with `--said-by`, the person's whose
+/// words the writer writes down. An agent writes its own words, so naming one is refused.
+pub fn speaker_of(writer: EntityId, said_by: Option<(EntityId, PrincipalKind)>) -> Result<EntityId, RuleError> {
+    match said_by {
+        None => Ok(writer),
+        Some((person, PrincipalKind::Human)) => Ok(person),
+        Some((agent, PrincipalKind::Agent)) => Err(RuleError::SaidByAnAgent { agent }),
+    }
+}
+
+/// Refuses a change to the words of a record that holds `speaker`'s unless the write records
+/// `speaker`'s words too ([`speaker_of`]), so that who said what stays true, as
+/// [`can_edit_message`] keeps it.
+pub fn can_change_words(speaker: EntityId, written_for: EntityId) -> Result<(), RuleError> {
+    if written_for == speaker {
+        Ok(())
+    } else {
+        Err(RuleError::NotTheirWords { speaker })
     }
 }
 

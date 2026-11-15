@@ -11,6 +11,18 @@ use crate::references::code_ranges;
 use std::collections::BTreeSet;
 use std::ops::Range;
 
+/// `label` with what Markdown reads as markup escaped, so that it shows as the words it is.
+pub(super) fn escaped(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    for c in label.chars() {
+        if matches!(c, '\\' | '[' | ']' | '(' | ')' | '<' | '>' | '*' | '_' | '`' | '!' | '#') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// `text` with a backslash before each character that would make an image, raw HTML or a link to an
 /// address other than the web.
 pub(super) fn neutral(text: &str) -> String {

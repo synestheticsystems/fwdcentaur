@@ -7,8 +7,9 @@
 use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::intentions;
 use fwd_core::model::*;
-use fwd_core::ops::{self, CreateScope, CreateTask, MessageContext};
+use fwd_core::ops::{self, CreateScope, CreateTask, Kind, MessageContext};
 use fwd_core::project_graph::{ProjectGraph, ProjectGraphError, Whose};
 use fwd_core::rules::{NotReadyReason, Readiness, Verb};
 use serde_json::json;
@@ -321,6 +322,72 @@ async fn a_start_of_an_id_names_a_record_of_the_commands_project_before_one_of_a
     assert!(refused.contains(&format!("task {}", &ours.to_base64()[..12])), "{refused}");
     assert!(refused.contains(&format!("(formerly {})", &cited[..12])), "{refused}");
     assert!(!refused.contains(" in beta"), "beta's is named only when alpha holds none: {refused}");
+    Ok(())
+}
+
+/// The id of an intention titled `title` that `by` records in `graph`'s project, in its own words.
+async fn intention(graph: &ProjectGraph, by: EntityId, title: &str) -> Result<EntityId> {
+    let words = format!("{title}, in the speaker's words");
+    Ok(intentions::create(graph, by, title, words, None).await?.0.id())
+}
+
+/// An intention, a record placed in a project rather than fwd's own, is named by the first eight
+/// characters of its id in its project, and from a project that does not hold it, which names its
+/// project.
+#[tokio::test]
+async fn an_intention_is_named_by_the_start_of_its_id_in_any_project() -> Result<()> {
+    let t = two().await?;
+    let held = intention(&t.alpha, t.alice, "Readers keep their place").await?;
+    let here = ops::Located { id: held, project: Whose::This };
+    assert_eq!(ops::locate(&t.alpha, &held.to_base64()[..8], &[Kind::Intention]).await?, here);
+    let found = ops::locate(&t.beta, &held.to_base64()[..8], &[Kind::Intention]).await?;
+    assert_eq!(found.id, held);
+    assert!(matches!(found.project, Whose::Other(p) if p.name == "alpha"));
+    Ok(())
+}
+
+/// An intention named in a text by the first eight characters of its id, as prime prints it, is the
+/// intention the text names, in its own project and from another, whose name a reader gives beside it.
+#[tokio::test]
+async fn an_intention_named_in_a_text_by_the_start_of_its_id_is_named_in_any_project() -> Result<()> {
+    let t = two().await?;
+    let ours = intention(&t.alpha, t.alice, "Readers keep their place").await?;
+    let theirs = intention(&t.beta, t.their_alice, "Builds stay under a minute").await?;
+    let start = |id: EntityId| id.to_base64()[..8].to_string();
+    let text = format!("serves [[{}]] and [[{}]]", start(ours), start(theirs));
+    let posted = ops::post_message(&t.alpha, t.daniel, &text, Priority::Next, MessageContext::default()).await?;
+    let stored = ops::text(t.alpha.get::<MessageView>(posted).await?.content())?;
+    assert_eq!(stored, format!("serves [[{}]] and [[{}]]", ours.to_base64(), theirs.to_base64()));
+    assert_eq!(
+        ops::render_references(&t.alpha, &stored).await?,
+        "serves [Readers keep their place] and [Builds stay under a minute in beta]"
+    );
+    Ok(())
+}
+
+/// A start of an id names an intention of the command's project before one of another, as it names
+/// a task; a start two of alpha's intentions share, one by a former id, is refused naming both.
+#[tokio::test]
+async fn a_start_two_intentions_share_names_this_projects_and_is_refused_when_two_here_share_it() -> Result<()> {
+    let t = two().await?;
+    let ours = intention(&t.alpha, t.alice, "Readers keep their place").await?;
+    let theirs = intention(&t.beta, t.their_alice, "Readers keep their place").await?;
+    let shared = ours.to_base64()[..8].to_string();
+    renumbered(&t.beta, &starting(&shared), theirs).await?;
+    let only = [Kind::Intention];
+    assert_eq!(ops::locate(&t.alpha, &shared, &only).await?, ops::Located { id: ours, project: Whose::This });
+    assert_eq!(ops::locate(&t.beta, &shared, &only).await?, ops::Located { id: theirs, project: Whose::This });
+
+    let second = intention(&t.alpha, t.alice, "The list keeps its scroll").await?;
+    let cited = starting(&shared);
+    renumbered(&t.alpha, &cited, second).await?;
+    let refused = ops::locate(&t.alpha, &shared, &only).await.expect_err("two of alpha's start so").to_string();
+    assert!(refused.starts_with(&format!("`{shared}` starts the ids of 2 entities")), "{refused}");
+    assert!(refused.contains(&format!("intention {}", &ours.to_base64()[..12])), "{refused}");
+    assert!(
+        refused.contains(&format!("intention {} (formerly {})", &second.to_base64()[..12], &cited[..12])),
+        "{refused}"
+    );
     Ok(())
 }
 

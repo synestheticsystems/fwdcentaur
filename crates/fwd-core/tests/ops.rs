@@ -6,6 +6,7 @@ use ankurah::{policy::DEFAULT_CONTEXT, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::former_ids::FormerIds;
+use fwd_core::intentions;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateDecision, CreateScope, CreateTask, EditScope, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
@@ -3006,7 +3007,7 @@ async fn a_task_is_assigned_started_and_worked_in_its_scopes() -> Result<()> {
     assert!(ops::assign(&graph, c.daniel, b, Some(a)).await.is_err(), "only a principal is an assignee");
 
     // Several scopes: a second `worked_in` adds a scope; linking a scope the task is worked in
-    // already answers the relation there; and `assigned_to` is made no more. (Which of two scopes
+    // already answers the relation there; and `assigned_to` is never linked. (Which of two scopes
     // linked within one millisecond comes first is their relations' ids' to say, so the order is
     // left to the migration's test, whose relations are made at times apart.)
     let other = ops::create_scope(&graph, c.daniel, named_scope("Daniel by hand")).await?;
@@ -3025,7 +3026,7 @@ async fn a_task_is_assigned_started_and_worked_in_its_scopes() -> Result<()> {
     let err = ops::link(&graph, c.daniel, RelationKind::AssignedTo, b, other, None, false, serde_json::json!({}))
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("no longer made"), "{err}");
+    assert!(err.to_string().contains("assigned with `fwd intention assign <intention>`"), "{err}");
 
     // A reopened task is still worked in both its scopes, and a start never moves it: from a third
     // scope it is refused, naming the two and offering to bind the checkout to either; from either
@@ -3400,6 +3401,21 @@ async fn the_migration_carries_assignment_edges_over_to_the_field_once() -> Resu
     assert_eq!(graph.get::<RelationView>(e2).await?.status()?, RelationStatus::Retracted);
 
     assert!(ops::migrate_assignments(&graph).await?.is_empty(), "a second run changes nothing");
+    Ok(())
+}
+
+/// `fwd admin migrate` carries over a task's `assigned_to` to a scope alone: an intention's
+/// assignment to a principal, what the kind means since, comes out of a run as it went in.
+#[tokio::test]
+async fn the_migration_leaves_an_intentions_assignment_as_it_is() -> Result<()> {
+    let graph = project().await?;
+    let c = cast(&graph).await?;
+    let it = intentions::create(&graph, c.implementer, "Readers keep their place", String::new(), None).await?;
+    let assigned = intentions::assign(&graph, c.implementer, &it, c.implementer).await?;
+
+    assert!(ops::migrate_assignments(&graph).await?.is_empty(), "nothing to carry over");
+    let after: RelationView = graph.get(assigned.id()).await?;
+    assert_eq!((after.kind()?, after.status()?), (RelationKind::AssignedTo, RelationStatus::Accepted));
     Ok(())
 }
 
@@ -3867,7 +3883,7 @@ async fn a_start_no_id_can_have_is_refused_as_one_no_id_starts_with() -> Result<
         let refused = ops::resolve_id(&graph, &typed, ops::ANY).await.expect_err("no id starts so").to_string();
         assert_eq!(
             refused,
-            format!("no task, message, decision, scope, anchor, relation has an id starting with `{typed}`")
+            format!("no task, message, decision, scope, anchor, relation, intention has an id starting with `{typed}`")
         );
         assert!(graph.ids_starting::<TaskView>(&typed, &[]).await?.is_empty(), "`{typed}` read a task");
     }

@@ -13,6 +13,7 @@ use crate::working_set::questions_by_name;
 use ankurah::core::livequery::EntityLiveQuery;
 use ankurah::signals::{Listener, ListenerGuard, Signal};
 use ankurah::{EntityId, LiveQuery};
+use ankurah_commons::intention_graph::IntentionView;
 use anyhow::Result;
 
 /// The live form of one read of what a session holds.
@@ -36,6 +37,10 @@ pub enum LiveRead {
     Unread { project: ProjectRecord, principal: EntityId },
     /// The answers in a question's thread, wherever they were written.
     AnswersTo(EntityId),
+    /// The intentions assigned to a principal, of any project: an assignment made or taken off.
+    IntentionsAssignedTo(EntityId),
+    /// An intention assigned to a principal, wherever it is: its title, its words or its status.
+    AssignedIntention(EntityId),
 }
 
 /// A live read open on the daemon, which calls the listener it was opened with at each change of
@@ -78,6 +83,12 @@ impl LiveRead {
                 listening(graph.graph_of_project(project).query::<NotificationView>(unread)?, listener)
             }
             LiveRead::AnswersTo(question) => listening(graph.query_answers_to(*question)?, listener),
+            LiveRead::IntentionsAssignedTo(principal) => {
+                listening(graph.query_relations_to(*principal, Some(RelationKind::AssignedTo))?, listener)
+            }
+            LiveRead::AssignedIntention(intention) => {
+                listening(graph.query_placed::<IntentionView>(*intention)?, listener)
+            }
         })
     }
 }
