@@ -71,6 +71,9 @@ pub struct Document {
     pub title: String,
     /// The page's address, which each row's `path` follows; none while the daemon is out of reach.
     pub page: Option<String>,
+    /// The address of this session's companion view, the page's route for it after `page`; none
+    /// while the daemon is out of reach.
+    pub companion: Option<String>,
     /// What is said of the whole view: that no principal is bound to the session yet, that the
     /// daemon is out of reach or a read failed, what keeps the reader from answering, and groups
     /// left out.
@@ -398,13 +401,16 @@ impl Held {
     pub fn document(&self, page: &str) -> Document {
         let mut lines = self.person.lines();
         let sections = vec![self.active_intentions()];
+        let companion = Some(format!("{page}{}", Route::Session(self.session.clone()).hash()));
         if self.holdings.is_empty() {
             let unbound = "No fwd principal is bound to this session yet. Its agent names itself with `fwd principal add <name> --role <role>`.";
             lines.insert(0, unbound.into());
-            return Document { title: TITLE.into(), page: Some(page.into()), lines, sections, principals: Vec::new() };
+            let principals = Vec::new();
+            return Document { title: TITLE.into(), page: Some(page.into()), companion, lines, sections, principals };
         }
         let principals = self.holdings.iter().map(|h| self.group(h, page)).collect();
-        let mut document = Document { title: TITLE.into(), page: Some(page.into()), lines, sections, principals };
+        let mut document =
+            Document { title: TITLE.into(), page: Some(page.into()), companion, lines, sections, principals };
         fit::within_budget(&mut document, |g, kind| self.more(&self.holdings[g], kind));
         document
     }
@@ -661,6 +667,7 @@ impl Document {
         Document {
             title: TITLE.into(),
             page: None,
+            companion: None,
             lines: vec![OUT_OF_REACH.into()],
             sections: self.sections.clone(),
             principals: self.principals.clone(),
@@ -684,6 +691,7 @@ impl Document {
         Document {
             title: TITLE.into(),
             page: self.page.clone(),
+            companion: self.companion.clone(),
             lines: vec![said],
             sections: self.sections.clone(),
             principals: self.principals.clone(),
@@ -698,6 +706,7 @@ impl Document {
         Document {
             title: TITLE.into(),
             page: None,
+            companion: None,
             lines: Vec::new(),
             sections: vec![intentions],
             principals: Vec::new(),

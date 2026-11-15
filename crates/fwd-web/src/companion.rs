@@ -231,6 +231,7 @@ mod tests {
         let document = |principals| Document {
             title: TITLE.into(),
             page: None,
+            companion: None,
             lines: Vec::new(),
             sections: Vec::new(),
             principals,

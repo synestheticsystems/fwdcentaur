@@ -141,7 +141,7 @@ mod tests {
 
     fn document(principals: Vec<Group>) -> Document {
         let page = Some("http://127.0.0.1:1/".into());
-        Document { title: TITLE.into(), page, lines: Vec::new(), sections: Vec::new(), principals }
+        Document { title: TITLE.into(), page, companion: None, lines: Vec::new(), sections: Vec::new(), principals }
     }
 
     /// Past the budget the least important rows go first, the last group's before the first's, and
