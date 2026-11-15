@@ -3026,7 +3026,7 @@ async fn a_task_is_assigned_started_and_worked_in_its_scopes() -> Result<()> {
     let err = ops::link(&graph, c.daniel, RelationKind::AssignedTo, b, other, None, false, serde_json::json!({}))
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("`fwd intention assign <intention>`, not linked"), "{err}");
+    assert!(err.to_string().contains("assigned with `fwd intention assign <intention>`"), "{err}");
 
     // A reopened task is still worked in both its scopes, and a start never moves it: from a third
     // scope it is refused, naming the two and offering to bind the checkout to either; from either

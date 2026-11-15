@@ -170,7 +170,7 @@ async fn an_agent_takes_an_intention_off_itself_alone_and_a_person_off_anyone() 
     let by_tide = intentions::unassign(&w.alpha, w.tide, &it, w.omar).await;
     assert!(refusal(by_tide).contains("is for that principal or a person to decide"));
     let unlinked = ops::unlink(&w.alpha, w.omar, RelationKind::AssignedTo, it.0.id(), w.tide, "done").await;
-    assert!(refusal(unlinked).contains("`fwd intention assign <intention>`, not linked"));
+    assert!(refusal(unlinked).contains("taken off with `fwd intention unassign <intention>`, not linked or unlinked"));
     assert_eq!(ids(&intentions::assigned_to(&w.alpha, w.omar).await?), vec![it.0.id()], "still Omar's");
 
     assert_eq!(intentions::unassign(&w.alpha, w.ines, &it, w.tide).await?, 1, "a person takes it off an agent");

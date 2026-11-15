@@ -1574,7 +1574,7 @@ pub async fn link(
 
 /// Why [`link`] and [`unlink`] refuse an `assigned_to`: `intentions::assign` alone makes one, and
 /// `intentions::unassign` alone takes one off, by its rule of who may take an intention off whom.
-const ASSIGNED_NOT_LINKED: &str = "an intention is assigned with `fwd intention assign <intention>`, not linked; who does a task is its assignee (`fwd task assign <task> @handle`)";
+const ASSIGNED_NOT_LINKED: &str = "an intention is assigned with `fwd intention assign <intention>` and taken off with `fwd intention unassign <intention>`, not linked or unlinked; who does a task is its assignee (`fwd task assign <task> @handle`)";
 
 /// A relation of `kind` from the first of `ends` to the second, with `status`, that `by` makes
 /// now, as [`link`] writes one, and `add_highlight_step` the step of a new highlight.
