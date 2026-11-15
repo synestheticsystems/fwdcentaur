@@ -120,9 +120,10 @@ fn printed(document: &Document) -> Value {
 /// A question the principal asked the person waits on them, by the person's principal in any
 /// project or by their name, unless they answered it in its thread; one it asked anyone else, or no
 /// one in particular, waits on others; what it holds is the questions asked of it, then its tasks.
-/// Each row carries its own text, its tags and its path, other parties named by their names; only
-/// what waits on the person can be answered, as the person's principal in the question's project,
-/// by its id, in the person's words on standard input.
+/// Each row carries its own text, its tags and its path, other parties named by their names, and no
+/// attribution, which an intention's row alone carries; only what waits on the person can be
+/// answered, as the person's principal in the question's project, by its id, in the person's words
+/// on standard input.
 #[test]
 fn each_record_stands_in_the_list_of_whom_it_waits_on() {
     let asked = vec![
@@ -203,6 +204,7 @@ fn each_record_stands_in_the_list_of_whom_it_waits_on() {
         let answerable = list["section"] == "waits_on_you";
         for row in list["records"].as_array().unwrap() {
             assert_eq!(row["actions"].as_array().unwrap().is_empty(), !answerable, "{row}");
+            assert_eq!(row["attribution"], Value::Null, "{row}");
         }
     }
     let headed: Vec<(&Value, &Value)> =
@@ -414,7 +416,10 @@ fn the_document_has_the_contracts_keys_and_no_control_characters() {
     let list = &group["sections"][0];
     assert_eq!(keys(list), list_keys);
     let row = &list["records"][0];
-    assert_eq!(keys(row), expect(&["id", "kind", "title", "tags", "lines", "path", "actions"]));
+    assert_eq!(
+        keys(row),
+        expect(&["id", "kind", "title", "title_is_cut", "tags", "lines", "attribution", "path", "actions"])
+    );
     assert_eq!(keys(&row["tags"][0]), expect(&["text", "tone", "at"]));
     assert_eq!(keys(&row["actions"][0]), expect(&["label", "args", "input"]));
     assert_eq!(keys(&row["actions"][0]["input"]), expect(&["prompt", "multiline"]));
@@ -507,6 +512,49 @@ fn a_title_that_holds_the_whole_text_is_not_said_again_beneath_it() {
     assert_eq!(
         rows[1]["lines"],
         json!(["Should the primer name the page? It costs every session about forty characters."])
+    );
+}
+
+/// A question's title cut from its text, which its first line holds whole, says it is a cut; no
+/// other title does: not a short question's, which holds its whole text, though a line saying why it
+/// cannot be answered follows it; not one whose text could not be read; and not a task's, though
+/// its what starts with it.
+#[test]
+fn only_a_title_cut_from_the_text_its_first_line_holds_says_it_is_cut() {
+    let mut long = ask(10, by(to(1)), 0);
+    long.text = Some("Should the primer name the page? It costs every session about forty characters.".into());
+    let mut short = ask(11, by(to(1)), 2);
+    short.text = Some("May I cap the backoff?".into());
+    let mut unread = ask(12, by(to(1)), 0);
+    unread.text = None;
+    let mut retry = task(17, TaskStatus::Open, "Retry on disconnect once the daemon answers, at most twice.", 0);
+    retry.title = "Retry on disconnect".into();
+    let sections =
+        vec![section(SectionKind::YouAsked, vec![long, short, unread]), section(SectionKind::Assigned, vec![retry])];
+    let json = printed(&held(vec![holding(20, "lead-sam", "main", sections, 0)], person(&[])).document(PAGE));
+    let rows: Vec<(&str, &str, bool)> = json["principals"][0]["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["records"].as_array().unwrap())
+        .map(|r| (r["title"].as_str().unwrap(), r["lines"][0].as_str().unwrap(), r["title_is_cut"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "Should the primer name the page? It costs…",
+                "Should the primer name the page? It costs every session about forty characters.",
+                true
+            ),
+            (
+                "May I cap the backoff?",
+                "You have no principal in gamma, where this question now is, so it cannot be answered here.",
+                false
+            ),
+            ("Question 12?", "Its text could not be read.", false),
+            ("Retry on disconnect", "Retry on disconnect once the daemon answers, at most twice.", false),
+        ]
     );
 }
 

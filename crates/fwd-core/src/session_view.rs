@@ -139,16 +139,32 @@ pub struct Row {
     pub kind: RowKind,
     /// Plain text on one line.
     pub title: String,
+    /// Whether `title` is the start of the text the first of `lines` holds, cut short, as a
+    /// question's is where its text is longer than its title. A reader that shows that text need
+    /// not show the title above it.
+    pub title_is_cut: bool,
     pub tags: Vec<Tag>,
     /// The record's own text as one Markdown block, cut where it is long, its references named;
     /// none for a task with no what, and none where the title holds the whole text, which `lines`
-    /// never repeats. Then why it cannot be answered, where it cannot. An intention's is whose
-    /// words they are and when they were last written down, then the words, and for one since
-    /// fulfilled or withdrawn a line saying so.
+    /// never repeats. Then why it cannot be answered, where it cannot. An intention's is its words,
+    /// and for one since fulfilled or withdrawn a line saying so.
     pub lines: Vec<String>,
+    /// Whose words an intention's `lines` hold and when they were last written down, kept apart
+    /// from the words so that a reader can show it beside them, less prominently; none for any
+    /// other record.
+    pub attribution: Option<Byline>,
     /// Where the page shows it, after the page's address.
     pub path: Option<String>,
     pub actions: Vec<Action>,
+}
+
+/// Whose words a row holds, and the day they were last written down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Byline {
+    /// The speaker's display name, plain text on one line.
+    pub by: String,
+    /// The day, as `YYYY-MM-DD` in this machine's time zone.
+    pub at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -294,10 +310,10 @@ pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Re
 
 /// An intention assigned to a principal of the session's own thread, read in `there`, that
 /// principal's project's graph, where `project` says whose it is, as a row: titled by its title;
-/// its line, in bold, whose words they are, by their speaker's name, and the day its words were
-/// last written down, then the words; for one since fulfilled or withdrawn, a second line saying so
-/// and when, and a tag; its project's name as a tag when that is not its principal's; no path,
-/// since the page has none for an intention yet, and no action.
+/// its words its line, attributed to their speaker, by name, and the day they were last written
+/// down; for one since fulfilled or withdrawn, a line after them saying so and when, and a tag; its
+/// project's name as a tag when that is not its principal's; no path, since the page has none for
+/// an intention yet, and no action.
 async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(PlacementView, Parts)) -> Result<Row> {
     let (placement, (intention, creation)) = record;
     let attribution = there.component_of::<AttributionView>(placement).await?;
@@ -308,9 +324,7 @@ async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(Placemen
     };
     let edit = there.component_of::<LastEditView>(placement).await?;
     let written = intentions::last_written(creation, edit.as_ref())?;
-    let name = markdown::escaped(&plain(&name, TITLE_LIMIT));
-    let mut lines: Vec<String> =
-        unpaged_block(&format!("**{name}, {}:** {}", date(written), intention.words()?)).into_iter().collect();
+    let mut lines: Vec<String> = unpaged_block(&intention.words()?).into_iter().collect();
     let mut tags = Vec::new();
     if let Whose::Other(p) = project {
         tags.push(Tag::plain(&p.name));
@@ -331,8 +345,10 @@ async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(Placemen
         id: placement.id().to_base64(),
         kind: RowKind::Intention,
         title: plain(&intention.title()?, TITLE_LIMIT),
+        title_is_cut: false,
         tags,
         lines,
+        attribution: Some(Byline { by: plain(&name, TITLE_LIMIT), at: date(written) }),
         path: None,
         actions: Vec::new(),
     })
@@ -496,9 +512,9 @@ impl Held {
         tags
     }
 
-    /// `r`, a question of `h`'s, as a row: titled by its first words, its references named, dated
-    /// by when it was asked, and answerable where it asks the person and they have a principal of
-    /// their own where it is.
+    /// `r`, a question of `h`'s, as a row: titled by its first words, its references named, a cut
+    /// of its text where that is longer; dated by when it was asked; and answerable where it asks
+    /// the person and they have a principal of their own where it is.
     fn ask_row(&self, h: &Holding, r: &Record, asked: Asked<'_>, page: &str) -> Row {
         let text = r.text.as_deref().map(|text| self.cited.plain(text));
         let title = text
@@ -518,6 +534,9 @@ impl Held {
             _ => (Vec::new(), None),
         };
         let mut row = self.row(h, r, RowKind::Ask, &title, vec![tag], page);
+        // A text that could be read is the row's line unless the title, its first words, holds it
+        // whole; why it cannot be answered comes after.
+        row.title_is_cut = text.is_some() && !row.lines.is_empty();
         row.lines.extend(why_not);
         row.actions = actions;
         row
@@ -545,8 +564,10 @@ impl Held {
             id: r.id.to_base64(),
             kind,
             title,
+            title_is_cut: false,
             tags,
             lines,
+            attribution: None,
             path: r.route.as_ref().map(|route| page_path(r.project.uuid, route)),
             actions: Vec::new(),
         }
