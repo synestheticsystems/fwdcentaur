@@ -1,13 +1,15 @@
 //! One record of the companion view: its title, which opens it, with its tags at the right of the
 //! title's last line, smaller; opened, its lines, an intention's attribution at the right, smaller
 //! and quieter (Daniel, D227: "the Name and the date of any citations should be to the right side,
-//! smaller, subtler. Attribution is secondary to the context, not primary"), and a link to its page
-//! in the app, in a new tab, where it has one. A title cut from the text the first line holds gives
+//! smaller, subtler. Attribution is secondary to the context, not primary"), a question's Answer
+//! where the document offers one (`answer.rs`), and a link to its page in the app, in a new tab,
+//! where it has one. A title cut from the text the first line holds gives
 //! way to that line when the record opens, so that nothing is said twice (Daniel: "we need to be
 //! extremely efficient with layout, ergonomics, and non-repetition"), and no tag says again what
 //! the heading above it says ([`shown_tags`]). A record with no line and no action does not open,
 //! and its title leads to its page. No id shows: the record is reached through its page.
 
+use super::answer::Answer;
 use super::markdown;
 use super::section::SectionAt;
 use crate::fmt;
@@ -70,6 +72,14 @@ pub fn Record(doc: Signal<Option<Document>>, at: SectionAt, id: EntityId, opened
             })
         });
         let byline = Memo::new(move |_| row.with(|r| r.as_ref().and_then(|r| r.attribution.clone())));
+        // The document's Answer, on a question it offers to answer: the action that asks for words.
+        let answer = Memo::new(move |_| {
+            row.with(|r| {
+                r.as_ref()
+                    .filter(|r| r.kind == RowKind::Ask)
+                    .and_then(|r| r.actions.iter().find(|a| a.input.is_some()).cloned())
+            })
+        });
         view! {
             <li class="record">
                 <details open=opened>
@@ -88,7 +98,10 @@ pub fn Record(doc: Signal<Option<Document>>, at: SectionAt, id: EntityId, opened
                             </div>
                             {move || byline.get().map(|byline| view! { <Attribution byline=byline/> })}
                         </div>
-                        {move || link.get().map(|link| view! { <div class="record-footer"><PageLink link=Signal::stored(Some(link))/></div> })}
+                        {move || match answer.get() {
+                            Some(action) => view! { <Answer question=id action=action writing=opened link=link.into()/> }.into_any(),
+                            None => view! { <div class="record-footer"><PageLink link=link.into()/></div> }.into_any(),
+                        }}
                     </div>
                 </details>
             </li>
@@ -155,7 +168,7 @@ fn Attribution(byline: Byline) -> impl IntoView {
 
 /// The link to a record's page, in a new tab, so that the view stays beside the chat.
 #[component]
-fn PageLink(link: Signal<Option<String>>) -> impl IntoView {
+pub(super) fn PageLink(link: Signal<Option<String>>) -> impl IntoView {
     move || {
         link.get().map(|href| {
             view! {

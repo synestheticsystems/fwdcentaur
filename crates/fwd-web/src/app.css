@@ -778,6 +778,15 @@ details[open] > summary .open-title { display: block; }
 .attribution-at::before { content: " · "; }
 .record-footer { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 9px; }
 .page-link { font-size: calc(12rem / 14); white-space: nowrap; }
+/* A question's Answer (companion/answer.rs): its button, which opens the box, or the box under the
+   document's prompt, with its button and the question's page beside it, and why a reply failed. */
+.answer .record-footer { justify-content: space-between; }
+.answer-form { margin-top: 12px; }
+.answer-form label { display: block; margin-bottom: 5px; color: var(--muted); font-size: calc(12rem / 14); }
+.answer-form textarea, .answer-form input { display: block; width: 100%; min-height: 76px; padding: 7px 9px; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
+.answer-form input { min-height: 34px; }
+.answer-form textarea:focus, .answer-form input:focus { border-color: var(--accent); outline: none; }
+.answer-form .error { margin: 7px 0 0; font-size: calc(12rem / 14); }
 @media (min-width: 600px) {
   .record-words.attributed { display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: 16px; }
   .attribution { margin-top: 1px; }

@@ -15,6 +15,7 @@
 //! document as the document changes, so that a record is drawn again only when it changes itself,
 //! and stays open or closed as the person left it.
 
+mod answer;
 mod follow;
 mod markdown;
 mod record;
