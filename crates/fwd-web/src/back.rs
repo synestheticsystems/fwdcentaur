@@ -367,6 +367,8 @@ fn place(to: &Route) -> String {
         Route::Graph { .. } => "the Graph",
         Route::Scopes(_) => "the Scopes page",
         Route::Anchor(_) => "the highlight",
+        // The companion view, by the title it shows.
+        Route::Session(_) => fwd_core::session_view::TITLE,
     };
     page.into()
 }

@@ -25,6 +25,7 @@ mod cards;
 mod claim;
 mod clock;
 mod comment_box;
+mod companion;
 mod decision_row;
 mod decisions;
 mod empty;

@@ -712,3 +712,17 @@ table.list.decisions td.title { width: 34%; }
   .field.whose select { max-width: 9em; }
   .reading-note { margin-top: 0; }
 }
+
+/* A Claude Code session's companion view (companion.rs): one column, for the pane beside the chat
+   at 380 to 720 px and the same column centred in a wider window, under the view's title and none
+   of the app's navigation. */
+.companion { max-width: 760px; min-height: 100%; margin: 0 auto; background: var(--panel); }
+.companion-header { padding: 11px 16px; border-bottom: 1px solid var(--line); }
+.companion-header h1 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 1rem; font-weight: 400; }
+.companion-content { padding: 18px 16px 24px; }
+@media (min-width: 600px) {
+  .companion-header, .companion-content { padding-inline: 20px; }
+}
+@media (min-width: 761px) {
+  .companion { border-inline: 1px solid var(--line); }
+}

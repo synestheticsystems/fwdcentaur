@@ -4,11 +4,13 @@
 //! `#/questions/<id>`, which show the acting principal's own, and with `?for=<handle>` after them
 //! another principal's, `#/tasks/<id>`, `#/decisions/<id>`, `#/graph/<id>`, `#/scopes` with its
 //! panel for a new scope, `#/scopes/new`, or for editing one, `#/scopes/<id>/edit`, a highlight's
-//! page `#/anchors/<id>`, and the form for a new task, `#/tasks/new`; the routes of the Questions,
+//! page `#/anchors/<id>`, the form for a new task, `#/tasks/new`, and a Claude Code session's
+//! companion view, `#/sessions/<session id>`; the routes of the Questions,
 //! Tasks, Decisions and Graph pages, the form's among them, carry the header's scope choice last,
 //! `?scope=<id>`, `?scope=none` or `?scope=all`, and `&scope=` after a `?for=`). The page follows
 //! its route as it changes (crates/fwd-web/src/route.rs).
 
+use crate::subject;
 use ankurah::EntityId;
 use uuid::Uuid;
 
@@ -47,6 +49,9 @@ pub enum Route {
     Scopes(Option<ScopePanel>),
     /// A highlight's own page, where its lozenge and a step naming it lead in a browser.
     Anchor(EntityId),
+    /// The companion view of the Claude Code session whose id it holds: what the session holds,
+    /// beside its chat, with none of the app's navigation (crates/fwd-web/src/companion.rs).
+    Session(String),
 }
 
 /// What the Scopes page's panel shows (`DECISIONS.md`, "A scope is created and edited in a side
@@ -116,7 +121,7 @@ impl Route {
             | Route::NewTask { scope }
             | Route::Decisions { scope, .. }
             | Route::Graph { scope, .. } => *scope,
-            Route::Inbox { .. } | Route::Scopes(_) | Route::Anchor(_) => None,
+            Route::Inbox { .. } | Route::Scopes(_) | Route::Anchor(_) | Route::Session(_) => None,
         }
     }
 
@@ -130,7 +135,7 @@ impl Route {
             | Route::NewTask { scope }
             | Route::Decisions { scope, .. }
             | Route::Graph { scope, .. } => *scope = Some(choice),
-            Route::Inbox { .. } | Route::Scopes(_) | Route::Anchor(_) => {}
+            Route::Inbox { .. } | Route::Scopes(_) | Route::Anchor(_) | Route::Session(_) => {}
         }
         route
     }
@@ -156,6 +161,7 @@ impl Route {
             Route::Scopes(Some(ScopePanel::Edit(id))) => Route::Scopes(Some(ScopePanel::Edit(current(*id)))),
             Route::Scopes(panel) => Route::Scopes(*panel),
             Route::Anchor(id) => Route::Anchor(current(*id)),
+            Route::Session(session) => Route::Session(session.clone()),
         }
     }
 
@@ -193,6 +199,7 @@ impl Route {
             Route::Scopes(Some(ScopePanel::New)) => "#/scopes/new".into(),
             Route::Scopes(Some(ScopePanel::Edit(scope))) => format!("#/scopes/{}/edit", scope.to_base64()),
             Route::Anchor(anchor) => format!("#/anchors/{}", anchor.to_base64()),
+            Route::Session(session) => format!("#/sessions/{session}"),
         }
     }
 
@@ -207,6 +214,8 @@ impl Route {
             Route::Scopes(_) => "scopes",
             // No nav entry: a highlight is reached from what names it.
             Route::Anchor(_) => "anchors",
+            // No nav entry: the companion view shows none of the app's navigation.
+            Route::Session(_) => "sessions",
         }
     }
 
@@ -242,6 +251,11 @@ impl Route {
             },
             // A highlight has a page; there is no list of them.
             Some("anchors") => id(parts.next()).map_or_else(Route::inbox, Route::Anchor),
+            // A session's companion view, named by an id a Claude Code session can have.
+            Some("sessions") => parts
+                .next()
+                .filter(|session| subject::valid_id(session))
+                .map_or_else(Route::inbox, |session| Route::Session(session.to_string())),
             _ => Route::inbox(),
         }
     }
@@ -315,6 +329,9 @@ mod tests {
     use super::ScopePanel;
     use ankurah::EntityId;
 
+    /// An invented Claude Code session id.
+    const SESSION: &str = "0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
+
     #[test]
     fn a_route_naming_a_former_id_names_the_record_it_was_renumbered_to() {
         let (former, record, other) =
@@ -368,6 +385,7 @@ mod tests {
             Scopes(Some(ScopePanel::New)),
             Scopes(Some(ScopePanel::Edit(scope))),
             Anchor(task),
+            Session(SESSION.into()),
         ] {
             assert_eq!(Route::parse(&route.hash()), route, "{}", route.hash());
         }
@@ -414,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn the_inbox_the_scopes_page_and_a_highlights_page_list_nothing_by_scope() {
+    fn the_inbox_the_scopes_page_a_highlights_page_and_a_sessions_companion_list_nothing_by_scope() {
         let (anchor, scope) = (EntityId::from_bytes([4; 32]), EntityId::from_bytes([2; 32]));
         for route in [
             Route::inbox(),
@@ -422,6 +440,7 @@ mod tests {
             Scopes(None),
             Scopes(Some(ScopePanel::Edit(scope))),
             Anchor(anchor),
+            Session(SESSION.into()),
         ] {
             assert!(!route.filtered(), "{}", route.hash());
             assert_eq!(route.with_scope(ScopeChoice::All), route, "{}", route.hash());
@@ -498,6 +517,14 @@ mod tests {
         assert_eq!(Route::parse("#/nowhere?for=claude"), Route::inbox());
         assert_eq!(Inbox { whose: claude() }.section(), "inbox");
         assert_eq!(Questions { question: None, whose: claude(), scope: None }.section(), "questions");
+    }
+
+    #[test]
+    fn a_session_is_named_by_an_id_a_claude_code_session_can_have_and_otherwise_the_route_names_no_page() {
+        assert_eq!(Session(SESSION.into()).hash(), format!("#/sessions/{SESSION}"));
+        for nothing in ["#/sessions", "#/sessions/", "#/sessions/one%20session", "#/sessions/a:b"] {
+            assert_eq!(Route::parse(nothing), Route::inbox(), "{nothing}");
+        }
     }
 
     #[test]

@@ -49,7 +49,7 @@ use std::collections::{BTreeSet, HashMap};
 use text::{block, plain, unpaged_block, LINE_LIMIT, TAG_LIMIT, TITLE_LIMIT};
 
 /// The document's title, the same in every state.
-const TITLE: &str = "fwd Current Session";
+pub const TITLE: &str = "fwd Current Session";
 
 /// What the section of the active intentions says when none is assigned to the session.
 const NO_INTENTIONS: &str = "No active intentions recorded for this session yet.";
