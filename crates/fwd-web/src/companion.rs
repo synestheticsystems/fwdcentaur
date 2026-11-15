@@ -28,7 +28,6 @@ use ankurah::EntityId;
 use follow::Follow;
 use fwd_core::session_view::{Document, ListKind, OUT_OF_REACH, TITLE};
 use leptos::prelude::*;
-use record::Minute;
 use section::{Lines, Section, SectionAt};
 use send_wrapper::SendWrapper;
 use std::time::Duration;
@@ -36,6 +35,10 @@ use std::time::Duration;
 /// Whether the page's connection to the daemon is up, for the parts that write.
 #[derive(Clone, Copy)]
 pub struct Connected(pub Signal<bool>);
+
+/// What makes the ages on the page read the clock again, once a minute ([`keep_ages`]).
+#[derive(Clone)]
+pub struct Minute(pub ArcTrigger);
 
 /// The companion view of the Claude Code session `session`.
 #[component]
@@ -112,7 +115,8 @@ fn Title(title: String) -> impl IntoView {
 }
 
 /// What the principal `id` of the session holds: its sections, headed by its name, role and
-/// project only when the session has `several` principals, and what is said of it.
+/// project only when the session has `several` principals, and what is said of it; nothing at all
+/// for the session's one principal while it holds nothing.
 #[component]
 fn Principal(
     doc: Signal<Option<Document>>,
@@ -128,23 +132,28 @@ fn Principal(
     let kinds = Memo::new(move |_| {
         doc.with(|d| group(d).map(|g| g.sections.iter().map(|s| s.section).collect::<Vec<_>>()).unwrap_or_default())
     });
-    view! {
-        <section class="principal">
-            {move || {
-                several.get().then(|| head.get()).flatten().map(|(name, tags)| {
-                    view! {
-                        <header class="principal-header">
-                            <h2>{name}</h2>
-                            <span class="principal-tags">{tags}</span>
-                        </header>
-                    }
-                })
-            }}
-            <Lines class="principal-lines" lines=lines.into()/>
-            <For each=move || kinds.get() key=|kind| *kind children=move |kind| {
-                view! { <Section doc=doc at=SectionAt::of(id, kind) first=first/> }
-            }/>
-        </section>
+    let shows = Memo::new(move |_| several.get() || !lines.with(Vec::is_empty) || !kinds.with(Vec::is_empty));
+    move || {
+        shows.get().then(|| {
+            view! {
+                <section class="principal">
+                    {move || {
+                        several.get().then(|| head.get()).flatten().map(|(name, tags)| {
+                            view! {
+                                <header class="principal-header">
+                                    <h2>{name}</h2>
+                                    <span class="principal-tags">{tags}</span>
+                                </header>
+                            }
+                        })
+                    }}
+                    <Lines class="principal-lines" lines=lines.into()/>
+                    <For each=move || kinds.get() key=|kind| *kind children=move |kind| {
+                        view! { <Section doc=doc at=SectionAt::of(id, kind) first=first/> }
+                    }/>
+                </section>
+            }
+        })
     }
 }
 

@@ -1,11 +1,12 @@
 //! The person's view of a Claude Code session: what the session holds in fwd, as one document that
-//! a pane beside the chat draws, and later the page (Daniel, 2026-11-13: it "must not be a wall of
-//! text, but a really clean and readable list. I shouldn't even see any of the entity ids, but
-//! rather click them to get more detail"). fwd owns what the view says, its order and what can be
-//! done from it, so that whatever draws it knows no fwd verb and draws every section and every
-//! record the same way: a principal is a [`Group`], a section a headed [`List`], a record a [`Row`],
-//! its title and tags, that opens into its lines and its actions (docs/design/cli.md, "The person's
-//! view of a session").
+//! the session's companion view draws in the page (crates/fwd-web/src/companion.rs), and a pane
+//! beside the chat as its fallback (Daniel, 2026-11-13: it "must not be a wall of text, but a
+//! really clean and readable list. I shouldn't even see any of the entity ids, but rather click
+//! them to get more detail"). fwd owns what the view says, its order and what can be done from it,
+//! so that whatever draws it knows no fwd verb and draws every section and every record the same
+//! way: a principal is a [`Group`], a section a headed [`List`], a record a [`Row`], its title and
+//! tags, that opens into its lines and its actions (docs/design/cli.md, "The person's view of a
+//! session").
 //!
 //! First, at its root, the session's active intentions: those assigned to the principals bound to
 //! its own thread, of any project, read as `fwd prime` reads them (`intentions::assigned_to`). Then

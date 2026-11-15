@@ -3,15 +3,16 @@
 //! and quieter (Daniel, D227: "the Name and the date of any citations should be to the right side,
 //! smaller, subtler. Attribution is secondary to the context, not primary"), a question's Answer
 //! where the document offers one (`answer.rs`), and a link to its page in the app, in a new tab,
-//! where it has one. A title cut from the text the first line holds gives
-//! way to that line when the record opens, so that nothing is said twice (Daniel: "we need to be
-//! extremely efficient with layout, ergonomics, and non-repetition"), and no tag says again what
-//! the heading above it says ([`shown_tags`]). A record with no line and no action does not open,
-//! and its title leads to its page. No id shows: the record is reached through its page.
+//! where it has one. A title cut from the text the first line holds gives way to that line when
+//! the record opens, so that nothing is said twice (Daniel: "we need to be extremely efficient
+//! with layout, ergonomics, and non-repetition"), and no tag says again what the heading above it
+//! says ([`shown_tags`]). A record with no line and no action does not open, and its title leads
+//! to its page. No id shows: the record is reached through its page.
 
 use super::answer::Answer;
 use super::markdown;
 use super::section::SectionAt;
+use super::Minute;
 use crate::fmt;
 use ankurah::EntityId;
 use fwd_core::model::TaskStatus;
@@ -19,7 +20,8 @@ use fwd_core::session_view::{status_words, Byline, Document, ListKind, Row, RowK
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-/// What a link to a record's page says: the app's word for it, and the arrow of a new tab.
+/// What a link to a record's page says: the word the app's lozenge preview has for that link. An
+/// arrow after it says the page opens in a new tab.
 const OPEN: &str = "open";
 
 /// The record `id` of the section `at` of the document `doc` shows, open from the start when
@@ -47,9 +49,10 @@ pub fn Record(doc: Signal<Option<Document>>, at: SectionAt, id: EntityId, opened
                 None => view! { <span class="record-title">{title}</span> }.into_any(),
             };
             return view! {
-                <li class="record plain">
+                <li class="record">
                     <div class="record-head">
-                        <span></span>
+                        // The caret's room, so that the title stands where the others' do.
+                        <span aria-hidden="true"></span>
                         {title}
                         <Tags tags=tags.into()/>
                     </div>
@@ -75,9 +78,8 @@ pub fn Record(doc: Signal<Option<Document>>, at: SectionAt, id: EntityId, opened
         // The document's Answer, on a question it offers to answer: the action that asks for words.
         let answer = Memo::new(move |_| {
             row.with(|r| {
-                r.as_ref()
-                    .filter(|r| r.kind == RowKind::Ask)
-                    .and_then(|r| r.actions.iter().find(|a| a.input.is_some()).cloned())
+                let asking = r.as_ref().filter(|r| r.kind == RowKind::Ask)?;
+                asking.actions.iter().find_map(|a| Some((a.label.clone(), a.input.clone()?)))
             })
         });
         view! {
@@ -87,7 +89,7 @@ pub fn Record(doc: Signal<Option<Document>>, at: SectionAt, id: EntityId, opened
                         <span class="chevron" aria-hidden="true"></span>
                         <span class="record-title">
                             <span class="closed-title" class:cut=cut>{title}</span>
-                            {move || full.get().map(|html| view! { <span class="open-title" inner_html=html></span> })}
+                            {move || full.get().map(|html| view! { <span class="open-title md" inner_html=html></span> })}
                         </span>
                         <Tags tags=tags.into()/>
                     </summary>
@@ -99,7 +101,10 @@ pub fn Record(doc: Signal<Option<Document>>, at: SectionAt, id: EntityId, opened
                             {move || byline.get().map(|byline| view! { <Attribution byline=byline/> })}
                         </div>
                         {move || match answer.get() {
-                            Some(action) => view! { <Answer question=id action=action writing=opened link=link.into()/> }.into_any(),
+                            Some((label, input)) => view! {
+                                <Answer question=id label=label input=input writing=opened link=link.into()/>
+                            }
+                            .into_any(),
                             None => view! { <div class="record-footer"><PageLink link=link.into()/></div> }.into_any(),
                         }}
                     </div>
@@ -138,22 +143,16 @@ fn Tags(tags: Signal<Vec<Shown>>) -> impl IntoView {
 /// How long ago `ms` was, kept current by the page's minute, with the time itself on hover.
 #[component]
 fn Age(ms: i64) -> impl IntoView {
-    let minute = use_context::<Minute>();
+    let Minute(minute) = expect_context::<Minute>();
     view! {
         <time title=fmt::clock(ms)>
             {move || {
-                if let Some(minute) = &minute {
-                    minute.0.track();
-                }
+                minute.track();
                 fmt::ago(ms)
             }}
         </time>
     }
 }
-
-/// What makes the ages on the page read the clock again, once a minute.
-#[derive(Clone)]
-pub struct Minute(pub ArcTrigger);
 
 /// Whose words an intention holds and when they were last written down, at the right, smaller.
 #[component]
@@ -205,15 +204,15 @@ fn instant_ms(at: &str) -> Option<i64> {
 
 /// What the page shows of a tag: its words, unless the heading says them, and when it dates.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Shown {
-    pub text: Option<String>,
-    pub at: Option<String>,
+struct Shown {
+    text: Option<String>,
+    at: Option<String>,
 }
 
 /// The tags `row` shows in the section `kind`, less what the section's heading says already: under
 /// Waiting On You, that a question waits on the person, whose time stays; under Working On, a task's
 /// usual state there, in progress.
-pub fn shown_tags(kind: ListKind, row: &Row) -> Vec<Shown> {
+fn shown_tags(kind: ListKind, row: &Row) -> Vec<Shown> {
     let usual = (kind == ListKind::Holds && row.kind == RowKind::Task).then(|| status_words(TaskStatus::InProgress));
     row.tags
         .iter()

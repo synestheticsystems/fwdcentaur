@@ -15,23 +15,28 @@ use ankurah::EntityId;
 use fwd_core::model::{MessageView, Priority};
 use fwd_core::ops::{self, MessageContext};
 use fwd_core::project_graph::Followed;
-use fwd_core::session_view::Action;
+use fwd_core::session_view::Input;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
-/// The box that answers the question `question` with the document's `action`, open from the start
-/// when `writing`, with the link to the question's page, `link`, beside its button.
+/// The box that answers the question `question` with the document's action, its `label` and what
+/// it asks for, `input`, open from the start when `writing`, with the link to the question's page,
+/// `link`, beside its button.
 #[component]
-pub fn Answer(question: EntityId, action: Action, writing: bool, link: Signal<Option<String>>) -> impl IntoView {
-    let Some(input) = action.input else { return ().into_any() };
-    let label = action.label;
+pub fn Answer(
+    question: EntityId,
+    label: String,
+    input: Input,
+    writing: bool,
+    link: Signal<Option<String>>,
+) -> impl IntoView {
     let writing = RwSignal::new(writing);
     let words = RwSignal::new(String::new());
     let sending = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     // Nothing is sent while the connection to the daemon is lost; the words stay in the box.
-    let Connected(connected) = use_context::<Connected>().unwrap_or(Connected(Signal::stored(true)));
+    let Connected(connected) = expect_context::<Connected>();
     let field_id = format!("answer-{}", question.to_base64());
     let send = move || {
         let text = words.get_untracked().trim().to_string();
@@ -116,7 +121,6 @@ pub fn Answer(question: EntityId, action: Action, writing: bool, link: Signal<Op
             }}
         </div>
     }
-    .into_any()
 }
 
 /// Posts `text` as `me`'s reply in the thread of `question`, at the priority of what it answers,
