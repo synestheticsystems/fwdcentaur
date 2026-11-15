@@ -606,9 +606,9 @@ impl ListKind {
     fn title(self) -> &'static str {
         match self {
             ListKind::ActiveIntentions => "Active Intentions",
-            ListKind::WaitsOnYou => "Waiting on you",
+            ListKind::WaitsOnYou => "Waiting On You",
             ListKind::Holds => "Working On",
-            ListKind::WaitsOnOthers => "Waiting on others",
+            ListKind::WaitsOnOthers => "Waiting On Others",
         }
     }
 

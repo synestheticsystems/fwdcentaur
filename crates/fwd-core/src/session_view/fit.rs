@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(holds.more, None);
         assert!(doc.principals[0].sections[0].lines.is_empty() && doc.principals[0].sections[0].more.is_none());
 
-        // Waiting on you, cut, gives the page's list of it.
+        // Waiting On You, cut, gives the page's list of it.
         let mut many = document(vec![group(&[(ListKind::WaitsOnYou, 80)])]);
         within_budget(&mut many, more);
         let waits = &many.principals[0].sections[0];

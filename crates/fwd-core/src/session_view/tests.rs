@@ -213,9 +213,9 @@ fn each_record_stands_in_the_list_of_whom_it_waits_on() {
     assert_eq!(
         headed,
         [
-            (&json!("Waiting on you"), &secondary),
+            (&json!("Waiting On You"), &secondary),
             (&json!("Working On"), &secondary),
-            (&json!("Waiting on others"), &secondary)
+            (&json!("Waiting On Others"), &secondary)
         ]
     );
 }
