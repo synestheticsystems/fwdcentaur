@@ -3,9 +3,9 @@
 to the code. Write the page from fwd's own models, in crates/fwd-core/src/model.rs, and from the
 Commons' models, in the Commons' sources at the revision Cargo.lock pins, which `cargo metadata` finds;
 with `--check`, as CI runs it, write nothing and fail at the first difference between the committed
-page and what this would write. The run stops at a model the mapping below does not place, and at an
-entry of the mapping that names no model, so that the mapping names exactly the models the code
-declares.
+page and what this would write. The run stops at a model the mapping below does not place, at an entry
+of the mapping that names no model, and at a Commons label the mapping's prose names that no Commons
+model has, so that the mapping names exactly the models and labels the code declares.
 
     python3 -I scripts/data-models-page.py [--check]
 """
@@ -47,9 +47,15 @@ COUNTERPART = {
 }
 # fwd's models kept only to read older stores, by their paths in model.rs.
 FOR_OLDER_STORES = ['before_d108::Scope']
-# The Commons models fwd uses, in the order the page lists them.
+# The Commons models fwd uses, in the order the page lists them, and the page's note on them, in HTML.
 COMMONS_USED = ['Intention', 'Creation', 'Attribution', 'LastEdit', 'Closure']
-# The Commons models planned for fwd, each with what it replaces in fwd.
+COMMONS_USED_NOTE = (
+    "An intention requires the Commons' <code>Intention</code> and <code>Creation</code>. Add <code>Attribution</code> "
+    "when recording someone else's intention, <code>LastEdit</code> after rewording and <code>Closure</code> after "
+    "fulfillment or withdrawal. Store these components on one entity with fwd's <code>Placement</code> for project "
+    'membership. Read Commons views directly (D213). Commons <code>identity.principal</code> is used only as the type '
+    "of these components' references to people and agents; these hold fwd principal IDs until principals migrate.")
+# The Commons models planned for fwd, each with what it replaces in fwd, and the page's note on them, in HTML.
 COMMONS_PLANNED = {
     'Task': 'Task', 'Decision': 'Decision', 'Link': 'Relation', 'Scope': 'Scope',
     'Submission': 'Task submission fields', 'Assignment': 'Task assignee; question addressee', 'Message': 'Message',
@@ -58,6 +64,7 @@ COMMONS_PLANNED = {
     'Credential': 'Principal authentication subject', 'Claim': 'nothing yet', 'Perspective': 'nothing yet',
     'Ownership': 'nothing yet',
 }
+COMMONS_PLANNED_NOTE = '<code>Claim</code>, <code>Perspective</code> and <code>Ownership</code> add new record types.'
 # The Commons namespace for other applications, whose models fwd does not compile.
 NOT_FOR_FWD = 'health'
 
@@ -163,9 +170,24 @@ def commons_sources():
             f"{source['repository']}/blob/{source['revision']}")
 
 
+# A Commons label as the mapping's prose writes one: a namespace, a dot and a model's name in snake case.
+PROSE_LABEL = re.compile(r'\b[a-z]{2,}(?:-[a-z]{2,})*\.[a-z]{2,}(?:_[a-z0-9]+)*\b')
+
+
+def prose():
+    """Each entry of the mapping that holds prose, by its name, with its prose."""
+    for path, (counterpart, note) in COUNTERPART.items():
+        yield f'COUNTERPART[{path!r}]', f'{counterpart or ""} {note}'
+    for path, replaced in COMMONS_PLANNED.items():
+        yield f'COMMONS_PLANNED[{path!r}]', replaced
+    yield 'COMMONS_USED_NOTE', COMMONS_USED_NOTE
+    yield 'COMMONS_PLANNED_NOTE', COMMONS_PLANNED_NOTE
+
+
 def place(fwd, commons):
     """The page's lists of `fwd`'s models and the `commons`' models, as the mapping places them. Raises
-    PageError, naming each, for the models the mapping does not place and its entries that name no model."""
+    PageError, naming each, for the models the mapping does not place, its entries that name no model and
+    the Commons labels its prose names that none of `commons` has."""
     problems = [f"fwd model {m['path']} ({m['file']}:{m['line']}) is not in the mapping: add it to COUNTERPART, "
                 f'or to FOR_OLDER_STORES if fwd keeps it only to read older stores, in {SCRIPT}.'
                 for m in fwd if m['path'] not in COUNTERPART and m['path'] not in FOR_OLDER_STORES]
@@ -179,6 +201,10 @@ def place(fwd, commons):
     commons_by_path = {m['path']: m for m in commons}
     problems += [f'{SCRIPT} places Commons model {path}, which the Commons does not declare: take it out of the '
                  'mapping.' for path in [*COMMONS_USED, *COMMONS_PLANNED] if path not in commons_by_path]
+    labels = {m['label'] for m in commons}
+    problems += [f'{entry} in {SCRIPT} names the Commons label {label}, which no Commons model has: correct it to '
+                 'the label of the model it means.'
+                 for entry, text in prose() for label in PROSE_LABEL.findall(text) if label not in labels]
     if problems:
         raise PageError('\n'.join(problems))
     return Placed(own=[m for m in fwd if m['path'] in COUNTERPART],
@@ -325,7 +351,7 @@ def page(placed, revision, blob):
 <div class="table-wrap"><table class="glance"><thead><tr><th>fwd's model</th><th>Its Commons counterpart</th><th>Note</th></tr></thead><tbody>{glance}</tbody></table></div>
 
 <h2>Commons models fwd uses</h2>
-<p>An intention requires the Commons' <code>Intention</code> and <code>Creation</code>. Add <code>Attribution</code> when recording someone else's intention, <code>LastEdit</code> after rewording and <code>Closure</code> after fulfillment or withdrawal. Store these components on one entity with fwd's <code>Placement</code> for project membership. Read Commons views directly (D213). Commons <code>identity.principal</code> is used only as the type of these components' references to people and agents; these hold fwd principal IDs until principals migrate.</p>
+<p>{COMMONS_USED_NOTE}</p>
 {used}
 
 <h2>fwd's own models</h2>
@@ -335,7 +361,7 @@ def page(placed, revision, blob):
 {older}
 
 <h2>Commons models fwd does not use yet</h2>
-<p><code>Claim</code>, <code>Perspective</code> and <code>Ownership</code> add new record types.</p>
+<p>{COMMONS_PLANNED_NOTE}</p>
 <div class="table-wrap"><table class="waiting"><thead><tr><th>Model</th><th>Label</th><th>What it is</th><th>Replaces in fwd</th></tr></thead><tbody>{planned}</tbody></table></div>
 
 <h2>Commons models not for fwd</h2>
