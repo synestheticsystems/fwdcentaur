@@ -620,10 +620,42 @@ struct Written<'a> {
 /// (`routing::asked_of`): what [`Read::questions`] reads beside the questions asked by its id, and
 /// the live form of it ([`LiveRead::QuestionsByName`]).
 pub fn questions_by_name(handle: &str, of_no_one: bool) -> Result<Selection<Parsed>> {
-    let mut by_rule = format!("status = '{}' AND (context.to = ? OR context.to = ?", MessageStatus::Active);
+    // The browser's IndexedDB engine fails a whole fetch on a row that lacks a JSON path the
+    // predicate compares, where SQLite skips the row (Ankurah task g5M3ZVqe), so each comparison
+    // of one is guarded by IS NOT NULL, which selects the same rows; the guard goes once fwd's pin
+    // has the fix.
+    let mut by_rule = format!(
+        "status = '{}' AND ((context.to IS NOT NULL AND (context.to = ? OR context.to = ?))",
+        MessageStatus::Active
+    );
     if of_no_one {
-        by_rule.push_str(&format!(" OR context.{ASKS_KEY} = '{ASKS_PROJECT}'"));
+        by_rule.push_str(&format!(" OR (context.{ASKS_KEY} IS NOT NULL AND context.{ASKS_KEY} = '{ASKS_PROJECT}')"));
     }
     by_rule.push(')');
     with_strings(&by_rule, &[handle, &format!("@{handle}")])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::questions_by_name;
+    use crate::query::evaluate;
+    use ankurah::Value;
+
+    /// The questions asked of a principal by its name skip a message that lacks the paths they
+    /// compare, as SQL skips it, where the browser's engine would fail the whole fetch (Ankurah task
+    /// g5M3ZVqe); they keep one asked by the name, and for a triage agent one asked of no one in
+    /// particular.
+    #[test]
+    fn the_questions_asked_by_name_skip_a_message_without_the_paths_they_compare() {
+        let active = || ("status", Value::String("active".into()));
+        let reply = [active()];
+        let named = [active(), ("context.to", Value::String("@lead-sam".into()))];
+        let of_no_one = [active(), ("context.asks", Value::String("project".into()))];
+        for triage in [false, true] {
+            let selection = questions_by_name("lead-sam", triage).expect("a selection");
+            assert_eq!(evaluate(&selection, &reply), Ok(false), "a triage agent's: {triage}");
+            assert_eq!(evaluate(&selection, &named), Ok(true), "a triage agent's: {triage}");
+            assert_eq!(evaluate(&selection, &of_no_one), Ok(triage), "a triage agent's: {triage}");
+        }
+    }
 }
