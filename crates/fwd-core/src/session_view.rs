@@ -79,8 +79,8 @@ pub struct Document {
 /// A principal bound to the session, with the lists of what it holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Group {
-    /// The principal's id, the same from one document to the next.
-    pub id: String,
+    /// The principal's id, the same from one document to the next, written as its base64.
+    pub id: EntityId,
     /// Its name.
     pub title: String,
     /// Its role, its project, for a subagent the task it has in progress, and how many unread
@@ -109,7 +109,7 @@ pub struct List {
 }
 
 /// The sections of the view, in the order they stand: the session's own, then a principal's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListKind {
     /// The intentions assigned to the principals of the session's own thread that it holds.
@@ -134,8 +134,8 @@ pub enum Prominence {
 /// A record, as a row that opens into its lines and its actions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Row {
-    /// The record's id, unique within its list.
-    pub id: String,
+    /// The record's id, unique within its list, written as its base64.
+    pub id: EntityId,
     pub kind: RowKind,
     /// Plain text on one line.
     pub title: String,
@@ -342,7 +342,7 @@ async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(Placemen
         tags.push(Tag::plain(&status.to_string()));
     }
     Ok(Row {
-        id: placement.id().to_base64(),
+        id: placement.id(),
         kind: RowKind::Intention,
         title: plain(&intention.title()?, TITLE_LIMIT),
         title_is_cut: false,
@@ -484,7 +484,7 @@ impl Held {
             .collect();
         let own_thread = h.subject.as_deref().is_some_and(subject::is_main_thread);
         Group {
-            id: h.principal.to_base64(),
+            id: h.principal,
             title: plain(&h.handle, TITLE_LIMIT),
             tags: self.group_tags(h, own_thread),
             lines: Vec::new(),
@@ -561,7 +561,7 @@ impl Held {
             Some(text) => block(&self.cited.markdown(text, page)).into_iter().collect(),
         };
         Row {
-            id: r.id.to_base64(),
+            id: r.id,
             kind,
             title,
             title_is_cut: false,
@@ -644,8 +644,9 @@ impl Tag {
     }
 }
 
-/// A task's status as a person reads it: `in progress`, not `in_progress`.
-fn status_words(status: TaskStatus) -> String {
+/// A task's status as a person reads it, as a task's row is tagged by it: `in progress`, not
+/// `in_progress`.
+pub fn status_words(status: TaskStatus) -> String {
     status.to_string().replace('_', " ")
 }
 

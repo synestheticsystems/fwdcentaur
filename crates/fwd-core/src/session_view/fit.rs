@@ -101,10 +101,11 @@ fn json_len(value: &impl serde::Serialize) -> usize {
 mod tests {
     use super::super::{Group, List, Prominence, Row, RowKind, TITLE};
     use super::*;
+    use ankurah::EntityId;
 
     fn row(n: usize, words: usize) -> Row {
         Row {
-            id: format!("r{n}"),
+            id: EntityId::from_bytes([u8::try_from(n).expect("a row of the tests"); 32]),
             kind: RowKind::Task,
             title: format!("Task {n}"),
             title_is_cut: false,
@@ -118,7 +119,7 @@ mod tests {
 
     fn group(lists: &[(ListKind, usize)]) -> Group {
         Group {
-            id: "g".into(),
+            id: EntityId::from_bytes([255; 32]),
             title: "impl-sam".into(),
             tags: Vec::new(),
             lines: Vec::new(),

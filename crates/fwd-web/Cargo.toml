@@ -39,7 +39,10 @@ web-sys = { version = "0.3", features = [
     "ScrollLogicalPosition", "SpeechSynthesis", "SpeechSynthesisUtterance", "SpeechSynthesisVoice",
     "Navigator", "Clipboard", "HtmlDocument", "Event", "CustomEvent", "CustomEventInit", "HtmlSelectElement",
     "DomRect", "MouseEvent", "PointerEvent", "UiEvent", "FocusEvent", "MediaQueryList", "CssStyleDeclaration",
+    "Selection",
 ] }
+# The companion view draws the session view's lines, each a Markdown block (companion/markdown.rs).
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 send_wrapper = "0.6"
 # The page reads a project's id, from the daemon's project list, as the UUID its graph is opened by.
 uuid = "1"
