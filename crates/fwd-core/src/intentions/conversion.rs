@@ -1,14 +1,15 @@
 //! `fwd admin migrate`, the part that moves a project's intentions from the Commons' models of
-//! 84ea084, whose definitions fwd's node minted for itself (D205), onto those of a9ea175.
+//! 84ea084, whose definitions fwd's node minted for itself (D205), onto the definitions of the
+//! Commons' kept mint (D256).
 
 use super::quotation::quote;
 use super::{at, principal_ref, Outcome};
 use crate::model::{Placement, PlacementView};
 use crate::project_graph::ProjectGraph;
 use ankurah::model::Mutable;
-use ankurah::{EntityId, Model};
+use ankurah::{EntityId, Model, ModelId, PropertyId, Value, View};
 use ankurah_commons::cognition::{Intention, IntentionView};
-use ankurah_commons::records::{AttributionView, Closed, ClosedView, Created, CreatedView, Edited, EditedView};
+use ankurah_commons::records::{Attribution, Closed, ClosedView, Created, CreatedView, Edited, EditedView};
 use ankurah_commons::text::Quotation;
 use anyhow::{bail, Result};
 use serde_json::json;
@@ -17,8 +18,8 @@ use serde_json::json;
 /// before an intention became a description that belongs to no one (D229) and before the Commons
 /// renamed the components of a record's course: what [`convert`] reads, and nothing else. Each
 /// struct keeps the label, the name and the fields it had then, by which the node binds it to the
-/// definitions it minted; `Attribution`, whose label the Commons kept, is read through the
-/// Commons' own.
+/// definition it minted, the only one of its label. Whose words they held is not declared here:
+/// the kept mint has a definition of that label too ([`old_speakers`]).
 pub mod before_d229 {
     use ankurah::{EntityId, Model, Ref};
     use ankurah_commons::identity::Principal;
@@ -98,9 +99,9 @@ struct Additions {
     speaker: Option<EntityId>,
 }
 
-/// Moves the project's intentions onto the Commons' models of a9ea175, as `by` runs the migration,
-/// adding to each entity and keeping its id: Ankurah cannot take a component off an entity yet, so
-/// the components of 84ea084 stay beside the new ones, and nothing is deleted. Each intention gets
+/// Moves the project's intentions onto the Commons' kept mint, as `by` runs the migration, adding
+/// to each entity and keeping its id: Ankurah cannot take a component off an entity yet, so the
+/// components of 84ea084 stay beside the new ones, and nothing is deleted. Each intention gets
 /// `Intention`, its title and its words as the description; `Created`; `Edited` when it was
 /// reworded; `Closed` with its outcome and reason when it was fulfilled or withdrawn; and a
 /// quotation of its words as last written down, by whom and when, naming their speaker when that
@@ -110,13 +111,14 @@ struct Additions {
 /// stops halfway leaves each intention whole, and an intention that carries the new `Intention`
 /// has moved, so a second run changes nothing.
 pub async fn convert(graph: &ProjectGraph, by: EntityId) -> Result<Vec<Converted>> {
+    let speakers = old_speakers(graph).await?;
     let mut moves = Vec::new();
     let mut refused = Vec::new();
     for (placement, old) in graph.all_placed::<before_d229::IntentionView>().await? {
         if graph.component_of::<IntentionView>(&placement).await?.is_some() {
             continue;
         }
-        match additions(graph, placement, &old).await? {
+        match additions(graph, placement, &old, &speakers).await? {
             Ok(additions) => moves.push(additions),
             Err((id, why)) => refused.push(format!("{} ({why})", id.to_base64())),
         }
@@ -152,12 +154,56 @@ pub async fn convert(graph: &ProjectGraph, by: EntityId) -> Result<Vec<Converted
     Ok(converted)
 }
 
+/// The definitions of `records.attribution` the node minted for itself, by which a record of
+/// 84ea084 said whose words it held, each with its property `speaker`. The kept mint has a
+/// definition of that label too, to which the Commons' `Attribution` binds, and a model bound by its
+/// label reaches whichever of the two has the lower id, which differs from store to store; so the
+/// node's own are read from the catalog, as those of the label that are not the mint's.
+async fn old_speakers(graph: &ProjectGraph) -> Result<Vec<(ModelId, PropertyId)>> {
+    let descriptor = Attribution::descriptor();
+    let minted = descriptor.explicit_id.map(EntityId::from_base64).transpose()?;
+    let mut found = Vec::new();
+    for model in graph.models_labelled(descriptor.label).await? {
+        if Some(model) == minted {
+            continue;
+        }
+        let Some(speaker) = graph.property_named(model, "speaker").await? else {
+            bail!("the node's definition {} of `{}` has no property `speaker`", model.to_base64(), descriptor.label);
+        };
+        found.push((ModelId::EntityId(model), PropertyId::EntityId(speaker)));
+    }
+    Ok(found)
+}
+
+/// Whose words the record `placement` is on held, as its `Attribution` of 84ea084 says: none when
+/// it carries none, else the speaker it names, none again for a speaker no one knew; or why it
+/// cannot be read.
+fn old_speaker(
+    placement: &PlacementView,
+    speakers: &[(ModelId, PropertyId)],
+) -> Result<Option<Option<EntityId>>, String> {
+    let entity = placement.entity();
+    let mut carried = speakers.iter().filter(|(model, _)| entity.has_membership(model));
+    let Some((_, speaker)) = carried.next() else { return Ok(None) };
+    if carried.next().is_some() {
+        return Err("it carries more than one attribution of 84ea084".into());
+    }
+    match entity.property_value(speaker) {
+        Ok(Some(Value::EntityId(id))) => Ok(Some(Some(id))),
+        Ok(None) => Ok(Some(None)),
+        Ok(Some(other)) => Err(format!("its attribution names {other:?}, which is no principal's id")),
+        Err(e) => Err(format!("its attribution cannot be read: {e}")),
+    }
+}
+
 /// What the intention `placement` is on gets ([`convert`]), read from `old` and the components
-/// of 84ea084 beside it; or its id and why it cannot move without losing part of what it holds.
+/// of 84ea084 beside it, its speaker by `speakers` ([`old_speakers`]); or its id and why it cannot
+/// move without losing part of what it holds.
 async fn additions(
     graph: &ProjectGraph,
     placement: PlacementView,
     old: &before_d229::IntentionView,
+    speakers: &[(ModelId, PropertyId)],
 ) -> Result<Result<Additions, (EntityId, String)>> {
     let id = placement.id();
     let refuse = |why: &str| -> Result<Result<Additions, (EntityId, String)>> { Ok(Err((id, why.to_string()))) };
@@ -173,14 +219,14 @@ async fn additions(
             return refuse(&format!("it carries `{label}` already, which the conversion would not overwrite"));
         }
     }
-    let attribution = graph.component_of::<AttributionView>(&placement).await?;
     let last_edit = graph.component_of::<before_d229::LastEditView>(&placement).await?;
     let closure = graph.component_of::<before_d229::ClosureView>(&placement).await?;
     let (written_by, created) = (*creation.created_by()?, creation.created()?);
     // Whose words they are: the speaker the record's `Attribution` names, else whoever wrote it down.
-    let speaker = match &attribution {
-        Some(a) => a.speaker()?.map(|speaker| *speaker),
-        None => Some(written_by),
+    let speaker = match old_speaker(&placement, speakers) {
+        Ok(Some(named)) => named,
+        Ok(None) => Some(written_by),
+        Err(why) => return refuse(&why),
     };
     // The words as they stand were last written down at their last rewording, else with the record.
     let (last_writer, last_written) = match &last_edit {

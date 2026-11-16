@@ -495,7 +495,7 @@ enum AdminCommand {
     /// field (2026-09-28); from the supervisor role to the fixed roles, with who belongs to the
     /// project recorded, and to scopes without an owner or a heartbeat (2026-09-29); to tasks
     /// placed in a scope by their `worked_in` alone (2026-10-03); and to intentions on the Commons'
-    /// models of a9ea175 (2026-11-16). Prints what it changed; a second run changes nothing.
+    /// kept mint (2026-11-16). Prints what it changed; a second run changes nothing.
     ///
     /// Each task with an accepted `assigned_to` to a scope and no assignee gets whoever made that
     /// scope (its owner, until scopes lost their owner), and every `assigned_to` from a task to a
@@ -4768,7 +4768,7 @@ fn migration_text(v: &Value) -> String {
         })
         .collect();
     lines.push(format!(
-        "intentions moved onto the Commons' models of a9ea175, each keeping its id: {}",
+        "intentions moved onto the Commons' kept mint, each keeping its id: {}",
         if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
     ));
     lines.join("\n")
@@ -6662,7 +6662,7 @@ mod tests {
                 "only read here, not belonging: none",
                 "scopes whose owner and heartbeat were cleared, a scope having neither since 2026-09-29: Initial implementation (x_M0XLwr)",
                 "tasks made in a scope that only their record named, now worked in it: LM-OrKvY Guard the manifest in UI enhancements; hGcyWpR0 Keep the badges in gone1234",
-                "intentions moved onto the Commons' models of a9ea175, each keeping its id: q9TrWl2x Readers keep their place, its words quoted as Zk3vQe7L",
+                "intentions moved onto the Commons' kept mint, each keeping its id: q9TrWl2x Readers keep their place, its words quoted as Zk3vQe7L",
             ]
         );
     }

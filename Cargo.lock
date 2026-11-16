@@ -41,7 +41,7 @@ dependencies = [
 [[package]]
 name = "ankql"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankurah-core-types",
  "pest",
@@ -55,7 +55,7 @@ dependencies = [
 [[package]]
 name = "ankurah"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankql",
  "ankurah-core",
@@ -75,17 +75,18 @@ dependencies = [
 [[package]]
 name = "ankurah-commons"
 version = "0.0.0"
-source = "git+https://github.com/ankurah/commons?rev=a9ea175661c724dabdd555f469eb3d173bf5f098#a9ea175661c724dabdd555f469eb3d173bf5f098"
+source = "git+https://github.com/ankurah/commons?rev=d977d1461116e8aa30b39001e8af77535417fe95#d977d1461116e8aa30b39001e8af77535417fe95"
 dependencies = [
  "ankurah",
  "serde",
  "strum 0.26.3",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "ankurah-core"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankql",
  "ankurah-core-types",
@@ -125,7 +126,7 @@ dependencies = [
 [[package]]
 name = "ankurah-core-types"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -144,7 +145,7 @@ dependencies = [
 [[package]]
 name = "ankurah-derive"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankql",
  "ankurah-core-types",
@@ -161,7 +162,7 @@ dependencies = [
 [[package]]
 name = "ankurah-proto"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankql",
  "ankurah-core-types",
@@ -187,7 +188,7 @@ dependencies = [
 [[package]]
 name = "ankurah-signals"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "js-sys",
  "reactive_graph",
@@ -201,7 +202,7 @@ dependencies = [
 [[package]]
 name = "ankurah-storage-common"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankql",
  "ankurah-core",
@@ -217,7 +218,7 @@ dependencies = [
 [[package]]
 name = "ankurah-storage-sqlite"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankql",
  "ankurah-core",
@@ -240,7 +241,7 @@ dependencies = [
 [[package]]
 name = "ankurah-websocket-client"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankurah-core",
  "ankurah-proto",
@@ -261,7 +262,7 @@ dependencies = [
 [[package]]
 name = "ankurah-websocket-server"
 version = "0.10.0"
-source = "git+https://github.com/ankurah/ankurah?rev=5919b1a06b5c3e462597d4627521354f9052f4bb#5919b1a06b5c3e462597d4627521354f9052f4bb"
+source = "git+https://github.com/ankurah/ankurah?rev=6ffaa3367698639e261b37a3c010dc0162f36443#6ffaa3367698639e261b37a3c010dc0162f36443"
 dependencies = [
  "ankurah-core",
  "ankurah-proto",
