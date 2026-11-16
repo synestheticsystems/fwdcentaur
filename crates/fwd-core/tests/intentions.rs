@@ -6,7 +6,7 @@
 
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
 use ankurah_commons::property::Timestamp;
-use ankurah_commons::records::{ClosedView, Created, EditedView};
+use ankurah_commons::records::{Closed, ClosedView, Created, EditedView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::durable;
@@ -166,6 +166,38 @@ async fn an_ended_intention_is_neither_reworded_nor_ended_again_and_a_withdrawal
     assert!(refusal(again).contains("fulfilled already"));
     let reworded = intentions::reword(&w.alpha, w.ines, &it, None, Some("more"), None).await;
     assert!(refusal(reworded).contains("not reworded"));
+    Ok(())
+}
+
+/// Reopens the intention `record` as the Commons reopen a record, which another of their readers may
+/// do: every field of its `Closed` cleared, the component left on it.
+async fn reopen(w: &World, (placement, _): &(PlacementView, Parts)) -> Result<()> {
+    let trx = w.alpha.begin();
+    {
+        let closed = trx.edit_placed::<Closed>(placement)?;
+        closed.closed()?.set(&None)?;
+        closed.by()?.set(&None)?;
+        closed.outcome()?.set(&None)?;
+        closed.reason()?.set(&None)?;
+    }
+    Ok(trx.commit().await?)
+}
+
+/// An intention the Commons reopened reads as open, and is closed again in the `Closed` it carries.
+#[tokio::test]
+async fn an_intention_reopened_through_the_commons_is_closed_again() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w, w.ines, "Readers keep their place", None).await?;
+    intentions::close(&w.alpha, w.ines, &it, Outcome::Fulfilled, Some("shipped".into()), None).await?;
+    reopen(&w, &it).await?;
+    assert_eq!(intentions::outcome(w.alpha.component_of::<ClosedView>(&it.0).await?.as_ref())?, None);
+
+    intentions::close(&w.alpha, w.ines, &it, Outcome::Withdrawn, Some("no longer wanted".into()), None).await?;
+    let closed = w.alpha.component_of::<ClosedView>(&it.0).await?.expect("closed");
+    assert_eq!(
+        (intentions::outcome(Some(&closed))?, closed.by()?.map(|by| *by), closed.reason()?),
+        (Some(Outcome::Withdrawn), Some(w.ines), Some("no longer wanted".into()))
+    );
     Ok(())
 }
 
