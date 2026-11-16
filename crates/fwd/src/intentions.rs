@@ -115,8 +115,9 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
                     if !listed.insert(id) {
                         continue;
                     }
-                    // A typed fetch cannot select the intentions that lack `Closed` (Ankurah task
-                    // B5EEndJf), so the ended ones are dropped from what was read.
+                    // Ankurah's typed fetch selects only entities that carry every component it
+                    // names, never those that lack one, so the ended ones, which carry `Closed`, are
+                    // dropped from what was read.
                     match assigned {
                         Followed::Held { found, .. } => {
                             match intentions::outcome(graph.component_of::<ClosedView>(&found.0).await?.as_ref()) {
