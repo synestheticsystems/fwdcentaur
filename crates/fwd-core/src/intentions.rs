@@ -7,8 +7,10 @@
 //! `ProjectGraph::component_of`. An intention is assigned to a principal, or to several, by an
 //! `assigned_to` relation for each, which lives with the intention in its project (D218, D219).
 
+mod conversion;
 mod quotation;
 
+pub use conversion::{before_d229, convert, Converted};
 pub use quotation::{quotation_of, speaker, whose_words, Quoted};
 
 use crate::model::{PlacementView, PrincipalKind, PrincipalView, RelationKind, RelationStatus, RelationView};
