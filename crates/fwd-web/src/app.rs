@@ -1,15 +1,16 @@
-//! The shell: the top bar (brand, the project and its selector, the scope the Questions, Tasks,
-//! Decisions and Graph pages list by, nav with the live count of what waits on the acting
-//! principal, the acting principal, the
-//! voice messages are read aloud in, the connection state), above it the bar that offers a newer
-//! page once the daemon has restarted on a newer build, the page the route selects, and the one
-//! preview every lozenge on the page shows (`lozenges.rs`).
+//! The page: a Claude Code session's companion view, which has none of the app's navigation
+//! (`companion.rs`), or the shell: the top bar (brand, the project and its selector, the scope the
+//! Questions, Tasks, Decisions and Graph pages list by, nav with the live count of what waits on
+//! the acting principal, the acting principal, the voice messages are read aloud in, the
+//! connection state), above it the bar that offers a newer page once the daemon has restarted on a
+//! newer build, the page the route selects, and the one preview every lozenge on the page shows
+//! (`lozenges.rs`).
 
 use crate::cards::Notifications;
 use crate::route::{self, Route};
 use crate::scope_filter::{self, HeaderScope, ScopeChoice};
 use crate::session::{self, graph};
-use crate::{anchors, decisions, graph, inbox, lozenges, questions, scopes, tasks};
+use crate::{anchors, companion, decisions, graph, inbox, lozenges, questions, scopes, tasks};
 use crate::{clock, fmt, speech, store, waiting};
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::EntityId;
@@ -20,6 +21,29 @@ use wasm_bindgen_futures::spawn_local;
 
 #[component]
 pub fn App() -> impl IntoView {
+    let route = route::route();
+    // Whoever embeds the page hears each change of its connection (`session::announce`), and a
+    // page left open across a restart onto a newer build says so (`NewerBuild`), on either page.
+    Effect::new(move |_| session::announce(&session::client().connection_state().get().to_string()));
+    session::follow_restarts();
+    // The companion view of the session its route names, or the shell; a move within the shell
+    // leaves it as it is.
+    let session = Memo::new({
+        let route = route.clone();
+        move |_| match route.get() {
+            Route::Session(session) => Some(session),
+            _ => None,
+        }
+    });
+    move || match session.get() {
+        Some(session) => view! { <companion::Companion session=session/> }.into_any(),
+        None => view! { <Shell/> }.into_any(),
+    }
+}
+
+/// The app's pages under its header, with the standing queries every one of them reads.
+#[component]
+fn Shell() -> impl IntoView {
     if let Err(reason) = store::open() {
         return view! { <BootError reason=reason/> }.into_any();
     }
@@ -90,9 +114,6 @@ pub fn App() -> impl IntoView {
         Route::Anchor(anchor) => Some(anchor),
         _ => None,
     });
-    // Whoever embeds the page hears each change of its connection (`session::announce`).
-    Effect::new(move |_| session::announce(&session::client().connection_state().get().to_string()));
-    session::follow_restarts();
     clock::keep_time();
     view! {
         <div class="shell">
@@ -153,7 +174,7 @@ fn Header(scope: Memo<Option<ScopeChoice>>) -> impl IntoView {
 /// the page comes with the extension, so the bar offers to reload the window instead
 /// (`session::reload`). Its tooltip names both builds.
 #[component]
-fn NewerBuild() -> impl IntoView {
+pub fn NewerBuild() -> impl IntoView {
     let newer = session::newer_build();
     move || {
         newer.get().map(|build| {

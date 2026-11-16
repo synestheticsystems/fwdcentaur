@@ -266,8 +266,12 @@ fn unfinished_tasks_assigned_to(principal: EntityId) -> anyhow::Result<Selection
 
 /// The open messages `principal` wrote that ask someone, or no one in particular, of every project.
 fn open_questions_by(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
+    // The browser's IndexedDB engine fails a whole fetch on a row that lacks a property or a JSON
+    // path the predicate compares, where SQLite skips the row (Ankurah task g5M3ZVqe), so each
+    // comparison of one a row may lack is guarded by IS NOT NULL, which selects the same rows; the
+    // guard goes once fwd's pin has the fix.
     let asking = format!(
-        "author = ? AND status = '{}' AND (context.to IS NOT NULL OR context.{ASKS_KEY} = '{ASKS_PROJECT}')",
+        "author = ? AND status = '{}' AND (context.to IS NOT NULL OR (context.{ASKS_KEY} IS NOT NULL AND context.{ASKS_KEY} = '{ASKS_PROJECT}'))",
         MessageStatus::Active
     );
     with_id(&asking, principal)
@@ -275,12 +279,16 @@ fn open_questions_by(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
 
 /// The open messages that ask `principal` by its id, of every project.
 fn open_questions_to(principal: EntityId) -> anyhow::Result<Selection<Parsed>> {
-    with_string(&format!("status = '{}' AND context.to = ?", MessageStatus::Active), &principal.to_base64())
+    // Guarded by IS NOT NULL for Ankurah task g5M3ZVqe, as `open_questions_by` is.
+    let asking = format!("status = '{}' AND context.to IS NOT NULL AND context.to = ?", MessageStatus::Active);
+    with_string(&asking, &principal.to_base64())
 }
 
 /// The messages that reply to `message` or are of the thread it opens, of every project.
 fn answers_to(message: EntityId) -> anyhow::Result<Selection<Parsed>> {
-    with_ids("reply_to = ? OR thread = ?", &[message, message])
+    // Guarded by IS NOT NULL for Ankurah task g5M3ZVqe, as `open_questions_by` is: a message that
+    // opens a thread has neither.
+    with_ids("(reply_to IS NOT NULL AND reply_to = ?) OR (thread IS NOT NULL AND thread = ?)", &[message, message])
 }
 
 /// None for a record the node does not hold, or holds as a record of another model.
@@ -998,5 +1006,43 @@ impl ProjectTransaction {
 
     pub async fn commit(self) -> Result<(), ProjectGraphError> {
         Ok(self.trx.commit().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{answers_to, open_questions_by, open_questions_to};
+    use crate::query::evaluate;
+    use ankurah::{EntityId, Value};
+
+    /// The questions a principal asked, and those asked of it by its id, skip a message that lacks
+    /// the paths they compare, as SQL skips it, where the browser's engine would fail the whole fetch
+    /// (Ankurah task g5M3ZVqe); they keep one that asks someone or no one in particular.
+    #[test]
+    fn the_questions_by_and_to_a_principal_skip_a_message_without_the_paths_they_compare() {
+        let principal = EntityId::from_bytes([1; 32]);
+        let mine = || [("author", Value::EntityId(principal)), ("status", Value::String("active".into()))];
+        let reply = mine();
+        let [author, status] = mine();
+        let asking = [author.clone(), status.clone(), ("context.to", Value::String(principal.to_base64()))];
+        let of_no_one = [author, status, ("context.asks", Value::String("project".into()))];
+        let (by, to) =
+            (open_questions_by(principal).expect("a selection"), open_questions_to(principal).expect("a selection"));
+        assert_eq!((evaluate(&by, &reply), evaluate(&to, &reply)), (Ok(false), Ok(false)));
+        assert_eq!((evaluate(&by, &asking), evaluate(&to, &asking)), (Ok(true), Ok(true)));
+        assert_eq!((evaluate(&by, &of_no_one), evaluate(&to, &of_no_one)), (Ok(true), Ok(false)));
+    }
+
+    /// The answers in a question's thread skip a message that opens a thread, which has no
+    /// `reply_to` and no `thread`, and keep a reply to the question and a later message of its thread
+    /// (Ankurah task g5M3ZVqe).
+    #[test]
+    fn the_answers_to_a_question_skip_a_message_that_opens_a_thread() {
+        let question = EntityId::from_bytes([2; 32]);
+        let answers = answers_to(question).expect("a selection");
+        let status = || ("status", Value::String("active".into()));
+        assert_eq!(evaluate(&answers, &[status()]), Ok(false));
+        assert_eq!(evaluate(&answers, &[status(), ("reply_to", Value::EntityId(question))]), Ok(true));
+        assert_eq!(evaluate(&answers, &[status(), ("thread", Value::EntityId(question))]), Ok(true));
     }
 }

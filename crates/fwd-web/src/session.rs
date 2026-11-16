@@ -17,6 +17,10 @@
 //! again, and offers to load the new page when the daemon now runs another build
 //! (`follow_restarts`).
 
+mod writing;
+
+pub use writing::while_writing;
+
 use crate::route::Route;
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
@@ -182,6 +186,19 @@ pub fn url_in(id: &str, route: &Route) -> Option<String> {
         return None;
     }
     address(id, &route.hash())
+}
+
+/// The page's address, which a link from outside the page to one of its routes follows, as `fwd ui
+/// --no-open` prints it without a project: the daemon's, where `?daemon=` named it, since the VS
+/// Code webview's page is the extension's copy, which no browser tab opens; else this page's own.
+pub fn page_address() -> String {
+    if let Some(Some(daemon)) = DAEMON.get() {
+        return format!("{daemon}/");
+    }
+    let location = window().map(|w| w.location());
+    let origin = location.as_ref().and_then(|l| l.origin().ok()).unwrap_or_default();
+    let path = location.and_then(|l| l.pathname().ok()).unwrap_or_else(|| "/".into());
+    format!("{origin}{path}")
 }
 
 /// Loads `url` in place of the page.

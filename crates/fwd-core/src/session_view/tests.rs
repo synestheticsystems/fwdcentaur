@@ -213,9 +213,9 @@ fn each_record_stands_in_the_list_of_whom_it_waits_on() {
     assert_eq!(
         headed,
         [
-            (&json!("Waiting on you"), &secondary),
+            (&json!("Waiting On You"), &secondary),
             (&json!("Working On"), &secondary),
-            (&json!("Waiting on others"), &secondary)
+            (&json!("Waiting On Others"), &secondary)
         ]
     );
 }
@@ -321,6 +321,16 @@ fn the_own_threads_group_comes_first_and_a_subagents_says_what_it_is_doing() {
     assert_eq!(json["lines"], json!([]));
 }
 
+/// The document gives the address of the session's companion view, the page's own route for the
+/// session after the page's address, which the page reads back as that session's.
+#[test]
+fn the_document_gives_the_address_of_the_sessions_companion_view() {
+    let json = printed(&held(Vec::new(), person(&[])).document(PAGE));
+    assert_eq!(json["companion"], format!("{PAGE}#/sessions/s1"));
+    let route = json["companion"].as_str().and_then(|address| address.strip_prefix(PAGE)).expect("after the page");
+    assert_eq!(Route::parse(route), Route::Session("s1".into()));
+}
+
 /// A session no principal is bound to says so in one line; with the daemon out of reach, the last
 /// principals stay, with no page and a line saying so; before anything was read, the section of the
 /// active intentions stands all the same, saying fwd cannot read them, not that none is assigned; a
@@ -338,6 +348,7 @@ fn the_documents_other_states_say_what_they_are_and_keep_the_last_principals() {
     let shown = held(vec![holding(20, "lead-sam", "main", Vec::new(), 1)], person(&[])).document(PAGE);
     let lost = shown.out_of_reach();
     assert_eq!((lost.page.as_deref(), &lost.principals), (None, &shown.principals));
+    assert_eq!(lost.companion, None, "no page to open while the daemon is out of reach");
     assert_eq!(
         lost.lines,
         ["fwd's daemon is out of reach; this is what it last said, and it will show again when the daemon answers."]
@@ -356,6 +367,7 @@ fn the_documents_other_states_say_what_they_are_and_keep_the_last_principals() {
     let error = anyhow::Error::new(PropertyError::Missing).context(format!("reading {}", id(9).to_base64()));
     let failed = shown.unreadable(&error);
     assert_eq!((failed.page.as_deref(), &failed.principals), (Some(PAGE), &shown.principals));
+    assert_eq!(failed.companion, shown.companion);
     assert_eq!(
         failed.lines,
         ["fwd could not read what this session holds: a field of a record it reads could not be read. This is what it last read; it tries again."]
@@ -408,7 +420,7 @@ fn the_document_has_the_contracts_keys_and_no_control_characters() {
         names.sort();
         names
     };
-    assert_eq!(keys(&json), expect(&["title", "page", "lines", "sections", "principals"]));
+    assert_eq!(keys(&json), expect(&["title", "page", "companion", "lines", "sections", "principals"]));
     let list_keys = expect(&["section", "prominence", "title", "lines", "shown", "of", "more", "records"]);
     assert_eq!(keys(&json["sections"][0]), list_keys);
     let group = &json["principals"][0];

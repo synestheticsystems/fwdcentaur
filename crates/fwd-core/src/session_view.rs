@@ -1,11 +1,12 @@
 //! The person's view of a Claude Code session: what the session holds in fwd, as one document that
-//! a pane beside the chat draws, and later the page (Daniel, 2026-11-13: it "must not be a wall of
-//! text, but a really clean and readable list. I shouldn't even see any of the entity ids, but
-//! rather click them to get more detail"). fwd owns what the view says, its order and what can be
-//! done from it, so that whatever draws it knows no fwd verb and draws every section and every
-//! record the same way: a principal is a [`Group`], a section a headed [`List`], a record a [`Row`],
-//! its title and tags, that opens into its lines and its actions (docs/design/cli.md, "The person's
-//! view of a session").
+//! the session's companion view draws in the page (crates/fwd-web/src/companion.rs), and a pane
+//! beside the chat as its fallback (Daniel, 2026-11-13: it "must not be a wall of text, but a
+//! really clean and readable list. I shouldn't even see any of the entity ids, but rather click
+//! them to get more detail"). fwd owns what the view says, its order and what can be done from it,
+//! so that whatever draws it knows no fwd verb and draws every section and every record the same
+//! way: a principal is a [`Group`], a section a headed [`List`], a record a [`Row`], its title and
+//! tags, that opens into its lines and its actions (docs/design/cli.md, "The person's view of a
+//! session").
 //!
 //! First, at its root, the session's active intentions: those assigned to the principals bound to
 //! its own thread, of any project, read as `fwd prime` reads them (`intentions::assigned_to`). Then
@@ -49,13 +50,17 @@ use std::collections::{BTreeSet, HashMap};
 use text::{block, plain, unpaged_block, LINE_LIMIT, TAG_LIMIT, TITLE_LIMIT};
 
 /// The document's title, the same in every state.
-const TITLE: &str = "fwd Current Session";
+pub const TITLE: &str = "fwd Current Session";
 
 /// What the section of the active intentions says when none is assigned to the session.
 const NO_INTENTIONS: &str = "No active intentions recorded for this session yet.";
 
 /// What the section of the active intentions says before fwd has read them.
 const INTENTIONS_NOT_READ: &str = "fwd cannot read the intentions assigned to this session right now.";
+
+/// What the view says while the daemon is out of reach, above what it last showed.
+pub const OUT_OF_REACH: &str =
+    "fwd's daemon is out of reach; this is what it last said, and it will show again when the daemon answers.";
 
 /// How a principal the view cannot find is named, without its id.
 const NOT_FOUND: &str = "someone fwd cannot find";
@@ -67,6 +72,9 @@ pub struct Document {
     pub title: String,
     /// The page's address, which each row's `path` follows; none while the daemon is out of reach.
     pub page: Option<String>,
+    /// The address of this session's companion view, the page's route for it after `page`; none
+    /// while the daemon is out of reach.
+    pub companion: Option<String>,
     /// What is said of the whole view: that no principal is bound to the session yet, that the
     /// daemon is out of reach or a read failed, what keeps the reader from answering, and groups
     /// left out.
@@ -79,8 +87,8 @@ pub struct Document {
 /// A principal bound to the session, with the lists of what it holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Group {
-    /// The principal's id, the same from one document to the next.
-    pub id: String,
+    /// The principal's id, the same from one document to the next, written as its base64.
+    pub id: EntityId,
     /// Its name.
     pub title: String,
     /// Its role, its project, for a subagent the task it has in progress, and how many unread
@@ -109,7 +117,7 @@ pub struct List {
 }
 
 /// The sections of the view, in the order they stand: the session's own, then a principal's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListKind {
     /// The intentions assigned to the principals of the session's own thread that it holds.
@@ -134,8 +142,8 @@ pub enum Prominence {
 /// A record, as a row that opens into its lines and its actions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Row {
-    /// The record's id, unique within its list.
-    pub id: String,
+    /// The record's id, unique within its list, written as its base64.
+    pub id: EntityId,
     pub kind: RowKind,
     /// Plain text on one line.
     pub title: String,
@@ -342,7 +350,7 @@ async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(Placemen
         tags.push(Tag::plain(&status.to_string()));
     }
     Ok(Row {
-        id: placement.id().to_base64(),
+        id: placement.id(),
         kind: RowKind::Intention,
         title: plain(&intention.title()?, TITLE_LIMIT),
         title_is_cut: false,
@@ -394,13 +402,16 @@ impl Held {
     pub fn document(&self, page: &str) -> Document {
         let mut lines = self.person.lines();
         let sections = vec![self.active_intentions()];
+        let companion = Some(format!("{page}{}", Route::Session(self.session.clone()).hash()));
         if self.holdings.is_empty() {
             let unbound = "No fwd principal is bound to this session yet. Its agent names itself with `fwd principal add <name> --role <role>`.";
             lines.insert(0, unbound.into());
-            return Document { title: TITLE.into(), page: Some(page.into()), lines, sections, principals: Vec::new() };
+            let principals = Vec::new();
+            return Document { title: TITLE.into(), page: Some(page.into()), companion, lines, sections, principals };
         }
         let principals = self.holdings.iter().map(|h| self.group(h, page)).collect();
-        let mut document = Document { title: TITLE.into(), page: Some(page.into()), lines, sections, principals };
+        let mut document =
+            Document { title: TITLE.into(), page: Some(page.into()), companion, lines, sections, principals };
         fit::within_budget(&mut document, |g, kind| self.more(&self.holdings[g], kind));
         document
     }
@@ -484,7 +495,7 @@ impl Held {
             .collect();
         let own_thread = h.subject.as_deref().is_some_and(subject::is_main_thread);
         Group {
-            id: h.principal.to_base64(),
+            id: h.principal,
             title: plain(&h.handle, TITLE_LIMIT),
             tags: self.group_tags(h, own_thread),
             lines: Vec::new(),
@@ -561,7 +572,7 @@ impl Held {
             Some(text) => block(&self.cited.markdown(text, page)).into_iter().collect(),
         };
         Row {
-            id: r.id.to_base64(),
+            id: r.id,
             kind,
             title,
             title_is_cut: false,
@@ -606,9 +617,9 @@ impl ListKind {
     fn title(self) -> &'static str {
         match self {
             ListKind::ActiveIntentions => "Active Intentions",
-            ListKind::WaitsOnYou => "Waiting on you",
+            ListKind::WaitsOnYou => "Waiting On You",
             ListKind::Holds => "Working On",
-            ListKind::WaitsOnOthers => "Waiting on others",
+            ListKind::WaitsOnOthers => "Waiting On Others",
         }
     }
 
@@ -644,8 +655,9 @@ impl Tag {
     }
 }
 
-/// A task's status as a person reads it: `in progress`, not `in_progress`.
-fn status_words(status: TaskStatus) -> String {
+/// A task's status as a person reads it, as a task's row is tagged by it: `in progress`, not
+/// `in_progress`.
+pub fn status_words(status: TaskStatus) -> String {
     status.to_string().replace('_', " ")
 }
 
@@ -653,12 +665,11 @@ impl Document {
     /// The document while the daemon is out of reach: what was last shown, saying so, and no page
     /// to open.
     pub fn out_of_reach(&self) -> Document {
-        let said =
-            "fwd's daemon is out of reach; this is what it last said, and it will show again when the daemon answers.";
         Document {
             title: TITLE.into(),
             page: None,
-            lines: vec![said.into()],
+            companion: None,
+            lines: vec![OUT_OF_REACH.into()],
             sections: self.sections.clone(),
             principals: self.principals.clone(),
         }
@@ -681,6 +692,7 @@ impl Document {
         Document {
             title: TITLE.into(),
             page: self.page.clone(),
+            companion: self.companion.clone(),
             lines: vec![said],
             sections: self.sections.clone(),
             principals: self.principals.clone(),
@@ -695,6 +707,7 @@ impl Document {
         Document {
             title: TITLE.into(),
             page: None,
+            companion: None,
             lines: Vec::new(),
             sections: vec![intentions],
             principals: Vec::new(),

@@ -101,10 +101,11 @@ fn json_len(value: &impl serde::Serialize) -> usize {
 mod tests {
     use super::super::{Group, List, Prominence, Row, RowKind, TITLE};
     use super::*;
+    use ankurah::EntityId;
 
     fn row(n: usize, words: usize) -> Row {
         Row {
-            id: format!("r{n}"),
+            id: EntityId::from_bytes([u8::try_from(n).expect("a row of the tests"); 32]),
             kind: RowKind::Task,
             title: format!("Task {n}"),
             title_is_cut: false,
@@ -118,7 +119,7 @@ mod tests {
 
     fn group(lists: &[(ListKind, usize)]) -> Group {
         Group {
-            id: "g".into(),
+            id: EntityId::from_bytes([255; 32]),
             title: "impl-sam".into(),
             tags: Vec::new(),
             lines: Vec::new(),
@@ -140,7 +141,7 @@ mod tests {
 
     fn document(principals: Vec<Group>) -> Document {
         let page = Some("http://127.0.0.1:1/".into());
-        Document { title: TITLE.into(), page, lines: Vec::new(), sections: Vec::new(), principals }
+        Document { title: TITLE.into(), page, companion: None, lines: Vec::new(), sections: Vec::new(), principals }
     }
 
     /// Past the budget the least important rows go first, the last group's before the first's, and
@@ -170,7 +171,7 @@ mod tests {
         assert_eq!(holds.more, None);
         assert!(doc.principals[0].sections[0].lines.is_empty() && doc.principals[0].sections[0].more.is_none());
 
-        // Waiting on you, cut, gives the page's list of it.
+        // Waiting On You, cut, gives the page's list of it.
         let mut many = document(vec![group(&[(ListKind::WaitsOnYou, 80)])]);
         within_budget(&mut many, more);
         let waits = &many.principals[0].sections[0];

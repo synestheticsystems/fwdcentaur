@@ -44,3 +44,23 @@ pub fn literal(s: &str) -> Result<String> {
         anyhow::bail!("`{s}` may only contain letters, digits, `_`, `-`, `.` and `:`")
     }
 }
+
+/// `selection`'s predicate evaluated on one row, whose properties `row` gives by their dotted paths
+/// (`context.to`), as an engine that evaluates a predicate row by row evaluates it: what the
+/// predicates' tests read.
+#[cfg(test)]
+pub(crate) fn evaluate(
+    selection: &Selection<Parsed>,
+    row: &[(&str, Value)],
+) -> Result<bool, ankurah::core::selection::filter::Error> {
+    use ankurah::ankql::ast::PathExpr;
+    use ankurah::core::selection::filter::{evaluate_predicate, ValueLookup};
+    struct Row<'a>(&'a [(&'a str, Value)]);
+    impl ValueLookup<Parsed> for Row<'_> {
+        fn value_at(&self, path: &PathExpr) -> Option<Value> {
+            let path = path.steps.join(".");
+            self.0.iter().find(|(at, _)| *at == path).map(|(_, value)| value.clone())
+        }
+    }
+    evaluate_predicate(&Row(row), &selection.predicate)
+}
