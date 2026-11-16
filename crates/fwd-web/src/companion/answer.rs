@@ -12,7 +12,8 @@ use super::Connected;
 use crate::keys;
 use crate::session::{self, graph};
 use ankurah::EntityId;
-use fwd_core::model::{MessageView, Priority};
+use anyhow::{bail, Context as _};
+use fwd_core::model::MessageView;
 use fwd_core::ops::{self, MessageContext};
 use fwd_core::project_graph::Followed;
 use fwd_core::session_view::Input;
@@ -34,7 +35,7 @@ pub fn Answer(
     let writing = RwSignal::new(writing);
     let words = RwSignal::new(String::new());
     let sending = RwSignal::new(false);
-    let error = RwSignal::new(None::<String>);
+    let error = RwSignal::new(None::<anyhow::Error>);
     // Nothing is sent while the connection to the daemon is lost; the words stay in the box.
     let Connected(connected) = expect_context::<Connected>();
     let field_id = format!("answer-{}", question.to_base64());
@@ -114,7 +115,11 @@ pub fn Answer(
                             </button>
                             <PageLink link=link/>
                         </div>
-                        {move || error.get().map(|why| view! { <p class="error" role="status">{why}</p> })}
+                        {move || {
+                            error.with(|why| {
+                                why.as_ref().map(|why| view! { <p class="error" role="status">{format!("{why:#}")}</p> })
+                            })
+                        }}
                     </form>
                 }
                 .into_any()
@@ -124,15 +129,18 @@ pub fn Answer(
 }
 
 /// Posts `text` as `me`'s reply in the thread of `question`, at the priority of what it answers,
-/// as the Inbox's reply box posts one; a refusal comes back in the words the write gives it.
-async fn reply(me: EntityId, question: EntityId, text: &str) -> Result<(), String> {
-    let priority = match graph().follow::<MessageView>(question).await.map_err(|e| e.to_string())? {
-        // As the reply box does, a priority that cannot be read is the next one.
-        Followed::Held { found, .. } => found.priority().unwrap_or(Priority::Next),
-        Followed::NotHeld => Priority::Next,
+/// as the Inbox's reply box posts one. A question the page cannot read, or whose priority it
+/// cannot, is refused before anything is sent, since a reply at a priority made up for it would
+/// misstate it.
+async fn reply(me: EntityId, question: EntityId, text: &str) -> anyhow::Result<()> {
+    const UNREAD: &str = "the question this answers could not be read, so nothing was sent";
+    let priority = match graph().follow::<MessageView>(question).await.context(UNREAD)? {
+        Followed::Held { found, .. } => found.priority().context(UNREAD)?,
+        Followed::NotHeld => bail!("this page finds no such question, so nothing was sent"),
     };
     let mc = MessageContext { reply_to: Some(question), ..Default::default() };
-    ops::post_message(&graph(), me, text, priority, mc).await.map(|_| ()).map_err(|e| e.to_string())
+    ops::post_message(&graph(), me, text, priority, mc).await?;
+    Ok(())
 }
 
 /// Puts the keyboard in the box whose id is `id`.
