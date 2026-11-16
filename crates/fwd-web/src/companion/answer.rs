@@ -3,9 +3,10 @@
 //! thread through the app's own write path, as the Inbox's reply box makes one (`ops::post_message`,
 //! at the priority of what it answers, as the person the page acts as), never by running the
 //! command the action names for the pane. Enter sends and Shift+Enter starts a new line, as in every
-//! box on the page that sends something. Once the reply is made the question leaves Waiting On You
-//! as the view reads it again; until then the box keeps its words, and a reply that fails says why
-//! beside them.
+//! box on the page that sends something. The box empties only once the daemon has the reply
+//! (`session::while_writing`), and the question then leaves Waiting On You as the view reads it
+//! again; until then the box keeps its words, and a reply that fails, or that a drop of the
+//! connection left unconfirmed, says so beside them.
 
 use super::record::PageLink;
 use super::Connected;
@@ -129,9 +130,9 @@ pub fn Answer(
 }
 
 /// Posts `text` as `me`'s reply in the thread of `question`, at the priority of what it answers,
-/// as the Inbox's reply box posts one. A question the page cannot read, or whose priority it
-/// cannot, is refused before anything is sent, since a reply at a priority made up for it would
-/// misstate it.
+/// as the Inbox's reply box posts one, and succeeds only once the daemon has it. A question the
+/// page cannot read, or whose priority it cannot, is refused before anything is sent, since a reply
+/// at a priority made up for it would misstate it.
 async fn reply(me: EntityId, question: EntityId, text: &str) -> anyhow::Result<()> {
     const UNREAD: &str = "the question this answers could not be read, so nothing was sent";
     let priority = match graph().follow::<MessageView>(question).await.context(UNREAD)? {
@@ -139,7 +140,7 @@ async fn reply(me: EntityId, question: EntityId, text: &str) -> anyhow::Result<(
         Followed::NotHeld => bail!("this page finds no such question, so nothing was sent"),
     };
     let mc = MessageContext { reply_to: Some(question), ..Default::default() };
-    ops::post_message(&graph(), me, text, priority, mc).await?;
+    session::while_writing(ops::post_message(&graph(), me, text, priority, mc)).await?;
     Ok(())
 }
 

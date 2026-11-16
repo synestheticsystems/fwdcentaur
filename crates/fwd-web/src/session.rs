@@ -17,6 +17,10 @@
 //! again, and offers to load the new page when the daemon now runs another build
 //! (`follow_restarts`).
 
+mod writing;
+
+pub use writing::while_writing;
+
 use crate::route::Route;
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
