@@ -9,11 +9,13 @@
 use ankurah::core::schema::ModelStructDescriptor;
 use ankurah::model::Mutable;
 use ankurah::property::{Json, Ref};
+use ankurah::proto::{Attested, Event};
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Model, ModelId, Node, PermissiveAgent, View};
+use ankurah_commons::akev::{Creation, ModelDefinitions};
 use ankurah_commons::cognition::{Intention, IntentionView};
 use ankurah_commons::records::{Attribution, ClosedView, CreatedView, EditedView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use fwd_core::durable;
 use fwd_core::intentions::{self, before_d229, Outcome, Parts, Quoted};
 use fwd_core::model::*;
@@ -56,6 +58,30 @@ fn minted(descriptor: &ModelStructDescriptor) -> EntityId {
     EntityId::from_base64(descriptor.explicit_id.expect("a model of the Commons declares its minted id")).unwrap()
 }
 
+/// The node's own definition of `records.attribution`, as the build before the kept mint minted it
+/// when it first bound `old::Attribution`, made as the Commons make their mint, with a nonce that
+/// puts its id `side` of the mint's: its id, and its creation events for a store to import before
+/// anything binds. An id is the hash of its creation event, so a node minting its own puts it below
+/// the mint's only about one time in eighteen.
+fn own_attribution(side: Side) -> Result<(EntityId, Vec<Attested<Event>>)> {
+    // `CoHr…` below the mint's `DfGh…`, and `GFp8…` above it.
+    let nonce = match side {
+        Side::Below => [3; 32],
+        Side::Above => [0; 32],
+    };
+    let definitions =
+        ModelDefinitions::declared(old::Attribution::descriptor(), |_| Creation { at: WRITTEN as u64, nonce });
+    let events = definitions.events()?;
+    let own = events[0].entity_id;
+    assert_eq!(
+        own < minted(Attribution::descriptor()),
+        side == Side::Below,
+        "{} sorts {side:?} the mint's",
+        own.to_base64()
+    );
+    Ok((own, events.into_iter().map(Attested::from).collect()))
+}
+
 /// A store the build before the kept mint wrote, with alpha's person Ines and its agent impl-tide.
 struct Store {
     _dir: TempDir,
@@ -67,30 +93,26 @@ struct Store {
 
 impl Store {
     /// A new store, as the build before the kept mint wrote one, and alpha's graph on its node,
-    /// which was never seeded and which minted a definition of `records.attribution` for itself
-    /// whose id sorts `side` of the mint's. That id falls either side by chance, so stores are made
-    /// until one does.
+    /// which was never seeded and holds a definition of `records.attribution` of its own whose id
+    /// sorts `side` of the mint's ([`own_attribution`]).
     async fn before_the_mint(side: Side) -> Result<(Store, ProjectGraph)> {
-        let mint = minted(Attribution::descriptor());
-        for _ in 0..64 {
-            let dir = tempfile::tempdir()?;
-            let path = dir.path().join("fwd.sqlite");
-            let node = Node::new_durable(Arc::new(SqliteStorageEngine::open(&path).await?), PermissiveAgent::new());
-            node.system.create().await?;
-            let ctx = node.context_async(DEFAULT_CONTEXT).await?;
-            let ModelId::EntityId(own) = ctx.resolve_model_id::<old::Attribution>().await? else {
-                bail!("a definition the node minted has an entity's id");
-            };
-            if (own < mint) != (side == Side::Below) {
-                continue;
-            }
-            let project = uuid::Uuid::new_v4();
-            let alpha = ProjectGraph::ensure(ctx, project, "alpha").await?;
-            let ines = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
-            let tide = ops::ensure_principal(&alpha, "impl-tide", "impl-tide", PrincipalKind::Agent, None).await?;
-            return Ok((Store { _dir: dir, path, project, ines, tide }, alpha));
-        }
-        bail!("none of 64 stores gave the node's own definition an id {side:?} the mint's")
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("fwd.sqlite");
+        let node = Node::new_durable(Arc::new(SqliteStorageEngine::open(&path).await?), PermissiveAgent::new());
+        node.system.create().await?;
+        let ctx = node.context_async(DEFAULT_CONTEXT).await?;
+        let (own, definitions) = own_attribution(side)?;
+        node.import_events(&definitions).await?;
+        assert_eq!(
+            ctx.resolve_model_id::<old::Attribution>().await?,
+            ModelId::EntityId(own),
+            "bound to it, not minted"
+        );
+        let project = uuid::Uuid::new_v4();
+        let alpha = ProjectGraph::ensure(ctx, project, "alpha").await?;
+        let ines = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
+        let tide = ops::ensure_principal(&alpha, "impl-tide", "impl-tide", PrincipalKind::Agent, None).await?;
+        Ok((Store { _dir: dir, path, project, ines, tide }, alpha))
     }
 
     /// alpha's graph on the store opened as fwd opens one, seeded with the kept mint.
