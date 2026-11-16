@@ -1,30 +1,25 @@
 //! A record built on the Commons' models, which name no project, placed in one by fwd's
 //! `Placement` component (`fwd_core::project_graph`, `placed`): one transaction makes an intention
 //! with who wrote it down and where it is placed; its project's graph lists it and another
-//! project's does not; a second node of the same SQLite store reads it, the definitions the first
-//! node minted included; and one no project placed is no record of fwd's.
+//! project's does not; a second node of the same SQLite store reads it; and one no project placed
+//! is no record of fwd's.
 
-use ankurah::{policy::DEFAULT_CONTEXT, property::Ref, Context, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, property::Ref, Context, EntityId};
 use ankurah_commons::cognition::{Intention, IntentionView};
 use ankurah_commons::property::Timestamp;
 use ankurah_commons::records::Created;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::intentions::{self, Parts};
 use fwd_core::model::{PlacementView, PrincipalKind};
 use fwd_core::ops;
 use fwd_core::project_graph::{Followed, ProjectGraph, ProjectGraphError, Whose};
 use std::path::Path;
-use std::sync::Arc;
 
-/// A context on a durable node over the SQLite file at `path`, which `create` makes new.
-async fn node_on(path: &Path, create: bool) -> Result<Context> {
-    let node = Node::new_durable(Arc::new(SqliteStorageEngine::open(path).await?), PermissiveAgent::new());
-    if create {
-        node.system.create().await?;
-    } else {
-        node.system.wait_loaded().await?;
-    }
+/// A context on a durable node over the SQLite file at `path`, made new when it does not exist.
+async fn node_on(path: &Path) -> Result<Context> {
+    let node = durable::open(SqliteStorageEngine::open(path).await?).await?;
     Ok(node.context_async(DEFAULT_CONTEXT).await?)
 }
 
@@ -42,7 +37,7 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
     let (alpha_uuid, beta_uuid) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
 
     let (intention, person) = {
-        let ctx = node_on(&path, true).await?;
+        let ctx = node_on(&path).await?;
         let alpha = ProjectGraph::ensure(ctx.clone(), alpha_uuid, "alpha").await?;
         let beta = ProjectGraph::ensure(ctx, beta_uuid, "beta").await?;
         let person = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
@@ -70,7 +65,7 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
     };
 
     // The same file as a second node, which holds nothing in memory from the first.
-    let ctx = node_on(&path, false).await?;
+    let ctx = node_on(&path).await?;
     let alpha = ProjectGraph::open(ctx.clone(), alpha_uuid).await?;
     let beta = ProjectGraph::open(ctx, beta_uuid).await?;
     let title = "Readers keep their place".to_string();
@@ -102,7 +97,7 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
 #[tokio::test]
 async fn an_intention_no_project_placed_is_a_reference_that_cannot_be_followed() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let ctx = node_on(&dir.path().join("fwd.sqlite"), true).await?;
+    let ctx = node_on(&dir.path().join("fwd.sqlite")).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let person = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
     let placed = intentions::create(&alpha, person, "Readers keep their place", String::new(), None).await?.0.id();

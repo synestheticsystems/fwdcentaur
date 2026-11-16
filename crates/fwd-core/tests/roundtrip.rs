@@ -10,10 +10,10 @@ use ankurah::{
 };
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::now_ms;
 use fwd_core::query::{with_id, with_string};
-use std::sync::Arc;
 
 struct Ids {
     project: EntityId,
@@ -233,18 +233,14 @@ async fn models_round_trip_through_sqlite() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("workspace.sqlite");
 
-    let ids = {
-        let storage = SqliteStorageEngine::open(&path).await?;
-        let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-        node.system.create().await?;
-        populate(&node).await?
+    let (ids, root) = {
+        let node = durable::open(SqliteStorageEngine::open(&path).await?).await?;
+        (populate(&node).await?, node.system.root_id())
     };
 
     // Reopen the same file as a fresh durable node: nothing is cached in memory any more.
-    let storage = SqliteStorageEngine::open(&path).await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.wait_loaded().await?;
-    assert!(node.system.root().is_some(), "the system created before reopening must be found on disk");
+    let node = durable::open(SqliteStorageEngine::open(&path).await?).await?;
+    assert_eq!(node.system.root_id(), root, "the system created before reopening must be found on disk");
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
 
     // Direct reads.

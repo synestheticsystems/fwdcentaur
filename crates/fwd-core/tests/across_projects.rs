@@ -4,16 +4,16 @@
 //! weighs a dependency wherever it leads, a cycle through two projects is refused, and a relation is
 //! changed in the project that made it, whichever projects its ends are in.
 
-use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::intentions;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateScope, CreateTask, Kind, MessageContext};
 use fwd_core::project_graph::{ProjectGraph, ProjectGraphError, Whose};
 use fwd_core::rules::{NotReadyReason, Readiness, Verb};
 use serde_json::json;
-use std::sync::Arc;
 
 /// alpha and beta, each with the person and an implementer of the same handles, over one store,
 /// and the node's context, through which a test adds a third project.
@@ -29,9 +29,7 @@ struct Two {
 }
 
 async fn two() -> Result<Two> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;

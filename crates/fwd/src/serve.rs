@@ -31,7 +31,7 @@ use ankurah::policy::DEFAULT_CONTEXT;
 use ankurah::{Context as NodeContext, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use ankurah_websocket_server::WebsocketServer;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::extract::{ConnectInfo, Path as RoutePath, Request, State};
 use axum::handler::Handler;
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
@@ -42,6 +42,7 @@ use fwd_core::daemon::{
     hold_port_file, try_lock, write_port_file, Bind, CheckoutRecord, DaemonConfig, HostedProject, LockHolder, PortFile,
 };
 use fwd_core::daemon_socket;
+use fwd_core::durable;
 use fwd_core::project::{self, Index, NamedProject, Paths};
 use fwd_core::project_graph::{NodeGraph, ProjectGraph};
 use include_dir::{include_dir, Dir};
@@ -220,16 +221,11 @@ struct DaemonNode {
 
 impl DaemonNode {
     /// Opens the node over `store` (made on first use), with its Ankurah system (created on first
-    /// use), starts the routing service over every project's records in it, and readies the
-    /// socket clients join it through. Runs under the lifetime lock.
+    /// use) and the Commons' kept mint (`fwd_core::durable`), starts the routing service over every
+    /// project's records in it, and readies the socket clients join it through. Runs under the
+    /// lifetime lock.
     async fn open(store: SqliteStorageEngine) -> Result<DaemonNode> {
-        let node = Node::new_durable(Arc::new(store), PermissiveAgent::new());
-        node.system.wait_loaded().await?;
-        if node.system.root().is_none() {
-            info!("creating the Ankurah system");
-            node.system.create().await?;
-        }
-        node.system.wait_system_ready().await.map_err(|e| anyhow!("the Ankurah system did not become ready: {e}"))?;
+        let node = durable::open(store).await?;
         let ctx = node.context_async(DEFAULT_CONTEXT).await?;
         let routing = services::start(NodeGraph::new(ctx.clone())).await.context("starting the routing service")?;
         let upgrade = WebsocketServer::new(node.clone()).route_handler();

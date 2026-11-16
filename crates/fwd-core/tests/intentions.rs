@@ -4,16 +4,16 @@
 //! and reads back what is assigned to it; an agent takes one off itself alone, and a person off
 //! anyone.
 
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
 use ankurah_commons::property::Timestamp;
 use ankurah_commons::records::{ClosedView, Created, EditedView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::intentions::{self, Outcome, Parts, Quoted};
 use fwd_core::model::*;
 use fwd_core::ops;
 use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
-use std::sync::Arc;
 
 /// alpha's people, Ines and Omar, and its agent impl-tide; beta's agent impl-reef.
 struct World {
@@ -26,8 +26,7 @@ struct World {
 }
 
 async fn world() -> Result<World> {
-    let node = Node::new_durable(Arc::new(SqliteStorageEngine::open_in_memory().await?), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;

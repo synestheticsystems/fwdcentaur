@@ -2,25 +2,23 @@
 //! pickers and `fwd principal list` list below the others, and which is active again at its next
 //! write; never a person, and never enforced (docs/DECISIONS.md, D123; `fwd_core::dormancy`).
 
-use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::dormancy;
+use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::naming;
 use fwd_core::ops::{self, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::routing;
-use std::sync::Arc;
 
 const HOUR: i64 = 60 * 60 * 1000;
 
 /// A project alone in a store in memory: the node's context, through which a test writes a record
 /// as an older build wrote it, and the project's graph.
 async fn older_project() -> Result<(Context, ProjectGraph)> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let graph = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "test").await?;
     Ok((ctx, graph))

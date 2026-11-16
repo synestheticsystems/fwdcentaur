@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use ankurah::core::storage::{StorageEngine, StorageTransaction};
 use ankurah::policy::DEFAULT_CONTEXT;
-use ankurah::{EntityId, Node, PermissiveAgent};
+use ankurah::EntityId;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::{Context as _, Result};
+use fwd_core::durable;
 use fwd_core::model::FormerId;
 use fwd_core::project_graph::ProjectGraph;
 use uuid::Uuid;
@@ -46,14 +46,8 @@ pub struct Moved {
 /// Writes `projects` into a fresh store at `path`.
 pub async fn write(path: &Path, projects: &[Moving]) -> Result<Vec<Moved>> {
     let engine = SqliteStorageEngine::open(path).await.context("opening the new store")?;
-    let node = Node::new_durable(Arc::new(engine), PermissiveAgent::new());
     // As the daemon opens its node over a store it makes (crates/fwd/src/serve.rs, DaemonNode).
-    node.system.wait_loaded().await?;
-    node.system.create().await?;
-    node.system
-        .wait_system_ready()
-        .await
-        .map_err(|e| anyhow::anyhow!("the Ankurah system did not become ready: {e}"))?;
+    let node = durable::open(engine).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
 
     let mut moved = Vec::new();

@@ -4,9 +4,10 @@
 //! a recipient that a reference leads to in another project is told; and each notification is made
 //! in its recipient's project, whose inbox lists it, whichever project's record caused it.
 
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateDecision, CreateScope, CreateTask, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
@@ -14,7 +15,6 @@ use fwd_core::reason;
 use fwd_core::routing::{self, Planned};
 use fwd_core::rules::{DecisionMove, Verb};
 use serde_json::json;
-use std::sync::Arc;
 
 /// One project's people over the shared store: the person, an implementer and a triage agent that
 /// serves the project whole, by the same handles in both projects.
@@ -44,9 +44,7 @@ async fn people(graph: ProjectGraph) -> Result<People> {
 
 /// alpha and beta over one store in memory.
 async fn two() -> Result<(People, People)> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;

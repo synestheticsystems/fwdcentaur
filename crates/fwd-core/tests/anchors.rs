@@ -3,23 +3,21 @@
 //! on the entity, and anchors of the first cut gaining a key and basis.
 
 use ankurah::property::{Json, Ref};
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::anchoring::{self, git, Label, Method};
+use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::ops;
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::query::with_string;
 use fwd_core::sidecar::Sidecar;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// The graph of a project alone in a store in memory.
 async fn project() -> Result<ProjectGraph> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     Ok(ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "test").await?)
 }

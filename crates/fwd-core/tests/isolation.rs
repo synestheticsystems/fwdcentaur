@@ -11,9 +11,10 @@
 use ankurah::changes::ChangeSet;
 use ankurah::property::{Json, Ref};
 use ankurah::signals::{Get, Subscribe};
-use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, LiveQuery, Node, PermissiveAgent, View};
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, LiveQuery, View};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateDecision, CreateScope, CreateTask, Kind, MessageContext};
 use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, ProjectGraphError, Whose};
@@ -28,9 +29,7 @@ use tokio::sync::mpsc;
 /// Two projects in one store in memory, each by its graph, and the node's context, through which a
 /// test writes what no graph would.
 async fn two_projects_and_the_node() -> Result<(Context, ProjectGraph, ProjectGraph)> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;

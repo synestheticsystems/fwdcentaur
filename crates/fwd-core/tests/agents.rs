@@ -4,21 +4,19 @@
 //! as it names itself, or takes over one from before the plugin, once; a typed `--as` names that
 //! principal or is refused; and an agent that has not named itself is told how to.
 
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateScope, CreateTask, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::routing;
 use fwd_core::subject;
-use std::sync::Arc;
 
 /// The graph of a project alone in a store in memory.
 async fn project() -> Result<ProjectGraph> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     Ok(ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "test").await?)
 }

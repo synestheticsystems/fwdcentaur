@@ -6,16 +6,16 @@
 
 use ankurah::model::Mutable;
 use ankurah::property::{Json, Ref};
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
 use ankurah_commons::cognition::IntentionView;
 use ankurah_commons::records::{Attribution, ClosedView, CreatedView, EditedView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::intentions::{self, before_d229, Outcome, Parts, Quoted};
 use fwd_core::model::*;
 use fwd_core::ops;
 use fwd_core::project_graph::{Followed, ProjectGraph};
-use std::sync::Arc;
 
 /// When the intentions here were written down, and when the one reworded was reworded.
 const WRITTEN: i64 = 1_700_000_000_000;
@@ -30,8 +30,7 @@ struct World {
 }
 
 async fn world() -> Result<World> {
-    let node = Node::new_durable(Arc::new(SqliteStorageEngine::open_in_memory().await?), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let alpha = ProjectGraph::ensure(node.context_async(DEFAULT_CONTEXT).await?, uuid::Uuid::new_v4(), "alpha").await?;
     let ines = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
     let tide = ops::ensure_principal(&alpha, "impl-tide", "impl-tide", PrincipalKind::Agent, None).await?;

@@ -8,9 +8,10 @@
 use ankurah::changes::{ChangeSet, ItemChange};
 use ankurah::policy::DEFAULT_CONTEXT;
 use ankurah::signals::Subscribe;
-use ankurah::{Context, EntityId, LiveQuery, Node, PermissiveAgent, View};
+use ankurah::{Context, EntityId, LiveQuery, View};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateDecision, CreateScope, CreateTask, MessageContext};
 use fwd_core::project::Paths;
@@ -18,7 +19,6 @@ use fwd_core::project_graph::{InProjectView, ProjectGraph, Whose};
 use fwd_core::rules::{NotReadyReason, Readiness, Verb};
 use fwd_core::task_move::{self, Brought, Destination, MoveLock, Moved, Refused};
 use serde_json::json;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -39,9 +39,7 @@ struct Two {
 }
 
 async fn two() -> Result<Two> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;

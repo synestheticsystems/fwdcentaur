@@ -4,10 +4,11 @@
 //! stored as its whole-file highlight's id and the version it names, the highlight found when it
 //! exists; and read again with no checkout, as a forward and an edit read a stored text.
 
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::anchoring::{self, git};
+use fwd_core::durable;
 use fwd_core::file_mention::reading_files_in;
 use fwd_core::model::*;
 use fwd_core::ops::{self, MessageContext};
@@ -15,13 +16,10 @@ use fwd_core::project_graph::ProjectGraph;
 use fwd_core::references::{self, Named};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// The graph of a project alone in a store in memory.
 async fn project() -> Result<ProjectGraph> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     Ok(ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "test").await?)
 }

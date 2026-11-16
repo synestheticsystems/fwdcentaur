@@ -5,18 +5,18 @@
 //! intentions. How a read becomes a document is tested beside it (src/session_view/tests.rs).
 
 use ankurah::property::{Json, Ref};
-use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId};
 use ankurah_commons::records::ClosedView;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::decision_log::date;
+use fwd_core::durable;
 use fwd_core::intentions;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateTask, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::session_view::{self, Document, Reader};
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 const PAGE: &str = "http://127.0.0.1:4242/";
 
@@ -35,9 +35,7 @@ struct Two {
 }
 
 async fn two() -> Result<Two> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;

@@ -7,16 +7,16 @@
 //! and the conversation about a beta record is read by its id.
 
 use ankurah::signals::Peek;
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, LiveQuery, Node, PermissiveAgent, View};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId, LiveQuery, View};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateTask};
 use fwd_core::project_graph::{InProjectView, ProjectGraph};
 use fwd_core::rules::Verb;
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 /// alpha and beta over one store in memory, each with its person.
 struct Two {
@@ -27,9 +27,7 @@ struct Two {
 }
 
 async fn two() -> Result<Two> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
