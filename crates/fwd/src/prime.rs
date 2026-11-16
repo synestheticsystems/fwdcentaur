@@ -11,6 +11,7 @@ use crate::{
     unbound_notice, App, Cli, Command, Format, Output,
 };
 use ankurah::EntityId;
+use ankurah_commons::records::ClosedView;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use fwd_core::daemon;
@@ -666,9 +667,10 @@ enum Printed {
 impl PrintedIntention {
     /// The intention `record` assigned to `h`'s principal, read in `there`, its principal's
     /// project's graph, as one of `project`, as it prints in `format`. In the text, its short id
-    /// and title, its project when that is not the principal's, then whose words they are and the
-    /// day they were written down, then its words; for one since ended, that it is still assigned
-    /// and the command that takes it off, run from `directory`'s project. In the JSON, its record.
+    /// and title, its project when that is not the principal's, then whose words its description
+    /// holds and the day they were written down, when a quotation names its speaker, then the
+    /// description; for one since ended, that it is still assigned and the command that takes it
+    /// off, run from `directory`'s project. In the JSON, its record.
     async fn of(
         there: &ProjectGraph,
         format: Format,
@@ -678,8 +680,8 @@ impl PrintedIntention {
         record: &(PlacementView, Parts),
     ) -> Result<PrintedIntention> {
         let (placement, (intention, _)) = record;
-        let status = intention.status()?;
-        let active = !intentions::ended(status);
+        let ended = intentions::outcome(there.component_of::<ClosedView>(placement).await?.as_ref())?;
+        let active = ended.is_none();
         if format == Format::Json {
             let mut json = crate::intentions::intention_json(there, record).await?;
             json["path"] = Value::Null;
@@ -696,15 +698,19 @@ impl PrintedIntention {
             Whose::This => String::new(),
         };
         let printed = if active {
-            let (speaker, day, _) = crate::intentions::spoken(there, record).await?;
-            let lines = format!("{short} {title}{elsewhere}\n  @{speaker}, {day}");
-            Printed::Text { lines, words: crate::intentions::words_after(&intention.words()?) }
+            let spoken = match crate::intentions::spoken(there, record).await? {
+                Some((speaker, day, _)) => format!("\n  @{speaker}, {day}"),
+                None => String::new(),
+            };
+            let lines = format!("{short} {title}{elsewhere}{spoken}");
+            Printed::Text { lines, words: crate::intentions::words_after(&intention.description()?) }
         } else {
             let flag = if directory == Some(h.project.uuid) {
                 String::new()
             } else {
                 format!(" {}", runs_in::project_flag(&h.project.name))
             };
+            let status = intentions::status(ended);
             let lines = format!(
                 "{short} {title}{elsewhere} [{status}]: still assigned to you; `fwd{flag} intention unassign {short}` takes it off"
             );

@@ -67,7 +67,7 @@ use ankurah::model::MutableBorrow;
 use ankurah::property::PropertyError;
 use ankurah::transaction::Transaction;
 use ankurah::{Context, EntityId, LiveQuery, MatchArgs, Model, Ref, Value, View};
-use ankurah_commons::intention_graph::IntentionView;
+use ankurah_commons::cognition::IntentionView;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 

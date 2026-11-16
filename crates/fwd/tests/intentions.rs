@@ -4,9 +4,15 @@
 //! its project; the list holds its project's intentions; and an agent assigns itself one and
 //! unassigns it, and lists those assigned to any of its principals, past one it cannot read.
 
-use ankurah::{EntityId, View};
+use ankurah::model::Mutable;
+use ankurah::EntityId;
+use ankurah_commons::cognition::Intention;
+use ankurah_commons::property::Timestamp;
+use ankurah_commons::records::Closed;
 use anyhow::{anyhow, Result};
 use fwd_core::daemon::{self, Autostart, Client};
+use fwd_core::intentions::Parts;
+use fwd_core::model::PlacementView;
 use fwd_core::project::{NamedProject, Paths};
 use serde_json::Value;
 use std::io::Write;
@@ -90,25 +96,6 @@ impl Scratch {
     }
 }
 
-/// An intention as a later build may store one, by a model of the label the Commons' intention is
-/// read by, its status any text.
-mod later {
-    use ankurah::Model;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
-    #[model(label = "intention-graph.intention")]
-    #[model(no_ffi)]
-    pub struct Intention {
-        #[active_type(LWW)]
-        pub title: String,
-        #[active_type(LWW)]
-        pub words: String,
-        #[active_type(LWW)]
-        pub status: String,
-    }
-}
-
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = self.run(self.dir.path(), None, &["daemon", "stop"], "");
@@ -178,9 +165,9 @@ fn the_active_list_covers_every_principal_bound_to_the_agent() -> Result<()> {
     Ok(())
 }
 
-/// An intention assigned to the agent whose status this build does not know, as a later build may
-/// store one, fails nothing: `list --active` lists the rest, and says on standard error that one
-/// could not be read, by its id.
+/// An intention assigned to the agent that a later build closed with an outcome this build does not
+/// know fails nothing: `list --active` lists the rest, and says on standard error that one could
+/// not be read, by its id.
 #[tokio::test]
 async fn an_intention_whose_status_cannot_be_read_is_counted_and_the_rest_listed() -> Result<()> {
     let s = Scratch::new()?;
@@ -191,11 +178,13 @@ async fn an_intention_whose_status_cannot_be_read_is_counted_and_the_rest_listed
         s.json(&s.alpha, Some("main"), &["intention", "assign", id])?;
     }
     let client = s.client(&s.alpha).await?;
-    let ctx = client.node.context_async(ankurah::policy::DEFAULT_CONTEXT).await?;
     let id: EntityId = paused.parse().map_err(|e| anyhow!("{e:?}"))?;
-    let view: later::IntentionView = ctx.get(id).await?;
-    let trx = ctx.begin();
-    trx.edit::<later::Intention>(view.entity())?.status()?.set(&"paused".to_string())?;
+    let (placement, _): (PlacementView, Parts) = client.graph.get_placed(id).await?;
+    let trx = client.graph.begin();
+    let record = trx.edit_placed::<Intention>(&placement)?;
+    let closed =
+        Closed { closed: Some(Timestamp::from_unix_millis(1)), by: None, outcome: Some("paused".into()), reason: None };
+    trx.add(Mutable::entity(&*record), &closed).await?;
     trx.commit().await?;
     drop(client);
 

@@ -15,7 +15,7 @@ use crate::rules::{self, DecisionMove, Edge, Readiness, TaskSnapshot, Verb};
 use crate::subject;
 use ankurah::property::{Json, Ref};
 use ankurah::EntityId;
-use ankurah_commons::intention_graph::IntentionView;
+use ankurah_commons::cognition::IntentionView;
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde_json::{json, Value};
 

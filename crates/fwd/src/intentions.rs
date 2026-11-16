@@ -3,12 +3,11 @@
 
 use crate::{given_text, made_json, principal_for, App, Format};
 use ankurah::EntityId;
-use ankurah_commons::intention_graph::IntentionStatus;
-use ankurah_commons::records::{AttributionView, ClosureView, LastEditView};
+use ankurah_commons::records::{ClosedView, EditedView};
 use anyhow::{bail, Result};
 use clap::Subcommand;
 use fwd_core::decision_log::date;
-use fwd_core::intentions::{self, Parts};
+use fwd_core::intentions::{self, Outcome, Parts};
 use fwd_core::model::{PlacementView, RelationView};
 use fwd_core::ops::{self, Kind};
 use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
@@ -116,12 +115,16 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
                     if !listed.insert(id) {
                         continue;
                     }
+                    // A typed fetch cannot select the intentions that lack `Closed` (Ankurah task
+                    // B5EEndJf), so the ended ones are dropped from what was read.
                     match assigned {
-                        Followed::Held { found, .. } => match found.1 .0.status() {
-                            Ok(status) if intentions::ended(status) => {}
-                            Ok(_) => active.push(found),
-                            Err(_) => unreadable.push(id),
-                        },
+                        Followed::Held { found, .. } => {
+                            match intentions::outcome(graph.component_of::<ClosedView>(&found.0).await?.as_ref()) {
+                                Ok(Some(_)) => {}
+                                Ok(None) => active.push(found),
+                                Err(_) => unreadable.push(id),
+                            }
+                        }
                         Followed::NotHeld => unreadable.push(id),
                     }
                 }
@@ -146,11 +149,9 @@ pub(crate) async fn intention(app: &App, command: IntentionCommand) -> Result<()
             intentions::reword(graph, app.me, &record, title.as_deref(), words.as_deref(), said_by).await?;
             print_intention(app, &record).await
         }
-        IntentionCommand::Fulfil { id, reason, said_by } => {
-            close(app, &id, IntentionStatus::Fulfilled, reason, said_by).await
-        }
+        IntentionCommand::Fulfil { id, reason, said_by } => close(app, &id, Outcome::Fulfilled, reason, said_by).await,
         IntentionCommand::Withdraw { id, reason, said_by } => {
-            close(app, &id, IntentionStatus::Withdrawn, reason, said_by).await
+            close(app, &id, Outcome::Withdrawn, reason, said_by).await
         }
         IntentionCommand::Assign { id, to } => {
             let record = followed_intention(app, &id).await?;
@@ -216,16 +217,10 @@ async fn speaker_named(app: &App, said_by: Option<String>) -> Result<Option<Enti
     }
 }
 
-async fn close(
-    app: &App,
-    id: &str,
-    status: IntentionStatus,
-    reason: Option<String>,
-    said_by: Option<String>,
-) -> Result<()> {
+async fn close(app: &App, id: &str, ending: Outcome, reason: Option<String>, said_by: Option<String>) -> Result<()> {
     let record = app.graph().get_placed::<Parts>(app.id(id, INTENTION).await?).await?;
     let said_by = speaker_named(app, said_by).await?;
-    intentions::close(app.graph(), app.me, &record, status, reason, said_by).await?;
+    intentions::close(app.graph(), app.me, &record, ending, reason, said_by).await?;
     print_intention(app, &record).await
 }
 
@@ -301,41 +296,41 @@ async fn other_project(graph: &ProjectGraph, project: EntityId) -> Result<Option
     }))
 }
 
-/// An intention as JSON: the fields of its components, each principal by its id with its name
-/// beside it, whose words they are (`speaker`), and its project when that is not `graph`'s.
+/// An intention as JSON: the fields of its components, its description as `words` and where it
+/// stands as `status`, each principal by its id with its name beside it, whose words its latest
+/// quotation says the description holds (`speaker`), and its project when that is not `graph`'s.
 pub(crate) async fn intention_json(graph: &ProjectGraph, record: &(PlacementView, Parts)) -> Result<Value> {
-    let (placement, (intention, creation)) = record;
-    let attribution = graph.component_of::<AttributionView>(placement).await?;
-    let edit = graph.component_of::<LastEditView>(placement).await?;
-    let closure = graph.component_of::<ClosureView>(placement).await?;
-    let created_by = *creation.created_by()?;
-    let speaker = intentions::speaker(creation, attribution.as_ref())?;
-    let edited_by = match &edit {
-        Some(e) => e.edited_by()?.map(|by| *by),
+    let (placement, (intention, created)) = record;
+    let edited = graph.component_of::<EditedView>(placement).await?;
+    let closed = graph.component_of::<ClosedView>(placement).await?;
+    let created_by = *created.by()?;
+    let speaker = intentions::whose_words(graph, placement.id()).await?.and_then(|(speaker, _)| speaker);
+    let edited_by = match &edited {
+        Some(e) => e.by()?.map(|by| *by),
         None => None,
     };
-    let closed_by = match &closure {
-        Some(c) => c.closed_by()?.map(|by| *by),
+    let closed_by = match &closed {
+        Some(c) => c.by()?.map(|by| *by),
         None => None,
     };
     let mut v = json!({
         "id": placement.id().to_base64(),
         "kind": "intention",
         "title": intention.title()?,
-        "words": intention.words()?,
-        "status": intention.status()?.to_string(),
+        "words": intention.description()?,
+        "status": intentions::status(intentions::outcome(closed.as_ref())?),
         "created_by": created_by.to_base64(),
         "created_by_handle": ops::handle_of(graph, created_by).await?,
-        "created": creation.created()?,
-        "speaker": speaker.to_base64(),
-        "speaker_handle": ops::handle_of(graph, speaker).await?,
+        "created": created.created()?.unix_millis(),
+        "speaker": speaker.map(|s| s.to_base64()),
+        "speaker_handle": optional_handle(graph, speaker).await?,
         "edited_by": edited_by.map(|by| by.to_base64()),
         "edited_by_handle": optional_handle(graph, edited_by).await?,
-        "edited": edit.as_ref().map(LastEditView::edited).transpose()?,
+        "edited": edited.as_ref().map(EditedView::edited).transpose()?.map(|at| at.unix_millis()),
         "closed_by": closed_by.map(|by| by.to_base64()),
         "closed_by_handle": optional_handle(graph, closed_by).await?,
-        "closed": closure.as_ref().map(ClosureView::closed).transpose()?.flatten(),
-        "closed_reason": closure.as_ref().map(ClosureView::reason).transpose()?.flatten(),
+        "closed": closed.as_ref().map(ClosedView::closed).transpose()?.flatten().map(|at| at.unix_millis()),
+        "closed_reason": closed.as_ref().map(ClosedView::reason).transpose()?.flatten(),
     });
     if let Some(project) = other_project(graph, placement.project_id()?).await? {
         v["project"] = json!(project);
@@ -351,28 +346,28 @@ async fn optional_handle(graph: &ProjectGraph, id: Option<EntityId>) -> Result<O
     })
 }
 
-/// An intention for people: its short id, its title, its status and its project when that is not
-/// `graph`'s; under it whose words they are and when they were written down, and by whom when that
-/// was someone else; then the words, and why it ended when its closure says.
+/// An intention for people: its short id, its title, where it stands and its project when that is
+/// not `graph`'s; under it, when a quotation names its speaker, whose words the description holds,
+/// when they were written down, and by whom when that was someone else; then the description, and
+/// why it ended when its `Closed` says.
 async fn intention_text(graph: &ProjectGraph, record: &(PlacementView, Parts)) -> Result<String> {
     let (placement, (intention, _)) = record;
-    let status = intention.status()?;
-    let (speaker, day, writer) = spoken(graph, record).await?;
+    let closed = graph.component_of::<ClosedView>(placement).await?;
+    let status = intentions::status(intentions::outcome(closed.as_ref())?);
     let mut text = format!(
-        "{} {} [{status}]{}\n  @{speaker}, {day}",
+        "{} {} [{status}]{}",
         short_id(&placement.id()),
         intention.title()?,
         elsewhere(graph, placement).await?
     );
-    if let Some(writer) = writer {
-        text.push_str(&format!(", written down by @{writer}"));
+    if let Some((speaker, day, writer)) = spoken(graph, record).await? {
+        text.push_str(&format!("\n  @{speaker}, {day}"));
+        if let Some(writer) = writer {
+            text.push_str(&format!(", written down by @{writer}"));
+        }
     }
-    text.push_str(&words_after(&intention.words()?));
-    let reason = match graph.component_of::<ClosureView>(placement).await? {
-        Some(closure) => closure.reason()?,
-        None => None,
-    };
-    if let Some(reason) = reason {
+    text.push_str(&words_after(&intention.description()?));
+    if let Some(reason) = closed.as_ref().map(ClosedView::reason).transpose()?.flatten() {
         text.push_str(&format!("\n  {status}: {reason}"));
     }
     Ok(text)
@@ -383,24 +378,18 @@ async fn elsewhere(graph: &ProjectGraph, placement: &PlacementView) -> Result<St
     Ok(other_project(graph, placement.project_id()?).await?.map(|p| format!(" in {p}")).unwrap_or_default())
 }
 
-/// Whose words an intention holds, by name; the day they were written down, the day of their last
-/// rewording when they were reworded; and the name of whoever wrote them down, when that was not
-/// their speaker.
+/// Whose words an intention's description holds, by name, as its latest quotation says; the day
+/// they were written down; and the name of whoever wrote them down, when that was not their
+/// speaker. None when no quotation names a speaker for it.
 pub(crate) async fn spoken(
     graph: &ProjectGraph,
-    record: &(PlacementView, Parts),
-) -> Result<(String, String, Option<String>)> {
-    let (placement, (_, creation)) = record;
-    let attribution = graph.component_of::<AttributionView>(placement).await?;
-    let speaker = intentions::speaker(creation, attribution.as_ref())?;
-    let edit = graph.component_of::<LastEditView>(placement).await?;
-    let written = intentions::last_written(creation, edit.as_ref())?;
-    let written_by = match &edit {
-        Some(edit) => edit.edited_by()?.map(|by| *by),
-        None => Some(*creation.created_by()?),
+    (placement, _): &(PlacementView, Parts),
+) -> Result<Option<(String, String, Option<String>)>> {
+    let Some((Some(speaker), recorded)) = intentions::whose_words(graph, placement.id()).await? else {
+        return Ok(None);
     };
-    let writer = optional_handle(graph, written_by.filter(|by| *by != speaker)).await?;
-    Ok((ops::handle_of(graph, speaker).await?, date(written), writer))
+    let writer = optional_handle(graph, Some(*recorded.by()?).filter(|by| *by != speaker)).await?;
+    Ok(Some((ops::handle_of(graph, speaker).await?, date(recorded.created()?.unix_millis()), writer)))
 }
 
 /// `words` after the line that says whose they are: a colon, then each of their lines indented;

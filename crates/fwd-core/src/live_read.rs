@@ -13,7 +13,7 @@ use crate::working_set::questions_by_name;
 use ankurah::core::livequery::EntityLiveQuery;
 use ankurah::signals::{Listener, ListenerGuard, Signal};
 use ankurah::{EntityId, LiveQuery};
-use ankurah_commons::intention_graph::IntentionView;
+use ankurah_commons::cognition::IntentionView;
 use anyhow::Result;
 
 /// The live form of one read of what a session holds.
@@ -39,7 +39,9 @@ pub enum LiveRead {
     AnswersTo(EntityId),
     /// The intentions assigned to a principal, of any project: an assignment made or taken off.
     IntentionsAssignedTo(EntityId),
-    /// An intention assigned to a principal, wherever it is: its title, its words or its status.
+    /// An intention assigned to a principal, wherever it is: its title, its description, or its
+    /// ending, which a component of its own records, since a change to any component of the entity
+    /// changes the query's result.
     AssignedIntention(EntityId),
 }
 

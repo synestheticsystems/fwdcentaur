@@ -6,8 +6,7 @@
 
 use ankurah::property::{Json, Ref};
 use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::IntentionStatus;
-use ankurah_commons::records::ClosureView;
+use ankurah_commons::records::ClosedView;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::decision_log::date;
@@ -273,10 +272,11 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
 
 /// The session's active intentions are those assigned to the principals of its own thread, of any
 /// project, each once, however many of them hold it, one its principal of beta alone holds among
-/// them: each titled by its title, its words alone its line, one with no words with no line, and
-/// attributed apart from them to its speaker, by name, on the day its words were last written
-/// down; another project's name a tag, and one since fulfilled saying so in a line after its words
-/// and a tag; no path and no action. What is assigned to its subagent is not among them.
+/// them: each titled by its title, its description alone its line, one with no description with no
+/// line, and attributed apart from it to the speaker its quotation names, by name, on the day the
+/// words were written down; another project's name a tag, and one since fulfilled saying so in a
+/// line after its description and a tag; no path and no action. What is assigned to its subagent is
+/// not among them.
 #[tokio::test]
 async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -> Result<()> {
     let t = two().await?;
@@ -295,7 +295,7 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
     intentions::assign(&t.beta, t.their_lead, &ours, t.their_lead).await?;
     intentions::assign(&t.beta, t.their_lead, &betas, t.their_lead).await?;
     intentions::assign(&t.alpha, t.subagent, &subagents, t.subagent).await?;
-    intentions::close(&t.alpha, ines, &done, IntentionStatus::Fulfilled, None, None).await?;
+    intentions::close(&t.alpha, ines, &done, intentions::Outcome::Fulfilled, None, None).await?;
 
     let json = view(&t.alpha, Reader::Identity("tester")).await?;
     let section = &json["sections"][0];
@@ -304,7 +304,7 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
         let id = json!(record.0.id().to_base64());
         section["records"].as_array().into_iter().flatten().find(|r| r["id"] == id).cloned().unwrap_or(Value::Null)
     };
-    let day = date(ours.1 .1.created()?);
+    let day = date(ours.1 .1.created()?.unix_millis());
     assert_eq!(
         row(&ours),
         json!({
@@ -318,8 +318,8 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
         (&json!([{"text": "beta", "tone": null, "at": null}]), &json!([]))
     );
     assert_eq!((&row(&betas)["title"], &row(&betas)["tags"]), (&json!("Logs name their run"), &json!([])));
-    let closure = t.alpha.component_of::<ClosureView>(&done.0).await?.expect("closed");
-    let closed = date(closure.closed()?.expect("when it closed"));
+    let closure = t.alpha.component_of::<ClosedView>(&done.0).await?.expect("closed");
+    let closed = date(closure.closed()?.expect("when it closed").unix_millis());
     assert_eq!(row(&done)["lines"][1], format!("fulfilled on {closed}"));
     assert_eq!(row(&done)["tags"], json!([{"text": "fulfilled", "tone": null, "at": null}]));
     assert_eq!(row(&subagents), Value::Null, "the subagent's is not the session's");
