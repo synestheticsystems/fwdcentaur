@@ -16,7 +16,7 @@ use super::Minute;
 use crate::fmt;
 use ankurah::EntityId;
 use fwd_core::model::TaskStatus;
-use fwd_core::session_view::{status_words, Byline, Document, ListKind, Row, RowKind, Tag, Tone};
+use fwd_core::session_view::{status_words, Byline, Document, Input, ListKind, Row, RowKind, Tag, Tone};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -75,12 +75,8 @@ pub fn Record(doc: Signal<Option<Document>>, at: SectionAt, id: EntityId, opened
             })
         });
         let byline = Memo::new(move |_| row.with(|r| r.as_ref().and_then(|r| r.attribution.clone())));
-        // The document's Answer, on a question it offers to answer: the action that asks for words.
         let answer = Memo::new(move |_| {
-            row.with(|r| {
-                let asking = r.as_ref().filter(|r| r.kind == RowKind::Ask)?;
-                asking.actions.iter().find_map(|a| Some((a.label.clone(), a.input.clone()?)))
-            })
+            row.with(|r| r.as_ref().and_then(answer_of).map(|(label, input)| (label.clone(), input.clone())))
         });
         view! {
             <li class="record">
@@ -102,7 +98,7 @@ pub fn Record(doc: Signal<Option<Document>>, at: SectionAt, id: EntityId, opened
                         </div>
                         {move || match answer.get() {
                             Some((label, input)) => view! {
-                                <Answer question=id label=label input=input writing=opened link=link.into()/>
+                                <Answer question=id title=title.into() label=label input=input writing=opened link=link.into()/>
                             }
                             .into_any(),
                             None => view! { <div class="record-footer"><PageLink link=link.into()/></div> }.into_any(),
@@ -163,6 +159,15 @@ fn Attribution(byline: Byline) -> impl IntoView {
             <span class="attribution-at">{byline.at}</span>
         </p>
     }
+}
+
+/// The document's Answer on `row`, a question it offers to answer: the label of the action that asks
+/// for words, and what it asks for.
+pub(super) fn answer_of(row: &Row) -> Option<(&String, &Input)> {
+    if row.kind != RowKind::Ask {
+        return None;
+    }
+    row.actions.iter().find_map(|a| Some((&a.label, a.input.as_ref()?)))
 }
 
 /// The link to a record's page, in a new tab, so that the view stays beside the chat.

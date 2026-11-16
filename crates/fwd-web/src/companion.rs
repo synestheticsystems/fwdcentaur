@@ -13,12 +13,14 @@
 //! whatever form"). A principal's name, role and project head its sections only when the session has
 //! more than one. Each part of the page takes the id of what it draws and looks it up in the
 //! document as the document changes, so that a record is drawn again only when it changes itself,
-//! and stays open or closed as the person left it.
+//! and stays open or closed as the person left it. A reply the person sent that the daemon has not
+//! confirmed is the page's, not its row's (`replies.rs`).
 
 mod answer;
 mod follow;
 mod markdown;
 mod record;
+mod replies;
 mod section;
 
 use crate::app::NewerBuild;
@@ -28,6 +30,7 @@ use ankurah::EntityId;
 use follow::Follow;
 use fwd_core::session_view::{Document, Group, ListKind, OUT_OF_REACH, TITLE};
 use leptos::prelude::*;
+use replies::{Replies, RepliesApart};
 use section::{Lines, Section, SectionAt};
 use send_wrapper::SendWrapper;
 use std::time::Duration;
@@ -63,6 +66,7 @@ pub fn Companion(session: String) -> impl IntoView {
         }
     });
     on_cleanup(move || follow.stop());
+    provide_context(RwSignal::new(Replies::default()));
     keep_ages();
     let title = Memo::new(move |_| doc.with(|d| d.as_ref().map_or_else(|| TITLE.to_string(), |d| d.title.clone())));
     // The tab says what the page shows, and the app's name again once the page shows the app.
@@ -84,6 +88,7 @@ pub fn Companion(session: String) -> impl IntoView {
             <NewerBuild/>
             <header class="companion-header">{move || view! { <Title title=title.get()/> }}</header>
             {move || (!connected.get()).then(|| view! { <p class="connection-note" role="status">{OUT_OF_REACH}</p> })}
+            <RepliesApart doc=doc/>
             <main class="companion-content">
                 {move || doc.with(Option::is_none).then(|| view! { <p class="muted">{empty::LOADING}</p> })}
                 <Lines class="document-lines" lines=lines.into()/>

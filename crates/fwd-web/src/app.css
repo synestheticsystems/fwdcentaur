@@ -793,7 +793,17 @@ details[open] > summary .open-title { display: block; }
 .answer-form input { min-height: 34px; }
 .answer-form textarea:focus, .answer-form input:focus { border-color: var(--accent); outline: none; }
 .answer-form .error { margin: 7px 0 0; font-size: calc(12rem / 14); }
+/* A reply the daemon has not confirmed whose question's row is gone (companion/replies.rs): under
+   the title, above what the view shows, with its words as sent, why, and what the person can do. */
+.replies-apart { padding: 10px 16px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.reply-apart + .reply-apart { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.reply-apart p { margin: 0; }
+.reply-apart .error, .reply-apart .muted { margin-top: 4px; font-size: calc(12rem / 14); }
+.reply-apart .reply-apart-words { margin-top: 7px; padding: 6px 9px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.reply-apart-footer { justify-content: space-between; }
+.reply-apart-actions { display: flex; gap: 8px; }
 @media (min-width: 600px) {
+  .replies-apart { padding-inline: 20px; }
   .record-words.attributed { display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: 16px; }
   .attribution { margin-top: 1px; }
   .attribution-at { display: block; }

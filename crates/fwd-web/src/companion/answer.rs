@@ -6,9 +6,12 @@
 //! box on the page that sends something. The box empties only once the daemon has the reply
 //! (`session::while_writing`), and the question then leaves Waiting On You as the view reads it
 //! again; until then the box keeps its words, and a reply that fails, or that a drop of the
-//! connection left unconfirmed, says so beside them.
+//! connection left unconfirmed, says so beside them. The page, not the box, keeps a reply from the
+//! moment it is sent (`replies.rs`), so that one the daemon has not confirmed outlives the
+//! question's row.
 
 use super::record::PageLink;
+use super::replies::{Replies, Reply};
 use super::Connected;
 use crate::keys;
 use crate::session::{self, graph};
@@ -22,46 +25,40 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
-/// The box that answers the question `question` with the document's action, its `label` and what
-/// it asks for, `input`, open from the start when `writing`, with the link to the question's page,
-/// `link`, beside its button.
+/// The box that answers the question `question`, titled `title`, with the document's action, its
+/// `label` and what it asks for, `input`, open from the start when `writing`, with the link to the
+/// question's page, `link`, beside its button.
 #[component]
 pub fn Answer(
     question: EntityId,
+    title: Signal<String>,
     label: String,
     input: Input,
     writing: bool,
     link: Signal<Option<String>>,
 ) -> impl IntoView {
-    let writing = RwSignal::new(writing);
-    let words = RwSignal::new(String::new());
-    let sending = RwSignal::new(false);
-    let error = RwSignal::new(None::<anyhow::Error>);
+    let replies = expect_context::<RwSignal<Replies>>();
+    // A reply sent from the question's row as drawn before keeps its words in the box drawn now.
+    let sent = replies.with_untracked(|r| r.get(question).map(|reply| reply.words.clone()));
+    let writing = RwSignal::new(writing || sent.is_some());
+    let words = RwSignal::new(sent.unwrap_or_default());
+    let sending = Memo::new(move |_| replies.with(|r| r.get(question).is_some_and(Reply::sending)));
+    let why = Memo::new(move |_| replies.with(|r| r.get(question)?.ended.as_ref().map(|why| format!("{why:#}"))));
     // Nothing is sent while the connection to the daemon is lost; the words stay in the box.
     let Connected(connected) = expect_context::<Connected>();
     let field_id = format!("answer-{}", question.to_base64());
-    let send = move || {
+    let submit = move || {
         let text = words.get_untracked().trim().to_string();
-        let ready = !text.is_empty() && !sending.get_untracked() && connected.get_untracked();
-        let Some(me) = session::me().filter(|_| ready) else { return };
-        sending.set(true);
-        error.set(None);
-        spawn_local(async move {
-            match reply(me, question, &text).await {
-                Ok(()) => {
-                    session::wrote(me);
-                    // Unless something new was written meanwhile.
-                    words.try_update(|written| {
-                        if written.trim() == text {
-                            written.clear();
-                        }
-                    });
+        if text.is_empty() || !connected.get_untracked() {
+            return;
+        }
+        send(replies, question, title.get_untracked(), link.get_untracked(), text.clone(), move || {
+            // Unless something new was written meanwhile.
+            words.try_update(|written| {
+                if written.trim() == text {
+                    written.clear();
                 }
-                Err(why) => {
-                    error.try_set(Some(why));
-                }
-            }
-            sending.try_set(false);
+            });
         });
     };
     let start = {
@@ -75,7 +72,7 @@ pub fn Answer(
     let on_key = move |ev: web_sys::KeyboardEvent| {
         if keys::is_send(&ev) {
             ev.prevent_default();
-            send();
+            submit();
         }
     };
     view! {
@@ -106,7 +103,7 @@ pub fn Answer(
                 view! {
                     <form class="answer-form" on:submit=move |ev| {
                         ev.prevent_default();
-                        send();
+                        submit();
                     }>
                         <label for=field_id.clone()>{input.prompt.clone()}</label>
                         {field}
@@ -116,17 +113,40 @@ pub fn Answer(
                             </button>
                             <PageLink link=link/>
                         </div>
-                        {move || {
-                            error.with(|why| {
-                                why.as_ref().map(|why| view! { <p class="error" role="status">{format!("{why:#}")}</p> })
-                            })
-                        }}
+                        {move || why.get().map(|why| view! { <p class="error" role="status">{why}</p> })}
                     </form>
                 }
                 .into_any()
             }}
         </div>
     }
+}
+
+/// Sends `words` as the person's reply to the question `question`, titled `title`, whose page is at
+/// `link`, which `replies` keeps until the daemon confirms it or the person dismisses it, and runs
+/// `made` once the daemon has it. Nothing is sent while a reply to the question is being sent, or
+/// from a page that acts as no one.
+pub(super) fn send(
+    replies: RwSignal<Replies>,
+    question: EntityId,
+    title: String,
+    link: Option<String>,
+    words: String,
+    made: impl FnOnce() + 'static,
+) {
+    let Some(me) = session::me() else { return };
+    if !replies.try_update(|r| r.start(question, title, link, words.clone())).unwrap_or(false) {
+        return;
+    }
+    spawn_local(async move {
+        let outcome = reply(me, question, &words).await;
+        let confirmed = outcome.is_ok();
+        replies.try_update(|r| r.end(question, outcome));
+        if confirmed {
+            session::wrote(me);
+            made();
+        }
+    });
 }
 
 /// Posts `text` as `me`'s reply in the thread of `question`, at the priority of what it answers,
