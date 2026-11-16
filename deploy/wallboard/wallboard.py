@@ -17,9 +17,10 @@ import uuid
 from settings import validate_settings
 
 # The project's socket on the daemon, as crates/fwd-core/src/daemon_socket.rs names it for the
-# daemon and the page, with the `/ws` Ankurah's connector appends. A daemon that keeps every
-# project in one store refuses the path the daemons before it used, `/p/<project>/ws`.
-SOCKET_PATH = "/p/{project}/one-store/ws"
+# daemon and the page, with the `/ws` Ankurah's connector appends: the one store, and its generation.
+# The daemon refuses the paths of earlier stores, `/p/<project>/ws` and `/p/<project>/one-store/ws`,
+# so a launcher and a page of an earlier build are refused until both are deployed again.
+SOCKET_PATH = "/p/{project}/one-store/2/ws"
 
 
 def given(value, name, where=""):
