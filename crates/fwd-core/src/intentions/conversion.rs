@@ -236,15 +236,19 @@ async fn additions(
         },
         None => (written_by, created),
     };
+    // Whatever the status: an open intention's closure can name a message too, and none of the
+    // components it gets would carry it.
+    if let Some(c) = &closure {
+        if c.reason_message()?.is_some() {
+            return refuse("its closure names a message giving the reason, which `Closed` has no place for");
+        }
+    }
     let status = old.status()?;
     let closed = match (status.as_str(), &closure) {
         ("open", None) => None,
         ("open", Some(c)) if c.closed()?.is_none() && c.closed_by()?.is_none() && c.reason()?.is_none() => None,
         ("open", Some(_)) => return refuse("it is open, yet its closure records a closing"),
         (ended, Some(c)) if ended.parse::<Outcome>().is_ok() => {
-            if c.reason_message()?.is_some() {
-                return refuse("its closure names a message giving the reason, which `Closed` has no place for");
-            }
             let Some(when) = c.closed()? else {
                 return refuse(&format!("it is {ended}, but its closure records no time"));
             };

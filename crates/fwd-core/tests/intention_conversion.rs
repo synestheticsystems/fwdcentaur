@@ -282,26 +282,35 @@ async fn each_intention_moves_whole_where_the_nodes_own_attribution_definition_s
     each_intention_moves_whole(Side::Above).await
 }
 
-/// A closure that names the message giving its reason has no place in `Closed`, so the run stops
-/// naming that intention, and the other, which would move whole, does not move either.
+/// A closure that names the message giving its reason has no place in `Closed`, whether its
+/// intention ended or is open with nothing else of a closing recorded, so the run stops naming each
+/// such intention, and the other, which would move whole, does not move either.
 #[tokio::test]
 async fn an_intention_that_would_lose_part_of_what_it_holds_stops_the_run_before_anything_is_written() -> Result<()> {
     let (store, before) = Store::before_the_mint(Side::Below).await?;
     let whole = written(&before, store.tide, old("Readers keep their place", "open", store.ines)).await?;
+    let message = Some(EntityId::from_bytes([7; 32]));
     let closure = before_d229::Closure {
         closed: Some(FULFILLED),
         closed_by: Some(Ref::new(store.ines)),
         reason: Some("see the thread".into()),
-        reason_message: Some(EntityId::from_bytes([7; 32])),
+        reason_message: message,
     };
-    let losing = Old { closure: Some(closure), ..old("Name the page", "withdrawn", store.ines) };
-    let losing = written(&before, store.tide, losing).await?;
+    let withdrawn = Old { closure: Some(closure), ..old("Name the page", "withdrawn", store.ines) };
+    let withdrawn = written(&before, store.tide, withdrawn).await?;
+    let only_the_message =
+        before_d229::Closure { closed: None, closed_by: None, reason: None, reason_message: message };
+    let open = Old { closure: Some(only_the_message), ..old("Builds stay under a minute", "open", store.ines) };
+    let open = written(&before, store.tide, open).await?;
     drop(before);
     let alpha = store.opened().await?;
 
     let refused = format!("{:#}", intentions::convert(&alpha, store.ines).await.expect_err("refused"));
-    assert!(refused.contains(&losing.to_base64()) && refused.contains("message giving the reason"), "{refused}");
-    assert!(!refused.contains(&whole.to_base64()), "{refused}");
+    let why = |id: EntityId| refused.split("; ").find(|each| each.contains(&id.to_base64()));
+    for losing in [withdrawn, open] {
+        assert!(why(losing).is_some_and(|why| why.contains("message giving the reason")), "{refused}");
+    }
+    assert_eq!(why(whole), None, "{refused}");
     let placement: PlacementView = alpha.get(whole).await?;
     assert!(alpha.component_of::<IntentionView>(&placement).await?.is_none(), "nothing written");
     assert!(alpha.component_of::<CreatedView>(&placement).await?.is_none());
