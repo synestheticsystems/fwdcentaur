@@ -127,9 +127,9 @@ impl Follow {
                 Next::Now => continue,
                 Next::Idle | Next::Lost => return,
                 Next::After(wait) => {
-                    session::sleep_ms(wait).await;
+                    session::sleep_ms(wait.ms).await;
                     let mut inner = self.0.inner.borrow_mut();
-                    if inner.stopped || !inner.reads.retry() {
+                    if inner.stopped || !inner.reads.retry(wait) {
                         return;
                     }
                 }
@@ -178,8 +178,18 @@ impl Follow {
 struct Reads {
     running: bool,
     again: bool,
-    retry: Option<i32>,
+    retry: Option<Wait>,
     lost: bool,
+    /// How many waits have begun, which numbers the next one.
+    waits: u64,
+}
+
+/// A wait before a read that failed is tried again: how long it lasts, and which wait it is, so
+/// that one the connection's return replaced starts nothing when it ends ([`Reads::retry`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Wait {
+    ms: i32,
+    number: u64,
 }
 
 /// What follows a read.
@@ -189,8 +199,8 @@ enum Next {
     Now,
     /// Nothing, until something changes.
     Idle,
-    /// The read tried again after this many milliseconds.
-    After(i32),
+    /// The read tried again once this wait is over.
+    After(Wait),
     /// Nothing until the connection is back: the read failed while it was lost.
     Lost,
 }
@@ -215,7 +225,9 @@ impl Reads {
             return Next::Lost;
         }
         if !succeeded {
-            let wait = self.retry.map_or(FIRST_RETRY_MS, |wait| (wait * 2).min(MAX_RETRY_MS));
+            let ms = self.retry.map_or(FIRST_RETRY_MS, |wait| (wait.ms * 2).min(MAX_RETRY_MS));
+            self.waits += 1;
+            let wait = Wait { ms, number: self.waits };
             self.retry = Some(wait);
             return Next::After(wait);
         }
@@ -228,11 +240,11 @@ impl Reads {
         Next::Idle
     }
 
-    /// The wait before a read that failed is tried again is over: whether it starts now, which it
-    /// does unless a read already runs or the connection is lost. It reads every change made until
-    /// it starts.
-    fn retry(&mut self) -> bool {
-        if self.running || self.lost {
+    /// The wait `wait` before a read that failed is tried again is over: whether the read starts
+    /// now, which it does unless the connection is lost, or came back since the wait began and so
+    /// replaced it with a read of its own. It reads every change made until it starts.
+    fn retry(&mut self, wait: Wait) -> bool {
+        if self.lost || self.retry != Some(wait) {
             return false;
         }
         self.running = true;
@@ -264,6 +276,14 @@ impl Reads {
 mod tests {
     use super::*;
 
+    /// The wait that follows a read that failed.
+    fn waiting(next: Next) -> Wait {
+        match next {
+            Next::After(wait) => wait,
+            other => panic!("a read that failed is followed by {other:?}, not a wait"),
+        }
+    }
+
     /// Changes that arrive while a read runs lead to one more read, and none after it.
     #[test]
     fn changes_during_a_read_lead_to_one_more_read() {
@@ -281,29 +301,27 @@ mod tests {
     fn a_read_that_fails_is_tried_again_after_a_wait_that_doubles() {
         let mut reads = Reads::default();
         assert!(reads.changed());
-        let waits: Vec<Next> = (0..7)
+        let waits: Vec<i32> = (0..7)
             .map(|_| {
-                let next = reads.finished(false);
-                assert!(reads.retry(), "the wait over, the read is tried again");
-                next
+                let wait = waiting(reads.finished(false));
+                assert!(reads.retry(wait), "the wait over, the read is tried again");
+                wait.ms
             })
             .collect();
-        let after = |ms| Next::After(ms);
-        assert_eq!(
-            waits,
-            [after(1_000), after(2_000), after(4_000), after(8_000), after(16_000), after(30_000), after(30_000)]
-        );
-        assert_eq!(reads.finished(false), Next::After(30_000));
+        assert_eq!(waits, [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+        let wait = waiting(reads.finished(false));
+        assert_eq!(wait.ms, 30_000);
         assert!(!reads.changed(), "a change while it waits starts no read of its own");
-        assert!(reads.retry());
+        assert!(reads.retry(wait));
         assert_eq!(reads.finished(true), Next::Idle, "the try read it");
         assert!(reads.changed());
-        assert_eq!(reads.finished(false), Next::After(1_000), "a read that succeeded starts the waits over");
+        assert_eq!(waiting(reads.finished(false)).ms, 1_000, "a read that succeeded starts the waits over");
     }
 
     /// While the connection is lost nothing is read, a read that fails is neither shown nor tried
     /// again, and the wait of one that failed before is dropped; once it is back one read starts,
-    /// for every change meanwhile.
+    /// for every change meanwhile, and the wait it dropped starts nothing when it ends, even after a
+    /// read that succeeded or failed since.
     #[test]
     fn nothing_is_read_while_the_connection_is_lost_and_one_read_starts_once_it_is_back() {
         let mut reads = Reads::default();
@@ -317,13 +335,25 @@ mod tests {
         assert_eq!(reads.finished(true), Next::Idle);
 
         assert!(reads.changed());
-        assert_eq!(reads.finished(false), Next::After(1_000));
+        let ends_while_lost = waiting(reads.finished(false));
         reads.lost();
-        assert!(!reads.retry(), "the try waits for the connection");
+        assert!(!reads.retry(ends_while_lost), "the try waits for the connection");
         assert!(reads.back(), "which starts a read at once");
-        assert_eq!(reads.finished(false), Next::After(1_000), "with the waits started over");
+        let ends_once_back = waiting(reads.finished(false));
+        assert_eq!(ends_once_back.ms, 1_000, "with the waits started over");
 
-        assert!(reads.retry());
+        reads.lost();
+        assert!(reads.back());
+        assert_eq!(reads.finished(true), Next::Idle);
+        assert!(!reads.retry(ends_once_back), "a wait the return dropped starts nothing once it ends");
+        assert!(reads.changed());
+        let dropped = waiting(reads.finished(false));
+        reads.lost();
+        assert!(reads.back());
+        let since = waiting(reads.finished(false));
+        assert!(!reads.retry(dropped), "nor cuts short the wait of a read that failed since");
+
+        assert!(reads.retry(since));
         reads.lost();
         assert!(!reads.back(), "back while a read runs");
         assert_eq!(reads.finished(true), Next::Now, "it is read again, for what changed while it was lost");
