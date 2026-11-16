@@ -11,7 +11,7 @@ mod conversion;
 mod quotation;
 
 pub use conversion::{before_d229, convert, Converted};
-pub use quotation::{quotation_of, speaker, whose_words, Quoted};
+pub use quotation::{joined_to, quotation_of, speaker, whose_words, whose_words_among, Quoted};
 
 use crate::model::{PlacementView, PrincipalKind, PrincipalView, RelationKind, RelationStatus, RelationView};
 use crate::now_ms;

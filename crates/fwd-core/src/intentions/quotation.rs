@@ -79,18 +79,27 @@ pub fn speaker(
     })
 }
 
-/// The quotation that says whose words the intention `intention` holds: of the quotations its
-/// accepted `relates_to` relations come from, wherever they are, the one recorded last, by when it
-/// was recorded and then by id. None when no quotation supports it: a quotation is optional
-/// (D229).
-pub async fn quotation_of(graph: &ProjectGraph, intention: EntityId) -> Result<Option<(PlacementView, Quoted)>> {
-    let mut latest: Option<((i64, EntityId), (PlacementView, Quoted))> = None;
+/// The records joined to the intention `intention` by its accepted `relates_to` relations,
+/// wherever they are: its quotations, and any other record related to it. A reader that follows
+/// whose words the intention holds listens to each of them, and to the relations.
+pub async fn joined_to(graph: &ProjectGraph, intention: EntityId) -> Result<Vec<EntityId>> {
+    let mut joined = Vec::new();
     for r in graph.relations_to(intention, Some(RelationKind::RelatesTo)).await? {
-        if !rules::holds(RelationKind::RelatesTo, r.status()?) {
-            continue;
+        if rules::holds(RelationKind::RelatesTo, r.status()?) {
+            joined.push(r.from_id()?);
         }
+    }
+    Ok(joined)
+}
+
+/// The quotation that says whose words an intention holds, of the records `joined` to it
+/// ([`joined_to`]): the one recorded last, by when it was recorded and then by id. None when no
+/// quotation supports it: a quotation is optional (D229).
+pub async fn quotation_of(graph: &ProjectGraph, joined: &[EntityId]) -> Result<Option<(PlacementView, Quoted)>> {
+    let mut latest: Option<((i64, EntityId), (PlacementView, Quoted))> = None;
+    for id in joined {
         // Another record related to the intention is not held as a quotation.
-        let Followed::Held { found, .. } = graph.follow_placed::<Quoted>(r.from_id()?).await? else { continue };
+        let Followed::Held { found, .. } = graph.follow_placed::<Quoted>(*id).await? else { continue };
         let recorded = (found.1 .1.created()?.unix_millis(), found.0.id());
         if latest.as_ref().is_none_or(|(last, _)| recorded > *last) {
             latest = Some((recorded, found));
@@ -99,11 +108,21 @@ pub async fn quotation_of(graph: &ProjectGraph, intention: EntityId) -> Result<O
     Ok(latest.map(|(_, quoted)| quoted))
 }
 
-/// Whose words the intention `intention`'s description holds, as its latest quotation says
-/// ([`quotation_of`]): the speaker, none when no one knows who, with the quotation's `Created`,
-/// which says who recorded the words and when. None when no quotation supports it.
-pub async fn whose_words(graph: &ProjectGraph, intention: EntityId) -> Result<Option<(Option<EntityId>, CreatedView)>> {
-    let Some((placement, (_, created))) = quotation_of(graph, intention).await? else { return Ok(None) };
+/// Whose words an intention's description holds, as the latest of the quotations among the records
+/// `joined` to it says ([`quotation_of`]): the speaker, none when no one knows who, with the
+/// quotation's `Created`, which says who recorded the words and when. None when no quotation
+/// supports it.
+pub async fn whose_words_among(
+    graph: &ProjectGraph,
+    joined: &[EntityId],
+) -> Result<Option<(Option<EntityId>, CreatedView)>> {
+    let Some((placement, (_, created))) = quotation_of(graph, joined).await? else { return Ok(None) };
     let attribution = graph.component_of::<AttributionView>(&placement).await?;
     Ok(Some((speaker(&created, attribution.as_ref())?, created)))
+}
+
+/// Whose words the intention `intention`'s description holds, as the latest of its quotations says
+/// ([`joined_to`], [`whose_words_among`]).
+pub async fn whose_words(graph: &ProjectGraph, intention: EntityId) -> Result<Option<(Option<EntityId>, CreatedView)>> {
+    whose_words_among(graph, &joined_to(graph, intention).await?).await
 }
