@@ -45,8 +45,8 @@ mod tests {
     #[test]
     fn paragraphs_keep_their_lines_and_code_is_escaped() {
         assert_eq!(
-            html("spitball design:\nthe header\n\nthen `a<b`"),
-            "<p>spitball design:\nthe header</p>\n<p>then <code>a&lt;b</code></p>\n"
+            html("Water the ferns:\nthe tall ones first\n\nthen `a<b`"),
+            "<p>Water the ferns:\nthe tall ones first</p>\n<p>then <code>a&lt;b</code></p>\n"
         );
     }
 
