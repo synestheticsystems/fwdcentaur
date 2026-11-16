@@ -26,7 +26,7 @@ use crate::{empty, session};
 use ankurah::signals::Get as AnkurahGet;
 use ankurah::EntityId;
 use follow::Follow;
-use fwd_core::session_view::{Document, ListKind, OUT_OF_REACH, TITLE};
+use fwd_core::session_view::{Document, Group, ListKind, OUT_OF_REACH, TITLE};
 use leptos::prelude::*;
 use section::{Lines, Section, SectionAt};
 use send_wrapper::SendWrapper;
@@ -124,13 +124,15 @@ fn Principal(
     several: Signal<bool>,
     first: Signal<Option<EntityId>>,
 ) -> impl IntoView {
-    let group = move |d: &Option<Document>| d.as_ref().and_then(|d| d.principals.iter().find(|g| g.id == id)).cloned();
     let head = Memo::new(move |_| {
-        doc.with(|d| group(d).map(|g| (g.title, g.tags.into_iter().map(|t| t.text).collect::<Vec<_>>().join(" · "))))
+        doc.with(|d| {
+            let g = group(d, id)?;
+            Some((g.title.clone(), g.tags.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" · ")))
+        })
     });
-    let lines = Memo::new(move |_| doc.with(|d| group(d).map(|g| g.lines).unwrap_or_default()));
+    let lines = Memo::new(move |_| doc.with(|d| group(d, id).map(|g| g.lines.clone()).unwrap_or_default()));
     let kinds = Memo::new(move |_| {
-        doc.with(|d| group(d).map(|g| g.sections.iter().map(|s| s.section).collect::<Vec<_>>()).unwrap_or_default())
+        doc.with(|d| group(d, id).map(|g| g.sections.iter().map(|s| s.section).collect::<Vec<_>>()).unwrap_or_default())
     });
     let shows = Memo::new(move |_| several.get() || !lines.with(Vec::is_empty) || !kinds.with(Vec::is_empty));
     move || {
@@ -165,6 +167,12 @@ fn sections_of(document: &Document) -> Vec<ListKind> {
 /// The ids of the session's principals, in the document's order.
 fn principals_of(document: &Document) -> Vec<EntityId> {
     document.principals.iter().map(|g| g.id).collect()
+}
+
+/// The principal `id`'s group in `document`, borrowed, so that each part of the page clones only
+/// what it shows of it.
+fn group(document: &Option<Document>, id: EntityId) -> Option<&Group> {
+    document.as_ref()?.principals.iter().find(|g| g.id == id)
 }
 
 /// The question that waits on the person first, which the page opens ready to answer at its first
