@@ -19,16 +19,16 @@ repository = "https://github.com/synestheticsystems/fwdcentaur"
 # Ankurah f8e85d2, on the feat/storage-node-sqlite-wasm branch, into this revision's format.
 # crates/fwd-host stays on f8e85d2 until storage/sqlite-node, the SQLite engine it runs on in Node.js,
 # reaches Ankurah main.
-ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "6ffaa3367698639e261b37a3c010dc0162f36443", features = ["derive"] }
-ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "6ffaa3367698639e261b37a3c010dc0162f36443" }
-ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "6ffaa3367698639e261b37a3c010dc0162f36443" }
-ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "6ffaa3367698639e261b37a3c010dc0162f36443" }
+ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "22c997d27f50466ab5b9559ddf00c631842cf4d7", features = ["derive"] }
+ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "22c997d27f50466ab5b9559ddf00c631842cf4d7" }
+ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "22c997d27f50466ab5b9559ddf00c631842cf4d7" }
+ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "22c997d27f50466ab5b9559ddf00c631842cf4d7" }
 # The shared model definitions fwd's intentions are built on, at a commit that pins the same Ankurah
 # revision as the lines above: crates of two revisions would not share Ankurah's types. Its models
 # declare the ids of their kept mint, which every durable node fwd opens imports first
 # (`fwd_core::durable`). `text` holds the quotation that says whose words an intention's description
 # holds.
-ankurah-commons        = { git = "https://github.com/ankurah/commons", rev = "d977d1461116e8aa30b39001e8af77535417fe95", default-features = false, features = ["cognition", "records", "identity", "text"] }
+ankurah-commons        = { git = "https://github.com/ankurah/commons", rev = "57be49abe9e91e380598716f0b4a94017c12e01f", default-features = false, features = ["cognition", "records", "identity", "text"] }
 # The connection pool ankurah-storage-sqlite is built on, the same major: the CLI builds the pool
 # of its in-memory store itself (crates/fwd-core/src/daemon.rs, `ephemeral_store`).
 bb8                    = "0.9"
