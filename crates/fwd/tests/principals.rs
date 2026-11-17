@@ -301,7 +301,9 @@ async fn a_migration_refused_after_it_moved_the_principals_says_what_it_moved() 
     let out = d.run(&d.beta, Some("a2"), &["admin", "migrate"])?;
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && said.contains("which has not named itself in this project"), "{said}");
-    let line = said.lines().find(|l| l.starts_with("principals moved onto the Commons' identity.Principal"));
+    // What it did comes in lines of their own after the line that says so, as the text output's.
+    let mut lines = said.lines().skip_while(|l| !l.ends_with("did this before the error below ended it:"));
+    let line = lines.find(|l| l.starts_with("principals moved onto the Commons' identity.Principal"));
     let line = line.ok_or_else(|| anyhow!("no line of the principals moved: {said}"))?;
     for (id, handle) in [(&unmoved.person, "@tester"), (&unmoved.agent, "@impl-old")] {
         assert!(line.contains(&format!("{} {handle}", &id[..8])), "{said}");
