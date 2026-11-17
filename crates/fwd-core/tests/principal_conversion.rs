@@ -357,9 +357,9 @@ async fn a_principal_that_would_lose_part_of_what_it_holds_stops_the_run_before_
 }
 
 /// While a project holds a principal not moved yet, nothing makes a principal or binds a subject
-/// there, since one found missing may be that principal: the person's find-or-make and an agent
-/// naming itself, by the name of one not moved or by another, are each refused naming the
-/// migration, and make nothing; once the move has run, a command whose caller was found before it
+/// there, since one found missing may be that principal: the person's find-or-make, an agent
+/// naming itself, by the name of one not moved or by another, and an agent or a person taking one
+/// over are each refused naming the migration, and make nothing; once the move has run, a command whose caller was found before it
 /// finished is refused as the agent it is, the person and the agent are found, no second is made,
 /// and a new agent is made and bound.
 #[tokio::test]
@@ -400,6 +400,10 @@ async fn nothing_makes_a_principal_or_a_binding_beside_one_not_moved_yet() -> Re
         Some("claude-code:s1/a2"),
     );
     assert!(refusal(other.await).contains(migrate));
+    // Taking one over is refused before its name is looked for, so that every check of a binding
+    // runs on the principals moved.
+    assert!(refusal(ops::bind_principal(&alpha, "impl-tide", "claude-code:s1/a2", None).await).contains(migrate));
+    assert!(refusal(ops::admin_bind(&alpha, "impl-tide", "codex:t1/t1", person).await).contains(migrate));
     assert_eq!(subject::caller(&alpha, "claude-code:s1/a1", None).await?, None, "it acts as no one meanwhile");
     assert!(ops::principals(&alpha).await?.is_empty(), "nothing was made");
     assert!(subject::bindings_of(&alpha, "claude-code:s1/a2").await?.is_empty(), "nor bound");
