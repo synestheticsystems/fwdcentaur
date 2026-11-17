@@ -31,7 +31,7 @@ use ankurah::policy::DEFAULT_CONTEXT;
 use ankurah::{Context as NodeContext, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use ankurah_websocket_server::WebsocketServer;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::extract::{ConnectInfo, Path as RoutePath, Request, State};
 use axum::handler::Handler;
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
@@ -42,6 +42,7 @@ use fwd_core::daemon::{
     hold_port_file, try_lock, write_port_file, Bind, CheckoutRecord, DaemonConfig, HostedProject, LockHolder, PortFile,
 };
 use fwd_core::daemon_socket;
+use fwd_core::durable;
 use fwd_core::project::{self, Index, NamedProject, Paths};
 use fwd_core::project_graph::{NodeGraph, ProjectGraph};
 use include_dir::{include_dir, Dir};
@@ -220,16 +221,11 @@ struct DaemonNode {
 
 impl DaemonNode {
     /// Opens the node over `store` (made on first use), with its Ankurah system (created on first
-    /// use), starts the routing service over every project's records in it, and readies the
-    /// socket clients join it through. Runs under the lifetime lock.
+    /// use) and the Commons' kept mint (`fwd_core::durable`), starts the routing service over every
+    /// project's records in it, and readies the socket clients join it through. Runs under the
+    /// lifetime lock.
     async fn open(store: SqliteStorageEngine) -> Result<DaemonNode> {
-        let node = Node::new_durable(Arc::new(store), PermissiveAgent::new());
-        node.system.wait_loaded().await?;
-        if node.system.root().is_none() {
-            info!("creating the Ankurah system");
-            node.system.create().await?;
-        }
-        node.system.wait_system_ready().await.map_err(|e| anyhow!("the Ankurah system did not become ready: {e}"))?;
+        let node = durable::open(store).await?;
         let ctx = node.context_async(DEFAULT_CONTEXT).await?;
         let routing = services::start(NodeGraph::new(ctx.clone())).await.context("starting the routing service")?;
         let upgrade = WebsocketServer::new(node.clone()).route_handler();
@@ -403,13 +399,16 @@ pub async fn serve(paths: Paths) -> Result<()> {
 /// checks every request passes; built apart from `serve` so the refusals are tested in process.
 fn router(state: AppState) -> Router {
     let control = || middleware::from_fn(local_process);
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/projects", get(projects_list).merge(post(projects_open).route_layer(control())))
         // A project's Ankurah socket, at the base path every client builds with the project's id
         // (here the route's capture in its place) and the `/ws` Ankurah's connectors append.
-        .route(&format!("{}/ws", daemon_socket::base_path("{project}")), get(project_socket))
-        .route(PER_PROJECT_SOCKET, get(refuse_older_client))
+        .route(&format!("{}/ws", daemon_socket::base_path("{project}")), get(project_socket));
+    for older in OlderClient::ALL {
+        router = router.route(older.path(), get(move || async move { older.refuse() }));
+    }
+    router
         .route("/p/{project}/checkouts", get(checkouts_list).post(checkouts_report).route_layer(control()))
         .route("/webview-origins", post(admit_webview).route_layer(control()))
         .route("/stop", post(stop).route_layer(control()))
@@ -769,24 +768,45 @@ async fn project_socket(
     }
 }
 
-/// The path at which the daemons that kept a store per project served each project's socket, and
-/// at which a client built for them still asks for it.
-const PER_PROJECT_SOCKET: &str = "/p/{project}/ws";
+/// A client built for an earlier store than the daemon keeps, by the path at which it asks for its
+/// socket, which would read or write the store wrongly (`fwd_core::daemon_socket` says how).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OlderClient {
+    /// Built for the daemons that kept a store per project.
+    PerProjectStores,
+    /// Built for the one store before it held the Commons' kept mint, the first generation of
+    /// `fwd_core::daemon_socket::GENERATION`.
+    BeforeTheKeptMint,
+}
 
-/// What such a client is told, whatever project it names.
-const OLDER_CLIENT_REFUSAL: &str =
-    "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's.\n";
+impl OlderClient {
+    const ALL: [OlderClient; 2] = [OlderClient::PerProjectStores, OlderClient::BeforeTheKeptMint];
 
-/// Refuses a client built for the daemons that kept a store per project, which would read every
-/// project's records here (`fwd_core::daemon_socket` says how). `410 Gone`, since that socket is
-/// gone from this path for good, unlike the socket's `404` for a project the daemon does not host.
-/// No status stops those clients sooner, since none of them reads it: a command's Ankurah client
-/// fails its first attempt on any answer but `101` and the command ends with it, a `fwd watch`
-/// that was running keeps trying, at most every 30 s, until its ten-minute outage limit ends it,
-/// and a page's browser hides the answer from it while its connector tries again, at most every
-/// 10 s.
-async fn refuse_older_client() -> Response {
-    (StatusCode::GONE, OLDER_CLIENT_REFUSAL).into_response()
+    /// The route at which such a client asks for its socket.
+    fn path(self) -> &'static str {
+        match self {
+            OlderClient::PerProjectStores => "/p/{project}/ws",
+            OlderClient::BeforeTheKeptMint => "/p/{project}/one-store/ws",
+        }
+    }
+
+    /// What such a client is told, whatever project it names: why it is refused, and what to do.
+    fn refusal(self) -> &'static str {
+        match self {
+            OlderClient::PerProjectStores => "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n",
+            OlderClient::BeforeTheKeptMint => "This fwd daemon's store holds the Commons' kept mint, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n",
+        }
+    }
+
+    /// The refusal: `410 Gone`, since the socket is gone from this path for good, unlike the
+    /// socket's `404` for a project the daemon does not host. No status stops such clients sooner,
+    /// since none of them reads it: a command's Ankurah client fails its first attempt on any
+    /// answer but `101` and the command ends with it, a `fwd watch` that was running keeps trying,
+    /// at most every 30 s, until its ten-minute outage limit ends it, and a page's browser hides the
+    /// answer from it while its connector tries again, at most every 10 s.
+    fn refuse(self) -> Response {
+        (StatusCode::GONE, self.refusal()).into_response()
+    }
 }
 
 /// The project's registry, minus checkouts whose directory is gone (a deleted worktree simply
@@ -1192,12 +1212,13 @@ mod tests {
         (status.trim_end().to_string(), String::from_utf8(body).expect("a text body"))
     }
 
-    /// A client built for the daemons that kept a store per project asks for its socket where
-    /// those daemons served it, and is refused with `410 Gone` and the sentence saying why,
-    /// whatever project it names, so that it never reads the one store; a client of this build
-    /// asks where `fwd_core::daemon_socket` says, and its socket opens.
+    /// A client built for an earlier store asks for its socket where the daemons of that store
+    /// served it, at the per-project socket or at the one store's before the kept mint, and is
+    /// refused with `410 Gone` and the sentence saying why and what to do, whatever project it
+    /// names, so that it never reads this store; a client of this build asks where
+    /// `fwd_core::daemon_socket` says, and its socket opens.
     #[tokio::test]
-    async fn an_older_client_is_refused_at_the_per_project_socket_and_this_builds_socket_opens() {
+    async fn an_older_client_is_refused_at_its_socket_and_this_builds_socket_opens() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let state = state(dir.path(), Bind::Loopback).await;
         let project = NamedProject { id: Uuid::new_v4(), name: "test".into() };
@@ -1210,15 +1231,16 @@ mod tests {
         let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
-        for named in [project.id, Uuid::nil()] {
-            assert_eq!(
-                upgrade_over_tcp(port, &format!("/p/{named}/ws")).await,
-                (
-                    "HTTP/1.1 410 Gone".to_string(),
-                    "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's.\n"
-                        .to_string()
-                )
-            );
+        let refused = [
+            ("/p/{project}/ws", "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n"),
+            ("/p/{project}/one-store/ws", "This fwd daemon's store holds the Commons' kept mint, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n"),
+        ];
+        for (path, refusal) in refused {
+            for named in [project.id, Uuid::nil()] {
+                let path = path.replace("{project}", &named.to_string());
+                let answer = upgrade_over_tcp(port, &path).await;
+                assert_eq!(answer, ("HTTP/1.1 410 Gone".to_string(), refusal.to_string()), "{path}");
+            }
         }
         assert_eq!(
             upgrade_over_tcp(port, &format!("{}/ws", daemon_socket::base_path(project.id))).await,

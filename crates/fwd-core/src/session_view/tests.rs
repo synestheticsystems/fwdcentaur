@@ -109,6 +109,7 @@ fn held(holdings: Vec<Holding>, person: Person) -> Held {
         intentions: Vec::new(),
         unreadable_intentions: 0,
         assigned: Vec::new(),
+        quoted: Vec::new(),
     }
 }
 
@@ -478,14 +479,16 @@ fn every_string_is_capped_and_the_whole_document_stays_within_the_budget() {
 
 /// What the view listens to: the projects, every project's principals of the session, each
 /// principal's working set, the thread of each question that asks the person, answered or not, the
-/// intentions assigned to the principal of the session's own thread, and each of those intentions,
-/// one that could not be read included.
+/// intentions assigned to the principal of the session's own thread, each of those intentions, one
+/// that could not be read included, with the relations that join its quotations to it, and each
+/// record they join.
 #[test]
 fn the_live_reads_cover_what_the_document_is_made_from() {
     let asked = vec![ask(10, by(to(1)), 0), ask(11, by(to(30)), 0)];
     let sections = vec![section(SectionKind::YouAsked, asked), section(SectionKind::Assigned, Vec::new())];
     let mut view = held(vec![holding(20, "lead-sam", "main", sections, 0)], person(&[id(10)]));
     view.assigned = vec![id(50), id(51)];
+    view.quoted = vec![id(60)];
     let session = |n| LiveRead::SessionPrincipals { project: project(n), session: "s1".into() };
     let expected = BTreeSet::from([
         LiveRead::Projects,
@@ -501,6 +504,9 @@ fn the_live_reads_cover_what_the_document_is_made_from() {
         LiveRead::IntentionsAssignedTo(id(20)),
         LiveRead::AssignedIntention(id(50)),
         LiveRead::AssignedIntention(id(51)),
+        LiveRead::QuotationsOf(id(50)),
+        LiveRead::QuotationsOf(id(51)),
+        LiveRead::Quotation(id(60)),
     ]);
     assert_eq!(view.live_reads(), expected);
 }

@@ -1,10 +1,11 @@
 //! Operations and routing against an in-process durable node: the graph behaves as
 //! docs/design/data-model.md and docs/design/agents-and-inbox.md say.
 
+use ankurah::policy::DEFAULT_CONTEXT;
 use ankurah::EntityId;
-use ankurah::{policy::DEFAULT_CONTEXT, Node, PermissiveAgent};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::former_ids::FormerIds;
 use fwd_core::intentions;
 use fwd_core::model::*;
@@ -16,9 +17,7 @@ use std::sync::Arc;
 
 /// The graph of a project alone in a store in memory.
 async fn project() -> Result<ProjectGraph> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     Ok(ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "test").await?)
 }

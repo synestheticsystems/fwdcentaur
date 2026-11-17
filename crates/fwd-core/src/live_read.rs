@@ -13,7 +13,8 @@ use crate::working_set::questions_by_name;
 use ankurah::core::livequery::EntityLiveQuery;
 use ankurah::signals::{Listener, ListenerGuard, Signal};
 use ankurah::{EntityId, LiveQuery};
-use ankurah_commons::intention_graph::IntentionView;
+use ankurah_commons::cognition::IntentionView;
+use ankurah_commons::text::QuotationView;
 use anyhow::Result;
 
 /// The live form of one read of what a session holds.
@@ -39,8 +40,17 @@ pub enum LiveRead {
     AnswersTo(EntityId),
     /// The intentions assigned to a principal, of any project: an assignment made or taken off.
     IntentionsAssignedTo(EntityId),
-    /// An intention assigned to a principal, wherever it is: its title, its words or its status.
+    /// An intention assigned to a principal, wherever it is: its title, its description, or its
+    /// ending, which a component of its own records, since a change to any component of the entity
+    /// changes the query's result.
     AssignedIntention(EntityId),
+    /// The `relates_to` relations to an assigned intention, which join its quotations to it: one
+    /// made or retracted.
+    QuotationsOf(EntityId),
+    /// A record joined to an assigned intention, a quotation of its words, wherever it is: the
+    /// words, who wrote them down and when, or whose they are, which components of its own record,
+    /// since a change to any component of the entity changes the query's result.
+    Quotation(EntityId),
 }
 
 /// A live read open on the daemon, which calls the listener it was opened with at each change of
@@ -89,6 +99,10 @@ impl LiveRead {
             LiveRead::AssignedIntention(intention) => {
                 listening(graph.query_placed::<IntentionView>(*intention)?, listener)
             }
+            LiveRead::QuotationsOf(intention) => {
+                listening(graph.query_relations_to(*intention, Some(RelationKind::RelatesTo))?, listener)
+            }
+            LiveRead::Quotation(quotation) => listening(graph.query_placed::<QuotationView>(*quotation)?, listener),
         })
     }
 }

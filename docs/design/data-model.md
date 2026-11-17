@@ -180,7 +180,7 @@ pub struct Relation {
 | `subtask_of` | Task -> Task | `from` is part of `to` | Acyclic; a parent cannot be marked Done while accepted subtasks are open unless `--force` with reason; parent readiness is independent |
 | `motivated_by` | Task -> Task or Message | why this task exists, in graph form | none |
 | `discovered_from` | Task -> Task or Message | provenance: the work that surfaced this task | none |
-| `relates_to` | any -> any | free association, symmetric in display | none |
+| `relates_to` | any -> any | free association, symmetric in display; from a quotation to an intention, the words it quotes (Intention, below), until fwd's relations move to the Commons' edges as `supports` | none |
 | `supersedes` | Task -> Task; Decision -> Decision | lineage; the old task is usually cancelled with reason; the old decision is Superseded by the new one | between decisions, made only by `fwd decision supersede`, which marks the old one Superseded in the same write (`fwd link` refuses it), and never undone: nothing moves a superseded decision back, so `fwd unlink` refuses it too, and a new decision supersedes the successor instead |
 | `duplicates` | Task -> Task | lineage | none |
 | `anchored_at` | Task -> CodeAnchor | the code this task concerns (a message names the anchor it is on in its own `anchor` field instead: `../DECISIONS.md`, D58, "Message subjects as typed reference fields") | none |
@@ -377,12 +377,18 @@ Nothing else moves: a rejected, superseded or repealed decision stays so, and a 
 
 ### Intention
 
-What a person or an agent wants to be true, in their own words, built on the Ankurah Commons' models (`ankurah-commons`, `intention-graph` and `records`) rather than fwd's own, so that the records can be shared with other applications of the same models (`crates/fwd-core/src/intentions.rs`). Each is one entity carrying several components:
+A statement of something wanted, a title and a description that belong to no one, which parties are aligned or not aligned with (D229), built on the Ankurah Commons' models (`ankurah-commons`: `cognition`, `records` and `text`) rather than fwd's own, so that the records can be shared with other applications of the same models (`crates/fwd-core/src/intentions.rs`). Each is one entity carrying several components, and whose words its description holds is a quotation beside it:
 
-    an intention  Intention + Creation + Placement, Attribution when someone else wrote the words
-                  down, later LastEdit once reworded and Closure once fulfilled or withdrawn
+    an intention  Intention + Created + Placement, later Edited once reworded and Closed once
+                  fulfilled or withdrawn
+    a quotation   Quotation + Created + Placement, Attribution when someone else wrote the words
+                  down; a relates_to relation from it to the intention
 
-`Intention` holds a title, the words and a status: open as it is recorded, then fulfilled or withdrawn. `Creation` says who wrote the record down and when, `Attribution` whose words they are when someone else wrote them down (the speaker; without it, whoever wrote them down), `LastEdit` when and by whom the words last changed, and `Closure` when, by whom and why it was closed. fwd's node mints the Commons' definitions itself, under ids of its own, until the Commons keeps a mint, so nothing reads a definition's id as lasting.
+`Intention` holds a title and a description. `Created` says who wrote the record down and when, `Edited` when and by whom it was last reworded, and `Closed` when, by whom and why it ended, and how, as its `outcome`: `fulfilled` or `withdrawn`. The Commons keep no status on an intention: it is open until it carries `Closed` with a time. Ankurah's typed fetch selects only the entities that carry every component it names, never those that lack one, so a read of the open intentions reads the intentions, then leaves out those that carry `Closed`.
+
+An intention carries no `Attribution`. The words as someone gave them are a `Quotation` (`crates/fwd-core/src/intentions/quotation.rs`): its `text`; `said`, when the words were said, where known, which is where whoever wrote them down gave their own; `Created` for who wrote them down and when; and `Attribution` naming their speaker when that was someone else. Each wording given makes one, at `fwd intention create` and at each `reword` that gives new words, so the quotations of the words before stay. The latest, by when it was written down, says whose words the description holds: what `fwd intention show`, `fwd prime` and the session view show apart from the words (D227), and whose they must be for the intention to be reworded or ended (`cli.md`, Intentions). A quotation is optional (D229): an intention none supports shows no speaker, and no one is known to change its words. The relation is `relates_to` until fwd's relations move to the Commons' edges, where it becomes `supports`.
+
+The Commons keep a mint of their definitions, and each of their models binds by the id the mint gave it, never by its label (D255): every durable node fwd opens imports the mint as soon as its system is ready, before anything can bind a model (`crates/fwd-core/src/durable.rs`), and importing it again at each start changes nothing. Until 2026-11-16 fwd's node minted the Commons' definitions itself, under ids of its own (D205), and an intention was built on the Commons' models of 84ea084, `intention-graph.intention` (a title, the words and a status) with `Creation`, `Attribution`, `LastEdit` and `Closure`. Those definitions stay in a store beside the mint's, one of them, `records.attribution`, under the same label as the mint's; `fwd admin migrate` moves each intention onto the mint's definitions (D256), adding to its entity and keeping its id and its old components, which Ankurah cannot take off an entity yet (`cli.md`, "Maintenance").
 
 The Commons' models name no project, so a record built on them carries fwd's `Placement` component, which holds only the project it is placed in:
 
@@ -393,11 +399,11 @@ pub struct Placement {
 }
 ```
 
-A project's lists read such a record through its `Placement` and its other components in one query that carries the project, so no list leaves the project out; a record read by its id is the project's, and one an id names elsewhere is followed into its project, as fwd's own records are (`crates/fwd-core/src/project_graph/placed.rs`). An intention is placed in the project of the command that records it. Only its speaker changes its words, in person or through someone who writes them down for them (`cli.md`, Intentions).
+A project's lists read such a record through its `Placement` and its other components in one query that carries the project, so no list leaves the project out; a record read by its id is the project's, and one an id names elsewhere is followed into its project, as fwd's own records are (`crates/fwd-core/src/project_graph/placed.rs`). An intention, and each quotation of its words, is placed in the project of the command that records it. Only the speaker its latest quotation names changes its words, in person or through someone who writes them down for them (`cli.md`, Intentions).
 
 An intention is assigned to the sessions whose work it governs, and may be assigned to several (`../DECISIONS.md`, D218). A session's identity in a project is today the principal bound to it, so each assignment is an `assigned_to` relation from the intention to that principal, a record of its own, so that two sessions assigning themselves one intention at once lose neither (D219); it lives with the intention, in its project. A session's active intentions are those assigned to it that are neither fulfilled nor withdrawn, which `fwd prime` prints before everything else (`cli.md`, Sessions).
 
-**Where fwd departs from the Commons' doc comments**, so that a later dump and load into a Commons store loses nothing: `Creation.created_by`, `Attribution.speaker`, `LastEdit.edited_by` and `Closure.closed_by` hold the ids of fwd's principals (Principal, above), which do not carry the Commons' principal component yet.
+**Where fwd departs from the Commons' doc comments**, so that a later dump and load into a Commons store loses nothing: `Created.by`, `Edited.by`, `Closed.by` and `Attribution.speaker` hold the ids of fwd's principals (Principal, above), which do not carry the Commons' principal component yet.
 
 ### FormerId
 

@@ -1,18 +1,19 @@
 //! Intention records (`fwd_core::intentions`) on one store in memory holding two projects, alpha
-//! and beta: an intention holds the words of whoever it was written down for, and only they change
-//! them or end it; a principal assigns an intention of any project to itself, and reads back what is
-//! assigned to it; an agent takes one off itself alone, and a person off anyone.
+//! and beta: an intention's description is quoted as the words of whoever it was written down for,
+//! and only they change them or end it; a principal assigns an intention of any project to itself,
+//! and reads back what is assigned to it; an agent takes one off itself alone, and a person off
+//! anyone.
 
-use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::IntentionStatus;
-use ankurah_commons::records::{AttributionView, ClosureView, LastEdit, LastEditView};
+use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
+use ankurah_commons::property::Timestamp;
+use ankurah_commons::records::{Closed, ClosedView, Created, EditedView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
-use fwd_core::intentions::{self, Parts};
+use fwd_core::durable;
+use fwd_core::intentions::{self, Outcome, Parts, Quoted};
 use fwd_core::model::*;
 use fwd_core::ops;
 use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
-use std::sync::Arc;
 
 /// alpha's people, Ines and Omar, and its agent impl-tide; beta's agent impl-reef.
 struct World {
@@ -25,8 +26,7 @@ struct World {
 }
 
 async fn world() -> Result<World> {
-    let node = Node::new_durable(Arc::new(SqliteStorageEngine::open_in_memory().await?), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
@@ -42,10 +42,20 @@ async fn intention(w: &World, by: EntityId, title: &str, said_by: Option<EntityI
     intentions::create(&w.alpha, by, title, format!("{title}, in the speaker's words"), said_by).await
 }
 
-/// Whose words the intention `record` holds.
-async fn speaker(w: &World, (placement, (_, creation)): &(PlacementView, Parts)) -> Result<EntityId> {
-    let attribution = w.alpha.component_of::<AttributionView>(placement).await?;
-    Ok(intentions::speaker(creation, attribution.as_ref())?)
+/// Whose words the intention `record` holds, as its latest quotation says.
+async fn speaker(w: &World, (placement, _): &(PlacementView, Parts)) -> Result<Option<EntityId>> {
+    Ok(intentions::whose_words(&w.alpha, placement.id()).await?.and_then(|(speaker, _)| speaker))
+}
+
+/// The quotations of the intention `record`'s words, by their words.
+async fn quoted(w: &World, (placement, _): &(PlacementView, Parts)) -> Result<Vec<(String, (PlacementView, Quoted))>> {
+    let mut found = Vec::new();
+    for r in w.alpha.relations_to(placement.id(), Some(RelationKind::RelatesTo)).await? {
+        let quotation: (PlacementView, Quoted) = w.alpha.get_placed(r.from_id()?).await?;
+        found.push((quotation.1 .0.text()?, quotation));
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(found)
 }
 
 /// The error `result` failed with, as text.
@@ -53,16 +63,24 @@ fn refusal<T: std::fmt::Debug>(result: Result<T>) -> String {
     format!("{:#}", result.expect_err("refused"))
 }
 
+/// The intention carries no attribution: a quotation beside it holds its words, recorded by whoever
+/// wrote them down, naming their speaker when that is someone else, and saying when they were said
+/// only where the writer gave its own words.
 #[tokio::test]
-async fn an_intention_written_down_for_a_person_holds_their_words_and_an_agent_is_never_named_its_speaker() -> Result<()>
-{
+async fn an_intentions_words_are_quoted_as_its_speakers_and_an_agent_is_never_named_its_speaker() -> Result<()> {
     let w = world().await?;
     let theirs = intention(&w, w.tide, "Readers keep their place", Some(w.ines)).await?;
-    let (_, (made, creation)) = &theirs;
+    let (_, (made, created)) = &theirs;
     assert_eq!(made.title()?, "Readers keep their place", "the views of the record made");
-    assert_eq!((*creation.created_by()?, speaker(&w, &theirs).await?), (w.tide, w.ines), "written down for Ines");
+    assert_eq!((*created.by()?, speaker(&w, &theirs).await?), (w.tide, Some(w.ines)), "written down for Ines");
+    let [(text, (_, (quotation, recorded)))] = &quoted(&w, &theirs).await?[..] else { panic!("one quotation") };
+    assert_eq!((text.as_str(), *recorded.by()?), ("Readers keep their place, in the speaker's words", w.tide));
+    assert_eq!(quotation.said()?, None, "when Ines said them is not known");
+
     let own = intention(&w, w.tide, "Builds stay under a minute", None).await?;
-    assert_eq!(speaker(&w, &own).await?, w.tide, "in its writer's words");
+    assert_eq!(speaker(&w, &own).await?, Some(w.tide), "in its writer's words");
+    let [(_, (_, (quotation, recorded)))] = &quoted(&w, &own).await?[..] else { panic!("one quotation") };
+    assert_eq!(quotation.said()?, Some(recorded.created()?), "said as written down");
 
     let for_an_agent = intentions::create(&w.alpha, w.tide, "t", String::new(), Some(w.reef)).await;
     assert!(refusal(for_an_agent).contains("is an agent"));
@@ -74,39 +92,60 @@ async fn only_the_speaker_or_someone_writing_down_their_words_rewords_or_closes_
     let w = world().await?;
     let theirs = intention(&w, w.tide, "Readers keep their place", Some(w.ines)).await?;
     let (placement, (it, _)) = &theirs;
-    let (title, words) = (it.title()?, it.words()?);
+    let (title, words) = (it.title()?, it.description()?);
     let same = intentions::reword(&w.alpha, w.ines, &theirs, Some(&title), Some(&words), None).await?;
     assert!(!same, "nothing changed");
-    assert!(w.alpha.component_of::<LastEditView>(placement).await?.is_none(), "and nothing was written");
+    assert!(w.alpha.component_of::<EditedView>(placement).await?.is_none(), "and nothing was written");
 
     let new_words = Some("the list stays where I left it");
     let by_tide = intentions::reword(&w.alpha, w.tide, &theirs, None, new_words, None).await;
     assert!(refusal(by_tide).contains("only they change"));
     assert!(intentions::reword(&w.alpha, w.tide, &theirs, None, new_words, Some(w.ines)).await?, "in her words");
-    assert_eq!(it.words()?, "the list stays where I left it", "the view handed in reads the change");
-    let edit = w.alpha.component_of::<LastEditView>(placement).await?.expect("reworded");
-    assert_eq!(edit.edited_by()?.map(|by| *by), Some(w.tide), "who wrote the change down");
+    assert_eq!(it.description()?, "the list stays where I left it", "the view handed in reads the change");
+    let edit = w.alpha.component_of::<EditedView>(placement).await?.expect("reworded");
+    assert_eq!(edit.by()?.map(|by| *by), Some(w.tide), "who wrote the change down");
 
-    let by_omar = intentions::close(&w.alpha, w.omar, &theirs, IntentionStatus::Fulfilled, None, None).await;
+    let by_omar = intentions::close(&w.alpha, w.omar, &theirs, Outcome::Fulfilled, None, None).await;
     assert!(refusal(by_omar).contains("only they change"));
     Ok(())
 }
 
-/// An intention's words were last written down when the record was made, until they are reworded,
-/// and then at their last rewording: here a day after it was made.
+const DAY: i64 = 86_400_000;
+
+/// Records that the quotation `quotation` is the placement of was recorded at `at`, as a write from
+/// another node leaves one, so that which quotation is the latest does not rest on a clock's
+/// resolution.
+async fn recorded_at(w: &World, quotation: &PlacementView, at: i64) -> Result<()> {
+    let trx = w.alpha.begin();
+    trx.edit_placed::<Created>(quotation)?.created()?.set(&Timestamp::from_unix_millis(at))?;
+    Ok(trx.commit().await?)
+}
+
+/// When the words of the intention `record`'s latest quotation were recorded.
+async fn latest(w: &World, (placement, _): &(PlacementView, Parts)) -> Result<i64> {
+    let (_, recorded) = intentions::whose_words(&w.alpha, placement.id()).await?.expect("quoted");
+    Ok(recorded.created()?.unix_millis())
+}
+
+/// New words are quoted beside the quotations of the words before, and a new title alone quotes
+/// nothing; whose words an intention holds is said by its quotation recorded last, by when it was
+/// recorded, whichever was made last: the rewording's at first, here a day after the intention was
+/// made, then the first quotation's, recorded two days after.
 #[tokio::test]
-async fn its_words_were_last_written_down_at_their_last_rewording_else_when_it_was_made() -> Result<()> {
+async fn its_latest_quotation_says_whose_words_it_holds_and_the_earlier_ones_stay() -> Result<()> {
     let w = world().await?;
     let it = intention(&w, w.ines, "Readers keep their place", None).await?;
-    let (placement, (_, creation)) = &it;
-    assert_eq!(intentions::last_written(creation, None)?, creation.created()?);
+    intentions::reword(&w.alpha, w.ines, &it, Some("Readers keep their places"), None, None).await?;
+    assert_eq!(quoted(&w, &it).await?.len(), 1, "a title is not quoted");
     intentions::reword(&w.alpha, w.ines, &it, None, Some("the list stays where I left it"), None).await?;
-    let a_day_later = creation.created()? + 86_400_000;
-    let trx = w.alpha.begin();
-    trx.edit_placed::<LastEdit>(placement)?.edited()?.set(&a_day_later)?;
-    trx.commit().await?;
-    let edit = w.alpha.component_of::<LastEditView>(placement).await?;
-    assert_eq!(intentions::last_written(creation, edit.as_ref())?, a_day_later);
+    let quotations = quoted(&w, &it).await?;
+    let [(_, (first, _)), (_, (reworded, _))] = &quotations[..] else { panic!("two quotations") };
+
+    let made = it.1 .1.created()?.unix_millis();
+    recorded_at(&w, reworded, made + DAY).await?;
+    assert_eq!(latest(&w, &it).await?, made + DAY, "the rewording's");
+    recorded_at(&w, first, made + 2 * DAY).await?;
+    assert_eq!(latest(&w, &it).await?, made + 2 * DAY, "the first, recorded later still");
     Ok(())
 }
 
@@ -114,17 +153,51 @@ async fn its_words_were_last_written_down_at_their_last_rewording_else_when_it_w
 async fn an_ended_intention_is_neither_reworded_nor_ended_again_and_a_withdrawal_says_why() -> Result<()> {
     let w = world().await?;
     let it = intention(&w, w.ines, "Readers keep their place", None).await?;
-    let withdrawn = intentions::close(&w.alpha, w.ines, &it, IntentionStatus::Withdrawn, None, None).await;
+    let withdrawn = intentions::close(&w.alpha, w.ines, &it, Outcome::Withdrawn, None, None).await;
     assert!(refusal(withdrawn).contains("--reason"));
 
-    intentions::close(&w.alpha, w.ines, &it, IntentionStatus::Fulfilled, Some("shipped".into()), None).await?;
-    let (placement, (view, _)) = &it;
-    let closure = w.alpha.component_of::<ClosureView>(placement).await?.expect("closed");
-    assert_eq!((view.status()?, closure.reason()?), (IntentionStatus::Fulfilled, Some("shipped".into())));
-    let again = intentions::close(&w.alpha, w.ines, &it, IntentionStatus::Withdrawn, Some("no".into()), None).await;
+    intentions::close(&w.alpha, w.ines, &it, Outcome::Fulfilled, Some("shipped".into()), None).await?;
+    let closed = w.alpha.component_of::<ClosedView>(&it.0).await?.expect("closed");
+    assert_eq!(
+        (intentions::outcome(Some(&closed))?, closed.outcome()?, closed.reason()?),
+        (Some(Outcome::Fulfilled), Some("fulfilled".into()), Some("shipped".into()))
+    );
+    let again = intentions::close(&w.alpha, w.ines, &it, Outcome::Withdrawn, Some("no".into()), None).await;
     assert!(refusal(again).contains("fulfilled already"));
     let reworded = intentions::reword(&w.alpha, w.ines, &it, None, Some("more"), None).await;
     assert!(refusal(reworded).contains("not reworded"));
+    Ok(())
+}
+
+/// Reopens the intention `record` as the Commons reopen a record, which another of their readers may
+/// do: every field of its `Closed` cleared, the component left on it.
+async fn reopen(w: &World, (placement, _): &(PlacementView, Parts)) -> Result<()> {
+    let trx = w.alpha.begin();
+    {
+        let closed = trx.edit_placed::<Closed>(placement)?;
+        closed.closed()?.set(&None)?;
+        closed.by()?.set(&None)?;
+        closed.outcome()?.set(&None)?;
+        closed.reason()?.set(&None)?;
+    }
+    Ok(trx.commit().await?)
+}
+
+/// An intention the Commons reopened reads as open, and is closed again in the `Closed` it carries.
+#[tokio::test]
+async fn an_intention_reopened_through_the_commons_is_closed_again() -> Result<()> {
+    let w = world().await?;
+    let it = intention(&w, w.ines, "Readers keep their place", None).await?;
+    intentions::close(&w.alpha, w.ines, &it, Outcome::Fulfilled, Some("shipped".into()), None).await?;
+    reopen(&w, &it).await?;
+    assert_eq!(intentions::outcome(w.alpha.component_of::<ClosedView>(&it.0).await?.as_ref())?, None);
+
+    intentions::close(&w.alpha, w.ines, &it, Outcome::Withdrawn, Some("no longer wanted".into()), None).await?;
+    let closed = w.alpha.component_of::<ClosedView>(&it.0).await?.expect("closed");
+    assert_eq!(
+        (intentions::outcome(Some(&closed))?, closed.by()?.map(|by| *by), closed.reason()?),
+        (Some(Outcome::Withdrawn), Some(w.ines), Some("no longer wanted".into()))
+    );
     Ok(())
 }
 
@@ -236,7 +309,7 @@ async fn the_intentions_assigned_to_a_principal_come_once_each_the_first_assigne
     assigned_at(&w, omars.0.id(), w.omar, 5).await?;
     intentions::assign(&w.alpha, w.tide, &dropped, w.tide).await?;
     intentions::unassign(&w.alpha, w.tide, &dropped, w.tide).await?;
-    intentions::close(&w.alpha, w.ines, &second, IntentionStatus::Fulfilled, None, None).await?;
+    intentions::close(&w.alpha, w.ines, &second, Outcome::Fulfilled, None, None).await?;
 
     assert_eq!(ids(&intentions::assigned_to(&w.alpha, w.tide).await?), vec![second.0.id(), first.0.id()]);
     Ok(())

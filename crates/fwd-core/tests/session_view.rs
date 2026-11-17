@@ -2,22 +2,27 @@
 //! one store in memory: whose groups it holds and in what order whichever project it is read
 //! through, the person it is for resolved once and strictly in each project, the questions they
 //! answered, the records a text cites named, never shown by id, and the session's active
-//! intentions. How a read becomes a document is tested beside it (src/session_view/tests.rs).
+//! intentions, with what the view's live reads follow of whose words each holds. How a read becomes
+//! a document is tested beside it (src/session_view/tests.rs).
 
 use ankurah::property::{Json, Ref};
-use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::IntentionStatus;
-use ankurah_commons::records::ClosureView;
+use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId};
+use ankurah_commons::records::{Attribution, ClosedView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::decision_log::date;
+use fwd_core::durable;
 use fwd_core::intentions;
+use fwd_core::live_read::{Listening, LiveRead};
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateTask, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::session_view::{self, Document, Reader};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 const PAGE: &str = "http://127.0.0.1:4242/";
 
@@ -36,9 +41,7 @@ struct Two {
 }
 
 async fn two() -> Result<Two> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;
@@ -273,10 +276,11 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
 
 /// The session's active intentions are those assigned to the principals of its own thread, of any
 /// project, each once, however many of them hold it, one its principal of beta alone holds among
-/// them: each titled by its title, its words alone its line, one with no words with no line, and
-/// attributed apart from them to its speaker, by name, on the day its words were last written
-/// down; another project's name a tag, and one since fulfilled saying so in a line after its words
-/// and a tag; no path and no action. What is assigned to its subagent is not among them.
+/// them: each titled by its title, its description alone its line, one with no description with no
+/// line, and attributed apart from it to the speaker its quotation names, by name, on the day the
+/// words were written down; another project's name a tag, and one since fulfilled saying so in a
+/// line after its description and a tag; no path and no action. What is assigned to its subagent is
+/// not among them.
 #[tokio::test]
 async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -> Result<()> {
     let t = two().await?;
@@ -295,7 +299,7 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
     intentions::assign(&t.beta, t.their_lead, &ours, t.their_lead).await?;
     intentions::assign(&t.beta, t.their_lead, &betas, t.their_lead).await?;
     intentions::assign(&t.alpha, t.subagent, &subagents, t.subagent).await?;
-    intentions::close(&t.alpha, ines, &done, IntentionStatus::Fulfilled, None, None).await?;
+    intentions::close(&t.alpha, ines, &done, intentions::Outcome::Fulfilled, None, None).await?;
 
     let json = view(&t.alpha, Reader::Identity("tester")).await?;
     let section = &json["sections"][0];
@@ -304,7 +308,7 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
         let id = json!(record.0.id().to_base64());
         section["records"].as_array().into_iter().flatten().find(|r| r["id"] == id).cloned().unwrap_or(Value::Null)
     };
-    let day = date(ours.1 .1.created()?);
+    let day = date(ours.1 .1.created()?.unix_millis());
     assert_eq!(
         row(&ours),
         json!({
@@ -318,11 +322,95 @@ async fn the_active_intentions_are_those_assigned_to_the_sessions_own_thread() -
         (&json!([{"text": "beta", "tone": null, "at": null}]), &json!([]))
     );
     assert_eq!((&row(&betas)["title"], &row(&betas)["tags"]), (&json!("Logs name their run"), &json!([])));
-    let closure = t.alpha.component_of::<ClosureView>(&done.0).await?.expect("closed");
-    let closed = date(closure.closed()?.expect("when it closed"));
+    let closure = t.alpha.component_of::<ClosedView>(&done.0).await?.expect("closed");
+    let closed = date(closure.closed()?.expect("when it closed").unix_millis());
     assert_eq!(row(&done)["lines"][1], format!("fulfilled on {closed}"));
     assert_eq!(row(&done)["tags"], json!([{"text": "fulfilled", "tone": null, "at": null}]));
     assert_eq!(row(&subagents), Value::Null, "the subagent's is not the session's");
+    Ok(())
+}
+
+/// How long a test waits for a live read to call before it fails as one that never came.
+const NEVER: Duration = Duration::from_secs(60);
+
+/// A view's live reads, opened as a follower opens them, each saying which it is when it calls.
+struct Following {
+    _listening: Vec<Listening>,
+    calls: mpsc::UnboundedReceiver<LiveRead>,
+    heard: BTreeMap<LiveRead, usize>,
+}
+
+impl Following {
+    fn open(graph: &ProjectGraph, reads: BTreeSet<LiveRead>) -> Result<Following> {
+        let (tx, calls) = mpsc::unbounded_channel();
+        let mut listening = Vec::new();
+        for read in reads {
+            let (tx, which) = (tx.clone(), read.clone());
+            let call = Arc::new(move |()| {
+                let _ = tx.send(which.clone());
+            });
+            listening.push(read.listen(graph, call)?);
+        }
+        Ok(Following { _listening: listening, calls, heard: BTreeMap::new() })
+    }
+
+    /// Returns once `read` has called `times` times in all, its first results the first; fails the
+    /// test when a minute passes first. The minute only detects a call that never comes: what
+    /// orders the test is the call itself.
+    async fn until(&mut self, read: &LiveRead, times: usize) {
+        let Following { calls, heard, .. } = self;
+        let called = async {
+            while heard.get(read).copied().unwrap_or(0) < times {
+                let call = calls.recv().await.expect("the live reads stay open while the test runs");
+                *heard.entry(call).or_default() += 1;
+            }
+        };
+        if tokio::time::timeout(NEVER, called).await.is_err() {
+            panic!("{read:?} did not call {times} times within {}s", NEVER.as_secs());
+        }
+    }
+}
+
+/// The attribution of the view's first active intention.
+async fn byline(graph: &ProjectGraph) -> Result<Value> {
+    Ok(view(graph, Reader::Identity("tester")).await?["sections"][0]["records"][0]["attribution"].clone())
+}
+
+/// Whose words an active intention holds is followed where it is now recorded, beside the
+/// intention: its quotation's speaker corrected, as another of the Commons' readers may correct it,
+/// changes the quotation alone, and its relation retracted changes the relation alone, and each
+/// wakes the view, whose next read says what changed.
+#[tokio::test]
+async fn a_change_to_an_active_intentions_quotation_or_its_relation_alone_wakes_the_view() -> Result<()> {
+    let t = two().await?;
+    let ines = ops::ensure_principal(&t.alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
+    let omar = ops::ensure_principal(&t.alpha, "omar", "Omar", PrincipalKind::Human, None).await?;
+    let words = "The list stays where I left it.".to_string();
+    let it = intentions::create(&t.alpha, t.lead, "Readers keep their place", words, Some(ines)).await?;
+    intentions::assign(&t.alpha, t.lead, &it, t.lead).await?;
+    let [joining] = &t.alpha.relations_to(it.0.id(), Some(RelationKind::RelatesTo)).await?[..] else {
+        panic!("one quotation")
+    };
+    let quotation: PlacementView = t.alpha.get(joining.from_id()?).await?;
+    let (quoted, joined) = (LiveRead::Quotation(quotation.id()), LiveRead::QuotationsOf(it.0.id()));
+    let reads = session_view::read(&t.alpha, "s1", Reader::Identity("tester")).await?.live_reads();
+    assert!(reads.contains(&quoted) && reads.contains(&joined), "{reads:?}");
+    let mut following = Following::open(&t.alpha, reads)?;
+    following.until(&quoted, 1).await;
+    following.until(&joined, 1).await;
+    assert_eq!(byline(&t.alpha).await?["by"], "Ines");
+
+    let trx = t.alpha.begin();
+    trx.edit_placed::<Attribution>(&quotation)?.speaker()?.set(&Some(Ref::new(omar)))?;
+    trx.commit().await?;
+    following.until(&quoted, 2).await;
+    assert_eq!(byline(&t.alpha).await?["by"], "Omar");
+
+    let trx = t.alpha.begin();
+    trx.edit(joining)?.status()?.set(&RelationStatus::Retracted)?;
+    trx.commit().await?;
+    following.until(&joined, 2).await;
+    assert_eq!(byline(&t.alpha).await?, Value::Null, "no quotation supports it");
     Ok(())
 }
 

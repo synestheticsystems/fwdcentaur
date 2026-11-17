@@ -2,22 +2,20 @@
 //! node, a task written without the property reads as a task with no date.
 
 use ankurah::property::{Json, Ref};
-use ankurah::{policy::DEFAULT_CONTEXT, Context, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Context};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::model::{PrincipalKind, TaskStatus, TaskView};
 use fwd_core::ops;
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::rules::{NotReadyReason, Readiness};
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 /// A project alone in a store in memory: the node's context, through which the test writes a task
 /// as an older build wrote it, and the project's graph.
 async fn older_project() -> Result<(Context, ProjectGraph)> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     let graph = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "test").await?;
     Ok((ctx, graph))

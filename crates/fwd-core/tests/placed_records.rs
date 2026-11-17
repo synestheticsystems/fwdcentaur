@@ -1,39 +1,33 @@
 //! A record built on the Commons' models, which name no project, placed in one by fwd's
 //! `Placement` component (`fwd_core::project_graph`, `placed`): one transaction makes an intention
-//! with who wrote it down, whose words it holds and where it is placed; its project's graph lists
-//! it and another project's does not; a second node of the same SQLite store reads it, the
-//! definitions the first node minted included; and one no project placed is no record of fwd's.
+//! with who wrote it down and where it is placed; its project's graph lists it and another
+//! project's does not; a second node of the same SQLite store reads it; and one no project placed
+//! is no record of fwd's.
 
-use ankurah::{policy::DEFAULT_CONTEXT, property::Ref, Context, EntityId, Node, PermissiveAgent};
-use ankurah_commons::intention_graph::{Intention, IntentionStatus, IntentionView};
-use ankurah_commons::records::{Attribution, AttributionView, Creation, CreationView};
+use ankurah::{policy::DEFAULT_CONTEXT, property::Ref, Context, EntityId};
+use ankurah_commons::cognition::{Intention, IntentionView};
+use ankurah_commons::property::Timestamp;
+use ankurah_commons::records::Created;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
-use fwd_core::intentions;
+use fwd_core::durable;
+use fwd_core::intentions::{self, Parts};
 use fwd_core::model::{PlacementView, PrincipalKind};
 use fwd_core::ops;
 use fwd_core::project_graph::{Followed, ProjectGraph, ProjectGraphError, Whose};
 use std::path::Path;
-use std::sync::Arc;
 
-/// An intention read with its record of creation and its speaker.
-type Read = (IntentionView, CreationView, AttributionView);
-
-/// A context on a durable node over the SQLite file at `path`, which `create` makes new.
-async fn node_on(path: &Path, create: bool) -> Result<Context> {
-    let node = Node::new_durable(Arc::new(SqliteStorageEngine::open(path).await?), PermissiveAgent::new());
-    if create {
-        node.system.create().await?;
-    } else {
-        node.system.wait_loaded().await?;
-    }
+/// A context on a durable node over the SQLite file at `path`, made new when it does not exist.
+async fn node_on(path: &Path) -> Result<Context> {
+    let node = durable::open(SqliteStorageEngine::open(path).await?).await?;
     Ok(node.context_async(DEFAULT_CONTEXT).await?)
 }
 
-/// What a list of `graph`'s open intentions holds: each one's id, title and speaker.
-async fn open(graph: &ProjectGraph) -> Result<Vec<(EntityId, String, EntityId)>> {
-    let listed: Vec<(PlacementView, Read)> = graph.fetch_placed("status = 'open'").await?;
-    listed.iter().map(|(_, (i, _, a))| Ok((i.id(), i.title()?, *a.speaker()?))).collect()
+/// What `graph` lists of the intentions titled "Readers keep their place": each one's id, title and
+/// who wrote it down.
+async fn listed(graph: &ProjectGraph) -> Result<Vec<(EntityId, String, EntityId)>> {
+    let listed: Vec<(PlacementView, Parts)> = graph.fetch_placed("title = 'Readers keep their place'").await?;
+    listed.iter().map(|(_, (i, c))| Ok((i.id(), i.title()?, *c.by()?))).collect()
 }
 
 #[tokio::test]
@@ -43,7 +37,7 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
     let (alpha_uuid, beta_uuid) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
 
     let (intention, person) = {
-        let ctx = node_on(&path, true).await?;
+        let ctx = node_on(&path).await?;
         let alpha = ProjectGraph::ensure(ctx.clone(), alpha_uuid, "alpha").await?;
         let beta = ProjectGraph::ensure(ctx, beta_uuid, "beta").await?;
         let person = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
@@ -53,38 +47,37 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
         let made = trx
             .create_placed(&Intention {
                 title: "Readers keep their place".into(),
-                words: "When I come back, the list is where I left it.".into(),
-                status: IntentionStatus::Open,
+                description: "When I come back, the list is where I left it.".into(),
             })
             .await?;
         let record = ankurah::model::Mutable::entity(&*made);
-        trx.add(record, &Creation { created_by: Ref::new(agent), created: 1_700_000_000_000 }).await?;
-        trx.add(record, &Attribution { speaker: Ref::new(person) }).await?;
-        let twice = trx.add(record, &Attribution { speaker: Ref::new(agent) }).await;
+        let written = Timestamp::from_unix_millis(1_700_000_000_000);
+        trx.add(record, &Created { created: written, by: Ref::new(person) }).await?;
+        let twice = trx.add(record, &Created { created: written, by: Ref::new(agent) }).await;
         assert!(matches!(twice, Err(ProjectGraphError::AlreadyCarried { .. })), "a component it carries: {twice:?}");
         let intention = made.id();
         trx.commit().await?;
 
         let title = "Readers keep their place".to_string();
-        assert_eq!(open(&alpha).await?, vec![(intention, title, person)], "alpha lists it");
-        assert_eq!(open(&beta).await?, vec![], "beta does not");
+        assert_eq!(listed(&alpha).await?, vec![(intention, title, person)], "alpha lists it");
+        assert_eq!(listed(&beta).await?, vec![], "beta does not");
         (intention, person)
     };
 
     // The same file as a second node, which holds nothing in memory from the first.
-    let ctx = node_on(&path, false).await?;
+    let ctx = node_on(&path).await?;
     let alpha = ProjectGraph::open(ctx.clone(), alpha_uuid).await?;
     let beta = ProjectGraph::open(ctx, beta_uuid).await?;
     let title = "Readers keep their place".to_string();
-    assert_eq!(open(&alpha).await?, vec![(intention, title.clone(), person)]);
-    assert_eq!(open(&beta).await?, vec![]);
+    assert_eq!(listed(&alpha).await?, vec![(intention, title.clone(), person)]);
+    assert_eq!(listed(&beta).await?, vec![]);
 
-    let (_, (i, c, _)): (PlacementView, Read) = alpha.get_placed(intention).await?;
+    let (_, (i, c)): (PlacementView, Parts) = alpha.get_placed(intention).await?;
     assert_eq!(
-        (i.words()?.as_str(), c.created()?),
+        (i.description()?.as_str(), c.created()?.unix_millis()),
         ("When I come back, the list is where I left it.", 1_700_000_000_000)
     );
-    let refused = beta.get_placed::<Read>(intention).await.map(|_| ()).expect_err("alpha's record");
+    let refused = beta.get_placed::<Parts>(intention).await.map(|_| ()).expect_err("alpha's record");
     assert!(
         matches!(refused, ProjectGraphError::InAnotherProject { record, .. } if record == intention),
         "{refused:?}"
@@ -104,19 +97,13 @@ async fn an_intention_made_in_one_transaction_is_listed_in_its_project_alone_and
 #[tokio::test]
 async fn an_intention_no_project_placed_is_a_reference_that_cannot_be_followed() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let ctx = node_on(&dir.path().join("fwd.sqlite"), true).await?;
+    let ctx = node_on(&dir.path().join("fwd.sqlite")).await?;
     let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
     let person = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
     let placed = intentions::create(&alpha, person, "Readers keep their place", String::new(), None).await?.0.id();
     let trx = ctx.begin();
-    let unplaced = trx
-        .create(&Intention {
-            title: "Builds stay under a minute".into(),
-            words: String::new(),
-            status: IntentionStatus::Open,
-        })
-        .await?
-        .id();
+    let unplaced =
+        trx.create(&Intention { title: "Builds stay under a minute".into(), description: String::new() }).await?.id();
     trx.commit().await?;
     assert!(matches!(ops::reference(&alpha, placed).await?, ops::Reference::Followed { .. }));
     assert_eq!(ops::reference(&alpha, unplaced).await?, ops::Reference::NotFollowed);

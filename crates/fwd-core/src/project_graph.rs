@@ -49,6 +49,8 @@
 //!   list reads its components with its `Placement` in one selection that carries the project, and
 //!   a record read by its id is the project's or followed into its own.
 //!
+//! - The node's catalog of model definitions is no project's, and is read whole (`catalog`).
+//!
 //! - A record changes project in one write alone, [`ProjectTransaction::take_in`], which a task's
 //!   move to another project makes (`task_move`); every other write of a project's graph makes and
 //!   changes that project's records alone.
@@ -67,10 +69,11 @@ use ankurah::model::MutableBorrow;
 use ankurah::property::PropertyError;
 use ankurah::transaction::Transaction;
 use ankurah::{Context, EntityId, LiveQuery, MatchArgs, Model, Ref, Value, View};
-use ankurah_commons::intention_graph::IntentionView;
+use ankurah_commons::cognition::IntentionView;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+mod catalog;
 mod placed;
 
 /// A model whose records each name their project: the nine models of a project's work,

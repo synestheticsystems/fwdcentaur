@@ -6,18 +6,16 @@
 //! project made them, which only that project changes; and the ids of every project, and the former
 //! ids that start with what someone types, which an id someone types may name.
 
-use ankurah::{policy::DEFAULT_CONTEXT, Context, Node, PermissiveAgent};
+use ankurah::{policy::DEFAULT_CONTEXT, Context};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::durable;
 use fwd_core::model::ProjectView;
 use fwd_core::project_graph::{ProjectGraph, ProjectGraphError};
-use std::sync::Arc;
 
 /// A context on a store in memory.
 async fn store() -> Result<Context> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     Ok(node.context_async(DEFAULT_CONTEXT).await?)
 }
 

@@ -235,11 +235,12 @@ fn each_part_of_what_the_view_is_made_from_is_followed() -> Result<()> {
 }
 
 /// The session's active intentions are followed: one its agent assigns itself shows; the person's
-/// rewording of it reaches the stream through the intention's own live read, and the person taking
-/// it off the agent through the read of what is assigned to it, neither writer stamping a principal
-/// of the session. The intention's read opens once the assignment shows, and its first result may
-/// stand in for the first rewording, which the stream shows by the time it shows it; so the second
-/// rewording is the one only that read can bring.
+/// rewording of it, and fulfilling it, which adds a component of its own, reach the stream through
+/// the intention's own live read, and the person taking it off the agent through the read of what
+/// is assigned to it, neither writer stamping a principal of the session. The intention's read
+/// opens once the assignment shows, and its first result may stand in for the first rewording,
+/// which the stream shows by the time it shows it; so the second rewording is the first change only
+/// that read can bring.
 #[test]
 fn the_active_intentions_are_followed_as_they_are_assigned_reworded_and_taken_off() -> Result<()> {
     let s = Scratch::new()?;
@@ -259,6 +260,9 @@ fn the_active_intentions_are_followed_as_they_are_assigned_reworded_and_taken_of
     s.json(&s.alpha, None, &["intention", "reword", &it, "--words", "the list stays where I left it"])?;
     let reworded = stream.document(SOON)?;
     assert_eq!(records(&reworded)[0]["lines"], json!(["the list stays where I left it"]), "{reworded}");
+    s.json(&s.alpha, None, &["intention", "fulfil", &it])?;
+    let fulfilled = stream.document(SOON)?;
+    assert_eq!(records(&fulfilled)[0]["tags"][0]["text"], "fulfilled", "{fulfilled}");
 
     s.json(&s.alpha, None, &["intention", "unassign", &it, "--to", "lead-sam"])?;
     assert_eq!(records(&stream.document(SOON)?), json!([]));

@@ -493,9 +493,9 @@ enum Command {
 enum AdminCommand {
     /// Carry the project's graph over to this build: from assignment as a relation to the assignee
     /// field (2026-09-28); from the supervisor role to the fixed roles, with who belongs to the
-    /// project recorded, and to scopes without an owner or a heartbeat (2026-09-29); and to tasks
-    /// placed in a scope by their `worked_in` alone (2026-10-03). Prints what it changed; a second
-    /// run changes nothing.
+    /// project recorded, and to scopes without an owner or a heartbeat (2026-09-29); to tasks
+    /// placed in a scope by their `worked_in` alone (2026-10-03); and to intentions on the Commons'
+    /// kept mint (2026-11-16). Prints what it changed; a second run changes nothing.
     ///
     /// Each task with an accepted `assigned_to` to a scope and no assignee gets whoever made that
     /// scope (its owner, until scopes lost their owner), and every `assigned_to` from a task to a
@@ -511,8 +511,10 @@ enum AdminCommand {
     /// asked of the project instead. Then each principal is recorded as belonging or not: people
     /// and the triage agent belong, and an agent does when it did work here; an agent that only
     /// wrote messages here is listed as having acted here without belonging, for a person to
-    /// retire. Last, each scope's owner and heartbeat are cleared, and nothing else about it
-    /// changes.
+    /// retire. Then each scope's owner and heartbeat are cleared, and nothing else about it
+    /// changes. Last, each intention gets the Commons' new components beside its old ones, keeping
+    /// its id, and a quotation of its words naming their speaker; one that would lose part of what
+    /// it holds stops this part before it writes anything, naming each.
     Migrate,
     /// Bind the lead from before automatic attachment, which worked by `--as` and is bound to no
     /// thread, to the Codex thread that now does its job, so that the thread's calls to the daemon's
@@ -4754,6 +4756,21 @@ fn migration_text(v: &Value) -> String {
         "tasks made in a scope that only their record named, now worked in it: {}",
         if placed.is_empty() { "none".to_string() } else { placed.join("; ") }
     ));
+    let moved: Vec<String> = list("intentions_moved")
+        .iter()
+        .map(|i| {
+            format!(
+                "{} {}, its words quoted as {}",
+                short_id(i["id"].as_str().unwrap_or("")),
+                i["title"].as_str().unwrap_or(""),
+                short_id(i["quotation"].as_str().unwrap_or(""))
+            )
+        })
+        .collect();
+    lines.push(format!(
+        "intentions moved onto the Commons' kept mint, each keeping its id: {}",
+        if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
+    ));
     lines.join("\n")
 }
 
@@ -5517,6 +5534,18 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     "scope_title": scope_title(graph, Some(scope)).await?,
                 }));
             }
+            let intentions: Vec<Value> = fwd_core::intentions::convert(graph, app.me)
+                .await?
+                .into_iter()
+                .map(|c| {
+                    json!({
+                        "id": c.intention.to_base64(),
+                        "title": c.title,
+                        "added": c.added,
+                        "quotation": c.quotation.to_base64(),
+                    })
+                })
+                .collect();
             let mut v = json!({
                 "assigned": assigned,
                 "renamed": ids(&done.renamed),
@@ -5525,6 +5554,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 "visitors": visitors,
                 "scopes_cleared": cleared,
                 "placed_in_recorded_scope": placed,
+                "intentions_moved": intentions,
             });
             for (key, list) in principals {
                 v[key] = list;
@@ -6599,7 +6629,7 @@ mod tests {
     /// `fwd admin migrate --format text` says which principal holds triage now, and lists those
     /// whose old role it cleared and who acted in the project without belonging, for a person to
     /// retire, then the scopes whose owner and heartbeat it cleared, then the tasks it placed in the
-    /// scope only their record named.
+    /// scope only their record named, then the intentions it moved onto the Commons' new models.
     #[test]
     fn the_migration_says_who_holds_triage_and_who_to_retire() {
         let who = |handle: &str| json!({"id": "x", "handle": handle});
@@ -6616,6 +6646,9 @@ mod tests {
                 {"task": "LM-OrKvYabc", "title": "Guard the manifest", "scope": "c2F-rHGyxyz", "scope_title": "UI enhancements"},
                 {"task": "hGcyWpR0abc", "title": "Keep the badges", "scope": "gone12345678", "scope_title": null},
             ],
+            "intentions_moved": [
+                {"id": "q9TrWl2xabc", "title": "Readers keep their place", "added": ["cognition.intention"], "quotation": "Zk3vQe7Labc"},
+            ],
         });
         assert_eq!(
             migration_text(&v).lines().collect::<Vec<_>>(),
@@ -6629,6 +6662,7 @@ mod tests {
                 "only read here, not belonging: none",
                 "scopes whose owner and heartbeat were cleared, a scope having neither since 2026-09-29: Initial implementation (x_M0XLwr)",
                 "tasks made in a scope that only their record named, now worked in it: LM-OrKvY Guard the manifest in UI enhancements; hGcyWpR0 Keep the badges in gone1234",
+                "intentions moved onto the Commons' kept mint, each keeping its id: q9TrWl2x Readers keep their place, its words quoted as Zk3vQe7L",
             ]
         );
     }

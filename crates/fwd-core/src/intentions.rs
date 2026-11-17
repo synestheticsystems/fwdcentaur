@@ -1,11 +1,17 @@
-//! Intention records: what a person or an agent wants to be true, in their own words. Each is one
-//! entity of the Commons' components, `Intention` and `Creation`, with `Attribution` when someone
-//! else wrote the words down, then `LastEdit` once reworded and `Closure` once fulfilled or
-//! withdrawn, placed in a project by fwd's `Placement` (`project_graph`). A read hands out the
-//! views of the components every intention carries with its placement, `(PlacementView, Parts)`,
-//! and the other components are read through `ProjectGraph::component_of`. An intention is
-//! assigned to a principal, or to several, by an `assigned_to` relation for each, which lives with
-//! the intention in its project (D218, D219).
+//! Intention records: a statement of something wanted, a title and a description that belong to no
+//! one (D229), built on the Commons' models. Each is one entity of the components `Intention` and
+//! `Created`, then `Edited` once reworded and `Closed` once fulfilled or withdrawn, placed in a
+//! project by fwd's `Placement` (`project_graph`). Whose words a description holds is a quotation
+//! beside it (`quotation`). A read hands out the views of the components every intention carries
+//! with its placement, `(PlacementView, Parts)`, and the other components are read through
+//! `ProjectGraph::component_of`. An intention is assigned to a principal, or to several, by an
+//! `assigned_to` relation for each, which lives with the intention in its project (D218, D219).
+
+mod conversion;
+mod quotation;
+
+pub use conversion::{before_d229, convert, Converted};
+pub use quotation::{joined_to, quotation_of, speaker, whose_words, whose_words_among, Quoted};
 
 use crate::model::{PlacementView, PrincipalKind, PrincipalView, RelationKind, RelationStatus, RelationView};
 use crate::now_ms;
@@ -16,44 +22,56 @@ use ankurah::entity::LocalTrxEntity;
 use ankurah::model::{ComponentViews, Mutable};
 use ankurah::property::{PropertyError, Ref};
 use ankurah::EntityId;
+use ankurah_commons::cognition::{Intention, IntentionView};
 use ankurah_commons::identity::Principal as CommonsPrincipal;
-use ankurah_commons::intention_graph::{Intention, IntentionStatus, IntentionView};
-use ankurah_commons::records::{Attribution, AttributionView, Closure, Creation, CreationView, LastEdit, LastEditView};
+use ankurah_commons::property::Timestamp;
+use ankurah_commons::records::{Closed, ClosedView, Created, CreatedView, Edited, EditedView};
 use anyhow::{bail, Result};
 use serde_json::json;
 use std::collections::HashSet;
 
 /// The components every intention carries, which a read takes it by.
-pub type Parts = (IntentionView, CreationView);
+pub type Parts = (IntentionView, CreatedView);
 
-/// The principal `id` as a Commons model refers to one (`Creation.created_by`,
-/// `Attribution.speaker`, `LastEdit.edited_by`, `Closure.closed_by`): the id names a fwd
-/// principal (`model::Principal`), which does not carry the Commons' principal component yet.
+/// How an intention ended, as its `Closed.outcome` says. The Commons keep no status on an
+/// intention: it is open until it is closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum Outcome {
+    Fulfilled,
+    Withdrawn,
+}
+
+/// How the intention whose `Closed` is `closed` ended: none while it is open, which it is until a
+/// closing gives `Closed` a time, and again once a reopening takes the time off. A closed intention
+/// whose outcome is neither word cannot be read as one.
+pub fn outcome(closed: Option<&ClosedView>) -> Result<Option<Outcome>, PropertyError> {
+    let Some(closed) = closed else { return Ok(None) };
+    if closed.closed()?.is_none() {
+        return Ok(None);
+    }
+    let word = closed.outcome()?.unwrap_or_default();
+    match word.parse() {
+        Ok(outcome) => Ok(Some(outcome)),
+        Err(_) => Err(PropertyError::InvalidValue { value: word, ty: "an intention's outcome".into() }),
+    }
+}
+
+/// Where an intention stands, as fwd prints it: `open`, else how it ended.
+pub fn status(outcome: Option<Outcome>) -> &'static str {
+    outcome.map_or("open", Into::into)
+}
+
+/// The principal `id` as a Commons model refers to one (`Created.by`, `Edited.by`, `Closed.by`,
+/// `Attribution.speaker`): the id names a fwd principal (`model::Principal`), which does not carry
+/// the Commons' principal component yet.
 pub(crate) fn principal_ref(id: EntityId) -> Ref<CommonsPrincipal> {
     Ref::new(id)
 }
 
-/// Whose words an intention holds: the speaker its `Attribution` names, when it carries one, else
-/// whoever wrote them down.
-pub fn speaker(creation: &CreationView, attribution: Option<&AttributionView>) -> Result<EntityId, PropertyError> {
-    Ok(match attribution {
-        Some(a) => *a.speaker()?,
-        None => *creation.created_by()?,
-    })
-}
-
-/// When an intention's words were last written down: at their last rewording, which its
-/// `LastEdit` records, else when the record was made.
-pub fn last_written(creation: &CreationView, edit: Option<&LastEditView>) -> Result<i64, PropertyError> {
-    Ok(match edit {
-        Some(e) => e.edited()?,
-        None => creation.created()?,
-    })
-}
-
-/// Whether an intention of `status` has ended: fulfilled or withdrawn.
-pub fn ended(status: IntentionStatus) -> bool {
-    matches!(status, IntentionStatus::Fulfilled | IntentionStatus::Withdrawn)
+/// `millis` since the Unix epoch, as the Commons' models hold a moment.
+fn at(millis: i64) -> Timestamp {
+    Timestamp::from_unix_millis(millis)
 }
 
 /// The principal `said_by` names, with its kind, wherever in the node it is: whose words a write
@@ -70,7 +88,8 @@ async fn followed_principal(
 }
 
 /// Records an open intention titled `title` in the graph's project, written down by `by`, its
-/// words those of the person `said_by` names, else `by`'s own; the views of the record it made.
+/// description `words` quoted as the words of the person `said_by` names, else as `by`'s own; the
+/// views of the intention it made.
 pub async fn create(
     graph: &ProjectGraph,
     by: EntityId,
@@ -83,107 +102,132 @@ pub async fn create(
         bail!("an intention's title cannot be blank");
     }
     let speaker = rules::speaker_of(by, followed_principal(graph, said_by).await?)?;
+    let now = now_ms();
     let trx = graph.begin();
-    let made = trx.create_placed(&Intention { title, words, status: IntentionStatus::Open }).await?;
+    let made = trx.create_placed(&Intention { title, description: words.clone() }).await?;
     let record = Mutable::entity(&*made);
-    trx.add(record, &Creation { created_by: principal_ref(by), created: now_ms() }).await?;
-    if speaker != by {
-        trx.add(record, &Attribution { speaker: principal_ref(speaker) }).await?;
-    }
+    trx.add(record, &Created { created: at(now), by: principal_ref(by) }).await?;
     // Read through the transaction, the views follow the record once it is committed.
     let views = <(PlacementView, Parts)>::views_of(record.read())?;
+    quotation::quote_given(&trx, record.id(), words, speaker, by, now).await?;
     trx.commit().await?;
     Ok(views)
 }
 
+/// Refuses a change to the intention `placement` is on unless it is written in its speaker's words
+/// ([`rules::can_change_words`]): `by`'s own, or those of the person `said_by` names. An intention
+/// no quotation names a speaker for is refused, since no one is known to change its words. Whose
+/// words the change records.
+async fn in_speakers_words(
+    graph: &ProjectGraph,
+    placement: &PlacementView,
+    by: EntityId,
+    said_by: Option<EntityId>,
+) -> Result<EntityId> {
+    let written_for = rules::speaker_of(by, followed_principal(graph, said_by).await?)?;
+    let Some((Some(speaker), _)) = whose_words(graph, placement.id()).await? else {
+        bail!("no quotation says whose words the intention holds, so no one is known to change them");
+    };
+    rules::can_change_words(speaker, written_for)?;
+    Ok(written_for)
+}
+
 /// Gives the intention a new title, new words, or both, as `by` rewords it, in its speaker's
-/// words: `by`'s own, or those of the person `said_by` names ([`rules::can_change_words`]). One
-/// fulfilled or withdrawn is not reworded. Whatever is given as it stands changes nothing, and
-/// nothing at all is written when nothing changes. True when it changed.
+/// words ([`in_speakers_words`]): new words are quoted as theirs, beside the quotations of the words
+/// before. One fulfilled or withdrawn is not reworded. Whatever is given as it stands changes
+/// nothing, and nothing at all is written when nothing changes. True when it changed.
 pub async fn reword(
     graph: &ProjectGraph,
     by: EntityId,
-    (placement, (intention, creation)): &(PlacementView, Parts),
+    (placement, (intention, _)): &(PlacementView, Parts),
     title: Option<&str>,
     words: Option<&str>,
     said_by: Option<EntityId>,
 ) -> Result<bool> {
-    let status = intention.status()?;
-    if ended(status) {
-        bail!("the intention is {status}, and is not reworded");
+    if let Some(ended) = outcome(graph.component_of::<ClosedView>(placement).await?.as_ref())? {
+        bail!("the intention is {ended}, and is not reworded");
     }
-    let attribution = graph.component_of::<AttributionView>(placement).await?;
-    let written_for = rules::speaker_of(by, followed_principal(graph, said_by).await?)?;
-    rules::can_change_words(speaker(creation, attribution.as_ref())?, written_for)?;
+    let written_for = in_speakers_words(graph, placement, by, said_by).await?;
     let title = title.map(str::trim);
     if title.is_some_and(str::is_empty) {
         bail!("an intention's title cannot be blank");
     }
-    let (now_title, now_words) = (intention.title()?, intention.words()?);
+    let (now_title, now_words) = (intention.title()?, intention.description()?);
     let new_title = title.filter(|t| *t != now_title);
     let new_words = words.filter(|w| *w != now_words);
     if new_title.is_none() && new_words.is_none() {
         return Ok(false);
     }
+    let now = now_ms();
     let trx = graph.begin();
     let m = trx.edit_placed::<Intention>(placement)?;
     if let Some(t) = new_title {
         m.title()?.set(&t.to_string())?;
     }
     if let Some(w) = new_words {
-        m.words()?.set(&w.to_string())?;
+        m.description()?.set(&w.to_string())?;
+        quotation::quote_given(&trx, placement.id(), w.to_string(), written_for, by, now).await?;
     }
-    record_edit(graph, &trx, placement, Mutable::entity(&*m), by).await?;
+    record_edit(graph, &trx, placement, Mutable::entity(&*m), by, now).await?;
     trx.commit().await?;
     Ok(true)
 }
 
-/// Marks the intention fulfilled or withdrawn, as `by` closes it in its speaker's words, as
-/// [`reword`] takes them, with why: a withdrawal says why, as a task's cancellation does.
+/// Closes the intention as fulfilled or withdrawn, as `by` closes it in its speaker's words, as
+/// [`reword`] takes them, with why: a withdrawal says why, as a task's cancellation does. One
+/// reopened carries its `Closed` still, every field cleared, as the Commons reopen a record, so
+/// closing it again fills that in.
 pub async fn close(
     graph: &ProjectGraph,
     by: EntityId,
-    (placement, (intention, creation)): &(PlacementView, Parts),
-    status: IntentionStatus,
+    (placement, _): &(PlacementView, Parts),
+    ending: Outcome,
     reason: Option<String>,
     said_by: Option<EntityId>,
 ) -> Result<()> {
-    if !ended(status) {
-        bail!("an intention is closed as fulfilled or withdrawn, not {status}");
-    }
-    if status == IntentionStatus::Withdrawn && reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+    if ending == Outcome::Withdrawn && reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
         bail!("an intention is withdrawn with a reason: give --reason");
     }
-    let now = intention.status()?;
-    if ended(now) {
-        bail!("the intention is {now} already");
+    let carried = graph.component_of::<ClosedView>(placement).await?;
+    if let Some(ended) = outcome(carried.as_ref())? {
+        bail!("the intention is {ended} already");
     }
-    let attribution = graph.component_of::<AttributionView>(placement).await?;
-    let written_for = rules::speaker_of(by, followed_principal(graph, said_by).await?)?;
-    rules::can_change_words(speaker(creation, attribution.as_ref())?, written_for)?;
+    in_speakers_words(graph, placement, by, said_by).await?;
     let trx = graph.begin();
-    let m = trx.edit_placed::<Intention>(placement)?;
-    m.status()?.set(&status)?;
-    let closure = Closure { closed: Some(now_ms()), closed_by: Some(principal_ref(by)), reason, reason_message: None };
-    trx.add(Mutable::entity(&*m), &closure).await?;
+    let closed =
+        Closed { closed: Some(at(now_ms())), by: Some(principal_ref(by)), outcome: Some(ending.to_string()), reason };
+    match carried {
+        Some(_) => {
+            let m = trx.edit_placed::<Closed>(placement)?;
+            m.closed()?.set(&closed.closed)?;
+            m.by()?.set(&closed.by)?;
+            m.outcome()?.set(&closed.outcome)?;
+            m.reason()?.set(&closed.reason)?;
+        }
+        None => {
+            let m = trx.edit_placed::<Intention>(placement)?;
+            trx.add(Mutable::entity(&*m), &closed).await?;
+        }
+    }
     Ok(trx.commit().await?)
 }
 
-/// Records in `trx` that `by` changed the words of the placed record `placement` is on, which
-/// `record` changes in it: its `LastEdit`, added at its first edit.
+/// Records in `trx` that `by` changed the words of the placed record `placement` is on at `now`,
+/// which `record` changes in it: its `Edited`, added at its first edit.
 async fn record_edit(
     graph: &ProjectGraph,
     trx: &ProjectTransaction,
     placement: &PlacementView,
     record: &LocalTrxEntity,
     by: EntityId,
+    now: i64,
 ) -> Result<()> {
-    let edit = LastEdit { edited: now_ms(), edited_by: Some(principal_ref(by)) };
-    match graph.component_of::<LastEditView>(placement).await? {
+    let edit = Edited { edited: at(now), by: Some(principal_ref(by)) };
+    match graph.component_of::<EditedView>(placement).await? {
         Some(_) => {
-            let m = trx.edit_placed::<LastEdit>(placement)?;
+            let m = trx.edit_placed::<Edited>(placement)?;
             m.edited()?.set(&edit.edited)?;
-            m.edited_by()?.set(&edit.edited_by)?;
+            m.by()?.set(&edit.by)?;
         }
         None => trx.add(record, &edit).await?,
     }

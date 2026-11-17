@@ -1,21 +1,19 @@
 //! Repositories are identified by their upstream remote, never by a worktree or a directory
 //! (Daniel, 2026-09-25): clones and worktrees of one upstream share one `Repo` entity.
 
-use ankurah::{policy::DEFAULT_CONTEXT, Node, PermissiveAgent};
+use ankurah::policy::DEFAULT_CONTEXT;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::anchoring::git;
+use fwd_core::durable;
 use fwd_core::model::RepoView;
 use fwd_core::ops::{self, repo_key};
 use fwd_core::project_graph::ProjectGraph;
 use std::path::Path;
-use std::sync::Arc;
 
 /// The graph of a project alone in a store in memory.
 async fn project() -> Result<ProjectGraph> {
-    let storage = SqliteStorageEngine::open_in_memory().await?;
-    let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-    node.system.create().await?;
+    let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
     let ctx = node.context_async(DEFAULT_CONTEXT).await?;
     Ok(ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "test").await?)
 }

@@ -361,18 +361,15 @@ async fn handle(node: &NodeGraph, event: Event, statuses: &mut Statuses) -> Resu
 mod tests {
     use super::*;
     use ankurah::policy::DEFAULT_CONTEXT;
-    use ankurah::{Node, PermissiveAgent};
     use ankurah_storage_sqlite::SqliteStorageEngine;
+    use fwd_core::durable;
     use fwd_core::ops::{self, CreateDecision, CreateTask, MessageContext};
     use fwd_core::rules::{DecisionMove, Verb};
-    use std::sync::Arc;
 
     /// A project alone in a store in memory: the node's records, which routing reads, and the
     /// project's graph.
     async fn project() -> Result<(NodeGraph, ProjectGraph)> {
-        let storage = SqliteStorageEngine::open_in_memory().await?;
-        let node = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-        node.system.create().await?;
+        let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
         let ctx = node.context_async(DEFAULT_CONTEXT).await?;
         Ok((NodeGraph::new(ctx.clone()), ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "routing").await?))
     }
@@ -995,9 +992,7 @@ mod tests {
     #[tokio::test]
     async fn a_task_whose_project_changes_tells_no_one_and_its_next_change_is_routed_from_what_was_known() -> Result<()>
     {
-        let storage = SqliteStorageEngine::open_in_memory().await?;
-        let store = Node::new_durable(Arc::new(storage), PermissiveAgent::new());
-        store.system.create().await?;
+        let store = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
         let ctx = store.context_async(DEFAULT_CONTEXT).await?;
         let alpha = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "alpha").await?;
         let beta = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "beta").await?;

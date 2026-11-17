@@ -22,6 +22,8 @@ pub mod daemon;
 pub mod daemon_socket;
 pub mod decision_log;
 pub mod dormancy;
+#[cfg(feature = "native")]
+pub mod durable;
 pub mod file_mention;
 pub mod former_ids;
 pub mod guidance;

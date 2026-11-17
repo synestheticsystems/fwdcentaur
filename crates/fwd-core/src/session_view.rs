@@ -42,7 +42,7 @@ use crate::subject;
 use crate::working_set::{self, Addressee, Extent, Holding, Known, Party, Record, SectionKind};
 use ankurah::property::PropertyError;
 use ankurah::EntityId;
-use ankurah_commons::records::{AttributionView, ClosureView, LastEditView};
+use ankurah_commons::records::ClosedView;
 use anyhow::{anyhow, Result};
 use cited::Cited;
 use serde::Serialize;
@@ -154,12 +154,13 @@ pub struct Row {
     pub tags: Vec<Tag>,
     /// The record's own text as one Markdown block, cut where it is long, its references named;
     /// none for a task with no what, and none where the title holds the whole text, which `lines`
-    /// never repeats. Then why it cannot be answered, where it cannot. An intention's is its words,
-    /// and for one since fulfilled or withdrawn a line saying so.
+    /// never repeats. Then why it cannot be answered, where it cannot. An intention's is its
+    /// description, and for one since fulfilled or withdrawn a line saying so.
     pub lines: Vec<String>,
-    /// Whose words an intention's `lines` hold and when they were last written down, kept apart
-    /// from the words so that a reader can show it beside them, less prominently; none for any
-    /// other record.
+    /// Whose words an intention's `lines` hold and when they were written down, as its latest
+    /// quotation says, kept apart from the words so that a reader can show it beside them, less
+    /// prominently; none for an intention no quotation names a speaker for, and for any other
+    /// record.
     pub attribution: Option<Byline>,
     /// Where the page shows it, after the page's address.
     pub path: Option<String>,
@@ -242,6 +243,9 @@ pub struct Held {
     /// The ids [`intentions::assigned_to`] gives for the principals of the session's own thread,
     /// read or not, whose changes the view listens to.
     assigned: Vec<EntityId>,
+    /// The records joined to those intentions, their quotations, which say whose words each holds,
+    /// whose changes the view listens to ([`intentions::joined_to`]).
+    quoted: Vec<EntityId>,
 }
 
 /// What a working set is read for the view: no ready tasks, and the unread notifications counted
@@ -283,7 +287,8 @@ pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Re
     let names =
         known.projects.iter().flat_map(|(_, all)| all).filter_map(|p| Some((p.id(), p.handle().ok()?))).collect();
     let projects = known.projects.into_iter().map(|(project, _)| project).collect();
-    let (mut intentions, mut unreadable_intentions, mut assigned) = (Vec::new(), 0, Vec::new());
+    let (mut intentions, mut unreadable_intentions) = (Vec::new(), 0);
+    let (mut assigned, mut quoted) = (Vec::new(), Vec::new());
     let own_thread = holdings.iter().filter(|h| h.subject.as_deref().is_some_and(subject::is_main_thread));
     for h in own_thread {
         let there = graph.graph_of_project(&h.project);
@@ -293,7 +298,9 @@ pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Re
             }
             assigned.push(id);
             let row = match followed {
-                Followed::Held { project, found, .. } => intention_row(&there, &project, &found).await.ok(),
+                Followed::Held { project, found, .. } => {
+                    intention_row(&there, &project, &found, &mut quoted).await.ok()
+                }
                 Followed::NotHeld => None,
             };
             match row {
@@ -313,41 +320,47 @@ pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Re
         intentions,
         unreadable_intentions,
         assigned,
+        quoted,
     })
 }
 
 /// An intention assigned to a principal of the session's own thread, read in `there`, that
 /// principal's project's graph, where `project` says whose it is, as a row: titled by its title;
-/// its words its line, attributed to their speaker, by name, and the day they were last written
-/// down; for one since fulfilled or withdrawn, a line after them saying so and when, and a tag; its
-/// project's name as a tag when that is not its principal's; no path, since the page has none for
-/// an intention yet, and no action.
-async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(PlacementView, Parts)) -> Result<Row> {
-    let (placement, (intention, creation)) = record;
-    let attribution = there.component_of::<AttributionView>(placement).await?;
-    let speaker = intentions::speaker(creation, attribution.as_ref())?;
-    let name = match there.follow::<PrincipalView>(speaker).await? {
-        Followed::Held { found, .. } => found.display_name()?,
-        Followed::NotHeld => NOT_FOUND.into(),
+/// its description its line, attributed to the speaker its latest quotation names, by name, and the
+/// day those words were written down (`intentions::whose_words_among`); for one since fulfilled or
+/// withdrawn, a line after them saying so and when, and a tag; its project's name as a tag when that
+/// is not its principal's; no path, since the page has none for an intention yet, and no action.
+/// The records joined to it go to `quoted` as soon as they are read, so that the view follows its
+/// quotations even when the row cannot be made.
+async fn intention_row(
+    there: &ProjectGraph,
+    project: &Whose,
+    record: &(PlacementView, Parts),
+    quoted: &mut Vec<EntityId>,
+) -> Result<Row> {
+    let (placement, (intention, _)) = record;
+    let joined = intentions::joined_to(there, placement.id()).await?;
+    quoted.extend(&joined);
+    let attribution = match intentions::whose_words_among(there, &joined).await? {
+        Some((Some(speaker), recorded)) => {
+            let name = match there.follow::<PrincipalView>(speaker).await? {
+                Followed::Held { found, .. } => found.display_name()?,
+                Followed::NotHeld => NOT_FOUND.into(),
+            };
+            Some(Byline { by: plain(&name, TITLE_LIMIT), at: date(recorded.created()?.unix_millis()) })
+        }
+        Some((None, _)) | None => None,
     };
-    let edit = there.component_of::<LastEditView>(placement).await?;
-    let written = intentions::last_written(creation, edit.as_ref())?;
-    let mut lines: Vec<String> = unpaged_block(&intention.words()?).into_iter().collect();
+    let mut lines: Vec<String> = unpaged_block(&intention.description()?).into_iter().collect();
     let mut tags = Vec::new();
     if let Whose::Other(p) = project {
         tags.push(Tag::plain(&p.name));
     }
-    let status = intention.status()?;
-    if intentions::ended(status) {
-        let closed = match there.component_of::<ClosureView>(placement).await? {
-            Some(closure) => closure.closed()?,
-            None => None,
-        };
-        lines.push(match closed {
-            Some(at) => format!("{status} on {}", date(at)),
-            None => status.to_string(),
-        });
-        tags.push(Tag::plain(&status.to_string()));
+    let closed = there.component_of::<ClosedView>(placement).await?;
+    if let (Some(ended), Some(closed)) = (intentions::outcome(closed.as_ref())?, &closed) {
+        let on = closed.closed()?.map(|at| format!(" on {}", date(at.unix_millis()))).unwrap_or_default();
+        lines.push(format!("{ended}{on}"));
+        tags.push(Tag::plain(&ended.to_string()));
     }
     Ok(Row {
         id: placement.id(),
@@ -356,7 +369,7 @@ async fn intention_row(there: &ProjectGraph, project: &Whose, record: &(Placemen
         title_is_cut: false,
         tags,
         lines,
-        attribution: Some(Byline { by: plain(&name, TITLE_LIMIT), at: date(written) }),
+        attribution,
         path: None,
         actions: Vec::new(),
     })
@@ -376,8 +389,9 @@ enum Asked<'a> {
 impl Held {
     /// The live queries whose changes can change the view: the projects, each project's principals
     /// bound to the session, each principal's working set, the threads of the questions asked of
-    /// the person, the intentions assigned to the principals of the session's own thread, and each
-    /// of those intentions.
+    /// the person, the intentions assigned to the principals of the session's own thread, each of
+    /// those intentions with the relations that join its quotations to it, and each record they
+    /// join.
     pub fn live_reads(&self) -> BTreeSet<LiveRead> {
         let mut reads = BTreeSet::from([LiveRead::Projects]);
         let session = |project: &ProjectRecord| LiveRead::SessionPrincipals {
@@ -394,7 +408,10 @@ impl Held {
                 reads.insert(LiveRead::IntentionsAssignedTo(h.principal));
             }
         }
-        reads.extend(self.assigned.iter().map(|id| LiveRead::AssignedIntention(*id)));
+        reads.extend(
+            self.assigned.iter().flat_map(|id| [LiveRead::AssignedIntention(*id), LiveRead::QuotationsOf(*id)]),
+        );
+        reads.extend(self.quoted.iter().map(|id| LiveRead::Quotation(*id)));
         reads
     }
 
