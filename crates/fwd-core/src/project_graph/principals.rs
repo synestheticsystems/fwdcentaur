@@ -3,19 +3,18 @@
 //! principals by it, under the same rule as every other record, and hands each out as the views of
 //! the two, `(RoleView, PrincipalView)`. A principal read by its id is the project's, or followed
 //! into its own. Whether a principal is retired is read off the same entity, from the Commons'
-//! `Closed`, which it carries only once retired ([`closed`]).
+//! `Closed`, which it carries only once retired ([`closed`](super::closed)).
 
-use super::{Followed, InProjectView, ProjectGraph, ProjectGraphError, ProjectTransaction};
+use super::{Followed, ProjectGraph, ProjectGraphError};
 use crate::model::{Principal, PrincipalView, RoleView};
 use ankurah::ankql::ast::Parsed;
 use ankurah::error::RetrievalError;
-use ankurah::model::Mutable;
 use ankurah::{Context, EntityId, MatchArgs, View};
-use ankurah_commons::records::{Closed, ClosedView};
+use ankurah_commons::records::Closed;
 
 /// Binds the components every reader of a principal reads off its role, `identity.Principal` and
 /// `Closed`, so that a principal named by a role alone, as the page's lists and the routing
-/// service's standing query hold one, is read whole ([`principal_parts`], [`closed`]): a view of a
+/// service's standing query hold one, is read whole ([`principal_parts`], [`closed`](super::closed)): a view of a
 /// model the node has not bound reads nothing. A client's graph and the routing service's bind them
 /// as they open, and every read here that hands out a principal binds them first.
 pub(super) async fn bind_principal_parts(ctx: &Context) -> Result<(), RetrievalError> {
@@ -31,28 +30,7 @@ pub fn principal_parts(role: RoleView) -> Result<(RoleView, PrincipalView), Retr
     Ok((role, principal))
 }
 
-/// Whether the record `record` is a view of is closed: it carries the Commons' `Closed` with a
-/// time, as a retired principal and an undone identity binding do, and a record reopened carries it
-/// with every field cleared.
-pub fn closed(record: &impl View) -> Result<bool, RetrievalError> {
-    match record.entity().cast::<ClosedView>() {
-        Ok(closed) => Ok(closed.closed()?.is_some()),
-        Err(RetrievalError::MissingComponent { .. }) => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
 impl ProjectGraph {
-    /// Whether the record `record` is a view of is closed, as [`closed`] reads it, for a reader that
-    /// does not know whether the node has bound `Closed` yet: this binds it first.
-    pub async fn is_closed(&self, record: &impl View) -> Result<bool, RetrievalError> {
-        let closing: Option<ClosedView> = self.component_of(record).await?;
-        Ok(match closing {
-            Some(closing) => closing.closed()?.is_some(),
-            None => false,
-        })
-    }
-
     /// Every principal of the project, retired or not.
     pub async fn principals(&self) -> Result<Vec<(RoleView, PrincipalView)>, RetrievalError> {
         bind_principal_parts(&self.ctx).await?;
@@ -90,43 +68,5 @@ impl ProjectGraph {
             }
             Followed::NotHeld => Followed::NotHeld,
         })
-    }
-}
-
-impl ProjectTransaction {
-    /// Closes the record `placing` names the project of, as `closing` says, in this transaction, as
-    /// a principal is retired and an identity binding undone: its `Closed` added, or, on a record
-    /// reopened, which carries it with every field cleared, filled in.
-    pub async fn close<P: InProjectView>(&self, placing: &P, closing: &Closed) -> Result<(), ProjectGraphError> {
-        match placing.entity().cast::<ClosedView>() {
-            Ok(_) => {
-                let m = self.edit_placed::<Closed>(placing)?;
-                m.closed()?.set(&closing.closed)?;
-                m.by()?.set(&closing.by)?;
-                m.outcome()?.set(&closing.outcome)?;
-                m.reason()?.set(&closing.reason)?;
-            }
-            Err(RetrievalError::MissingComponent { .. }) => {
-                let m = self.edit_placed::<P::Model>(placing)?;
-                self.add(Mutable::entity(&*m), closing).await?;
-            }
-            Err(e) => return Err(e.into()),
-        }
-        Ok(())
-    }
-
-    /// Reopens the record `placing` names the project of, as a retired principal is brought back:
-    /// every field of its `Closed` cleared, as the Commons reopen a record, since a component cannot
-    /// be taken off an entity. A record that is not closed is left as it is.
-    pub fn reopen(&self, placing: &impl InProjectView) -> Result<(), ProjectGraphError> {
-        if !closed(placing)? {
-            return Ok(());
-        }
-        let m = self.edit_placed::<Closed>(placing)?;
-        m.closed()?.set(&None)?;
-        m.by()?.set(&None)?;
-        m.outcome()?.set(&None)?;
-        m.reason()?.set(&None)?;
-        Ok(())
     }
 }

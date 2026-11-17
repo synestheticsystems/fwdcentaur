@@ -167,8 +167,7 @@ pub async fn reword(
 
 /// Closes the intention as fulfilled or withdrawn, as `by` closes it in its speaker's words, as
 /// [`reword`] takes them, with why: a withdrawal says why, as a task's cancellation does. One
-/// reopened carries its `Closed` still, every field cleared, as the Commons reopen a record, so
-/// closing it again fills that in.
+/// reopened is closed again as any record is (`ProjectTransaction::close`).
 pub async fn close(
     graph: &ProjectGraph,
     by: EntityId,
@@ -180,27 +179,14 @@ pub async fn close(
     if ending == Outcome::Withdrawn && reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
         bail!("an intention is withdrawn with a reason: give --reason");
     }
-    let carried = graph.component_of::<ClosedView>(placement).await?;
-    if let Some(ended) = outcome(carried.as_ref())? {
+    if let Some(ended) = outcome(graph.component_of::<ClosedView>(placement).await?.as_ref())? {
         bail!("the intention is {ended} already");
     }
     in_speakers_words(graph, placement, by, said_by).await?;
     let trx = graph.begin();
     let closed =
         Closed { closed: Some(at(now_ms())), by: Some(Ref::new(by)), outcome: Some(ending.to_string()), reason };
-    match carried {
-        Some(_) => {
-            let m = trx.edit_placed::<Closed>(placement)?;
-            m.closed()?.set(&closed.closed)?;
-            m.by()?.set(&closed.by)?;
-            m.outcome()?.set(&closed.outcome)?;
-            m.reason()?.set(&closed.reason)?;
-        }
-        None => {
-            let m = trx.edit_placed::<Intention>(placement)?;
-            trx.add(Mutable::entity(&*m), &closed).await?;
-        }
-    }
+    trx.close(placement, &closed).await?;
     Ok(trx.commit().await?)
 }
 

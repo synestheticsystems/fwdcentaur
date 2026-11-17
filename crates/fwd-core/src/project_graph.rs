@@ -74,10 +74,12 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 mod catalog;
+mod lifecycle;
 mod placed;
 mod principals;
 
-pub use principals::{closed, principal_parts};
+pub use lifecycle::closed;
+pub use principals::principal_parts;
 
 /// A model whose records each name their project: the nine models of a project's work,
 /// [`FormerId`], and [`Placement`], which places a record built on the Commons' models.
