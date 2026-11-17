@@ -515,10 +515,11 @@ enum AdminCommand {
     /// wrote messages here is listed as having acted here without belonging, for a person to
     /// retire. Then each scope's owner and heartbeat are cleared, and nothing else about it
     /// changes. Then each intention gets the Commons' new components beside its old ones, keeping
-    /// its id, and a quotation of its words naming their speaker; one that would lose part of what
-    /// it holds stops this part before it writes anything, naming each. Last, each repository gets
-    /// the Commons' `git.Repository` and a `Placement` beside fwd's old model, keeping its id; one
-    /// placed already stops this part before it writes anything, naming each.
+    /// its id, and a quotation of its words naming their speaker. Last, each repository gets the
+    /// Commons' `git.Repository` and a `Placement` beside fwd's old model, keeping its id. An
+    /// intention that would lose part of what it holds, or a repository placed already, stops the
+    /// command, naming each, before its part writes anything: the parts before it have run, and
+    /// the parts after it run once it is resolved.
     Migrate,
     /// Bind the lead from before automatic attachment, which worked by `--as` and is bound to no
     /// thread, to the Codex thread that now does its job, so that the thread's calls to the daemon's

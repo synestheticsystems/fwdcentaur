@@ -74,7 +74,7 @@ pub struct Repository {
 }
 ```
 
-A checkout registers its repository by its upstream (`ops::ensure_repo`), and an anchor's checkout is found by the upstreams its repository answers to (`ops::repo_upstreams`). Until 2026-11-17 a repository was fwd's own model `Repo`, the same three fields with a `project`; that model stays on the entity, and `fwd admin migrate` gives each the Commons' component and a `Placement`, keeping its id, which anchors and scopes hold (`cli.md`, "Maintenance").
+A checkout registers its repository by its upstream (`ops::ensure_repo`), and an anchor's checkout is found by the upstreams its repository answers to (`ops::repo_upstreams`). Until 2026-11-17 a repository was fwd's own model `Repo`, the same three fields with a `project`; that model stays on the entity, and `fwd admin migrate` gives each the Commons' component and a `Placement`, keeping its id, which anchors hold (`cli.md`, "Maintenance"); a scope names a repository by its upstream's key, never by its id.
 
 ### Task
 

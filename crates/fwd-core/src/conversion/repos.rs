@@ -41,7 +41,7 @@ pub struct Converted {
 }
 
 /// Moves the project's repositories onto the Commons' `git.Repository`, adding to each entity and
-/// keeping its id, which every anchor and scope that names the repository holds: its name, its
+/// keeping its id, which every anchor that names the repository holds: its name, its
 /// remote URLs and its default branch as they are, and a `Placement` in its project, which the
 /// Commons' model does not name. fwd's own model stays on the entity, since Ankurah cannot take a
 /// component off one yet. Each repository moves as [`super`] says: one whose entity carries a
