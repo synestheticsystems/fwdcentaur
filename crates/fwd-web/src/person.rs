@@ -12,7 +12,7 @@ use crate::referents::{Mode, Models};
 use crate::thread::{self, Actions, Link, Model, RowAt, ThreadState};
 use crate::{empty, fmt, modes, store};
 use ankurah::EntityId;
-use fwd_core::model::{AgentRole, PrincipalKind, PrincipalView};
+use fwd_core::model::{AgentRole, PrincipalKind, PrincipalView, RoleView};
 use fwd_core::ops;
 use leptos::prelude::*;
 
@@ -21,8 +21,8 @@ pub const FOLLOWS: &[Link] = &[];
 
 /// What a principal is: "person", or an agent's role, or "agent" for one with none. An agent's
 /// role is a default, not a rule (docs/design/data-model.md, "Rights"), so this only describes.
-pub fn role(p: &PrincipalView) -> &'static str {
-    match (p.kind().ok(), ops::role_of(p)) {
+pub fn role((role, p): &(RoleView, PrincipalView)) -> &'static str {
+    match (p.kind().ok(), ops::role_of(role)) {
         (Some(PrincipalKind::Human), _) => "person",
         (_, Some(AgentRole::Lead)) => "lead",
         (_, Some(AgentRole::Triage)) => "triage",
@@ -34,7 +34,7 @@ pub fn role(p: &PrincipalView) -> &'static str {
 
 /// The handle, to name a principal where it shows again.
 pub fn name(id: EntityId) -> Option<String> {
-    store::principal(id).map(|p| store::named(p.handle().unwrap_or_default(), &p))
+    store::principal(id).map(|(role, p)| store::named(p.handle().unwrap_or_default(), &role))
 }
 
 /// The lozenge mode: the handle, the role beside an agent's.
@@ -51,9 +51,9 @@ pub fn list_item(id: EntityId) -> AnyView {
         };
         view! {
             <span class="list-item person-item">
-                <span class="author">{p.handle().unwrap_or_default()}</span>
+                <span class="author">{p.1.handle().unwrap_or_default()}</span>
                 " "
-                <span class="muted">{p.display_name().unwrap_or_default()}</span>
+                <span class="muted">{p.1.display_name().unwrap_or_default()}</span>
                 " "
                 <span class="pill">{role(&p)}</span>
             </span>

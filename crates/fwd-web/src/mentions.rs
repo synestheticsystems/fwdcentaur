@@ -86,10 +86,10 @@ impl Mentions {
         let offers: Vec<Offer> = naming::mentionable(&principals, &typing.typed, MOST, now)
             .into_iter()
             .map(|p| {
-                let handle = p.handle().unwrap_or_default();
+                let handle = p.1.handle().unwrap_or_default();
                 Offer {
                     what: person::role(p),
-                    scopes: naming::shows_scopes(&principals, &handle).then(|| store::scope_titles_of(p.id())),
+                    scopes: naming::shows_scopes(&principals, &handle).then(|| store::scope_titles_of(p.0.id())),
                     written: naming::mention_of(&principals, p),
                     dormant: dormancy::is_dormant(p, now),
                     handle,

@@ -13,7 +13,7 @@ mod quotation;
 pub use conversion::{before_d229, convert, Converted};
 pub use quotation::{joined_to, quotation_of, speaker, whose_words, whose_words_among, Quoted};
 
-use crate::model::{PlacementView, PrincipalKind, PrincipalView, RelationKind, RelationStatus, RelationView};
+use crate::model::{PlacementView, PrincipalKind, RelationKind, RelationStatus, RelationView};
 use crate::now_ms;
 use crate::ops;
 use crate::project_graph::{Followed, ProjectGraph, ProjectTransaction};
@@ -63,8 +63,7 @@ pub fn status(outcome: Option<Outcome>) -> &'static str {
 }
 
 /// The principal `id` as a Commons model refers to one (`Created.by`, `Edited.by`, `Closed.by`,
-/// `Attribution.speaker`): the id names a fwd principal (`model::Principal`), which does not carry
-/// the Commons' principal component yet.
+/// `Attribution.speaker`).
 pub(crate) fn principal_ref(id: EntityId) -> Ref<CommonsPrincipal> {
     Ref::new(id)
 }
@@ -81,8 +80,8 @@ async fn followed_principal(
     said_by: Option<EntityId>,
 ) -> Result<Option<(EntityId, PrincipalKind)>> {
     let Some(id) = said_by else { return Ok(None) };
-    match graph.follow::<PrincipalView>(id).await? {
-        Followed::Held { record, found, .. } => Ok(Some((record, found.kind()?))),
+    match graph.follow_principal(id).await? {
+        Followed::Held { record, found: (_, found), .. } => Ok(Some((record, found.kind()?))),
         Followed::NotHeld => bail!("--said-by names no principal the node holds: {}", id.to_base64()),
     }
 }
@@ -276,7 +275,7 @@ pub async fn unassign(
     (placement, _): &(PlacementView, Parts),
     to: EntityId,
 ) -> Result<usize> {
-    if to != by && graph.get::<PrincipalView>(by).await?.kind()? != PrincipalKind::Human {
+    if to != by && graph.principal(by).await?.1.kind()? != PrincipalKind::Human {
         bail!(
             "refused: an agent takes an intention off itself alone, since whether one stays assigned to another principal is for that principal or a person to decide; leave out --to"
         );
@@ -289,7 +288,7 @@ pub async fn unassign(
     for r in &holding {
         let m = trx.edit(r)?;
         m.status()?.set(&RelationStatus::Retracted)?;
-        m.closed_by()?.set(&Some(Ref::new(by)))?;
+        m.closed_by()?.set(&Some(by))?;
         m.closed()?.set(&Some(now_ms()))?;
     }
     trx.commit().await?;

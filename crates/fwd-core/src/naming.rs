@@ -27,13 +27,13 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub enum Named<'a> {
     /// The one principal it names.
-    One(&'a PrincipalView),
+    One(&'a (RoleView, PrincipalView)),
     /// No principal of the kind asked for has the name, the id or an id the name starts.
     NoOne,
     /// Two or more principals have the name, so it names none of them.
-    Shared(Vec<&'a PrincipalView>),
+    Shared(Vec<&'a (RoleView, PrincipalView)>),
     /// No principal has the name, and it starts the ids of two or more.
-    Started(Vec<&'a PrincipalView>),
+    Started(Vec<&'a (RoleView, PrincipalView)>),
 }
 
 /// A typed name without its at-sign and the spaces around it: `@impl-alice` is `impl-alice`.
@@ -43,12 +43,16 @@ pub fn bare(name: &str) -> &str {
 
 /// The principals of `principals` whose name is `name` (its at-sign optional), of `kind` when one
 /// is given: a command that takes only a person does not count an agent that shares its name.
-pub fn by_name<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<PrincipalKind>) -> Vec<&'a PrincipalView> {
+pub fn by_name<'a>(
+    principals: &'a [(RoleView, PrincipalView)],
+    name: &str,
+    kind: Option<PrincipalKind>,
+) -> Vec<&'a (RoleView, PrincipalView)> {
     let name = bare(name);
     principals
         .iter()
-        .filter(|p| kind.is_none() || p.kind().ok() == kind)
-        .filter(|p| p.handle().ok().as_deref() == Some(name))
+        .filter(|(_, p)| kind.is_none() || p.kind().ok() == kind)
+        .filter(|(_, p)| p.handle().ok().as_deref() == Some(name))
         .collect()
 }
 
@@ -58,7 +62,7 @@ pub fn by_name<'a>(principals: &'a [PrincipalView], name: &str, kind: Option<Pri
 /// characters or more, the principals whose id, or a former id, it starts, each once. The name
 /// comes first so that a name that happens to read as an id still names its principal.
 pub fn resolve<'a>(
-    principals: &'a [PrincipalView],
+    principals: &'a [(RoleView, PrincipalView)],
     name: &str,
     kind: Option<PrincipalKind>,
     former: &FormerIds,
@@ -69,20 +73,21 @@ pub fn resolve<'a>(
         [one] => return Named::One(one),
         several => return Named::Shared(several.to_vec()),
     }
-    let of_kind = || principals.iter().filter(|p| kind.is_none() || p.kind().ok() == kind);
+    let of_kind = || principals.iter().filter(|(_, p)| kind.is_none() || p.kind().ok() == kind);
     let whole = name.parse::<EntityId>().ok().into_iter().chain(former.named(name));
     for id in whole {
-        if let Some(p) = of_kind().find(|p| p.id() == id) {
+        if let Some(p) = of_kind().find(|(role, _)| role.id() == id) {
             return Named::One(p);
         }
     }
     if !ops::may_start_an_id(name) {
         return Named::NoOne;
     }
-    let mut started: Vec<&PrincipalView> = of_kind().filter(|p| p.id().to_base64().starts_with(name)).collect();
+    let mut started: Vec<&(RoleView, PrincipalView)> =
+        of_kind().filter(|(role, _)| role.id().to_base64().starts_with(name)).collect();
     for (_, record) in former.starting(name) {
-        if let Some(p) = of_kind().find(|p| p.id() == record) {
-            if !started.iter().any(|q| q.id() == record) {
+        if let Some(p) = of_kind().find(|(role, _)| role.id() == record) {
+            if !started.iter().any(|(q, _)| q.id() == record) {
                 started.push(p);
             }
         }
@@ -102,7 +107,7 @@ pub async fn principal_named(
     graph: &ProjectGraph,
     name: &str,
     kind: Option<PrincipalKind>,
-) -> Result<Option<PrincipalView>> {
+) -> Result<Option<(RoleView, PrincipalView)>> {
     let principals = ops::principals(graph).await?;
     // The former ids are read only for a name no principal has that may be an id.
     let former = if by_name(&principals, name, kind).is_empty() && ops::may_start_an_id(bare(name)) {
@@ -134,8 +139,13 @@ impl std::error::Error for Refused {}
 
 /// The refusal of `name`, which `several` share, or whose ids it starts (`started`), each listed
 /// with the scopes its work is in, read from the graph.
-pub async fn refused(graph: &ProjectGraph, name: &str, several: &[&PrincipalView], started: bool) -> Result<Refused> {
-    let loaded = Loaded::of(graph, &several.iter().map(|p| p.id()).collect::<Vec<_>>()).await?;
+pub async fn refused(
+    graph: &ProjectGraph,
+    name: &str,
+    several: &[&(RoleView, PrincipalView)],
+    started: bool,
+) -> Result<Refused> {
+    let loaded = Loaded::of(graph, &several.iter().map(|(role, _)| role.id()).collect::<Vec<_>>()).await?;
     let work = loaded.work();
     Ok(Refused(refusal(name, several, started, |id| scope_titles(&scopes_of(id, &work), work.scopes))))
 }
@@ -147,15 +157,15 @@ pub async fn refused(graph: &ProjectGraph, name: &str, several: &[&PrincipalView
 /// the one they mean.
 pub fn refusal(
     name: &str,
-    several: &[&PrincipalView],
+    several: &[&(RoleView, PrincipalView)],
     started: bool,
     scopes: impl Fn(EntityId) -> Vec<String>,
 ) -> String {
     let name = bare(name);
     let chars = if started { (name.len() + 4).max(8) } else { 8 };
     let mut several = several.to_vec();
-    several.sort_by_key(|p| p.id().to_base64());
-    let listed = several.iter().map(|p| candidate(p, chars, &scopes(p.id()))).collect::<Vec<_>>().join("; ");
+    several.sort_by_key(|(role, _)| role.id().to_base64());
+    let listed = several.iter().map(|p| candidate(p, chars, &scopes(p.0.id()))).collect::<Vec<_>>().join("; ");
     if started {
         format!(
             "`{name}` starts the ids of {} principals of this project ({listed}); give more of the id",
@@ -171,16 +181,16 @@ pub fn refusal(
 
 /// One principal as a refusal lists it: `Ab3dEf12: implementer, retired, in Replication and
 /// Anchoring`.
-fn candidate(p: &PrincipalView, chars: usize, scopes: &[String]) -> String {
-    let id: String = p.id().to_base64().chars().take(chars).collect();
+fn candidate(p: &(RoleView, PrincipalView), chars: usize, scopes: &[String]) -> String {
+    let id: String = p.0.id().to_base64().chars().take(chars).collect();
     format!("{id}: {}{}, {}", what(p), standing(p), in_scopes(scopes))
 }
 
 /// `, retired` or `, does not belong here` for a principal no picker offers, else nothing.
-fn standing(p: &PrincipalView) -> &'static str {
-    if !p.active().unwrap_or(false) {
+fn standing((role, _): &(RoleView, PrincipalView)) -> &'static str {
+    if ops::retired(role).unwrap_or(true) {
         ", retired"
-    } else if !ops::belongs(p) {
+    } else if !ops::belongs(role) {
         ", does not belong here"
     } else {
         ""
@@ -191,18 +201,18 @@ fn standing(p: &PrincipalView) -> &'static str {
 /// graph: the first eight characters of its id, which name it wherever a name is typed, then what
 /// it is, whether it is retired or does not belong here, and the scopes its work is in:
 /// `Ab3dEf12 (implementer, in Replication)`.
-pub async fn described(graph: &ProjectGraph, p: &PrincipalView) -> Result<String> {
-    let loaded = Loaded::of(graph, &[p.id()]).await?;
+pub async fn described(graph: &ProjectGraph, p: &(RoleView, PrincipalView)) -> Result<String> {
+    let loaded = Loaded::of(graph, &[p.0.id()]).await?;
     let work = loaded.work();
-    let scopes = scope_titles(&scopes_of(p.id(), &work), work.scopes);
-    let id: String = p.id().to_base64().chars().take(8).collect();
+    let scopes = scope_titles(&scopes_of(p.0.id(), &work), work.scopes);
+    let id: String = p.0.id().to_base64().chars().take(8).collect();
     Ok(format!("{id} ({}{}, {})", what(p), standing(p), in_scopes(&scopes)))
 }
 
 /// What `p` is, as a refusal and a mention search say it: `person`, the role an agent selected, or
 /// `agent` for one with none.
-pub fn what(p: &PrincipalView) -> String {
-    match (p.kind().ok(), ops::role_of(p)) {
+pub fn what((role, principal): &(RoleView, PrincipalView)) -> String {
+    match (principal.kind().ok(), ops::role_of(role)) {
         (Some(PrincipalKind::Human), _) => "person".to_string(),
         (_, Some(role)) => role.to_string(),
         _ => "agent".to_string(),
@@ -229,7 +239,7 @@ pub fn in_scopes(scopes: &[String]) -> String {
 /// more principals of the project share the name, so that they can be told apart (docs/DECISIONS.md,
 /// D107, as the lead read it on 2026-09-29: beside a repeated name only). Answering true shows them
 /// beside every name, as D107's words ask.
-pub fn shows_scopes(principals: &[PrincipalView], handle: &str) -> bool {
+pub fn shows_scopes(principals: &[(RoleView, PrincipalView)], handle: &str) -> bool {
     by_name(principals, handle, None).len() > 1
 }
 
@@ -239,27 +249,32 @@ pub fn shows_scopes(principals: &[PrincipalView], handle: &str) -> bool {
 /// `now`, the reader's clock, come after all the others, by name and then by id among themselves,
 /// so that an agent quiet for twelve hours is offered only once the agents at work are
 /// (`dormancy`; docs/DECISIONS.md, D123).
-pub fn mentionable<'a>(principals: &'a [PrincipalView], typed: &str, most: usize, now: i64) -> Vec<&'a PrincipalView> {
+pub fn mentionable<'a>(
+    principals: &'a [(RoleView, PrincipalView)],
+    typed: &str,
+    most: usize,
+    now: i64,
+) -> Vec<&'a (RoleView, PrincipalView)> {
     let typed = typed.to_lowercase();
-    let mut found: Vec<(bool, String, &PrincipalView)> = principals
+    let mut found: Vec<(bool, String, &(RoleView, PrincipalView))> = principals
         .iter()
-        .filter(|p| ops::belongs(p))
-        .filter_map(|p| Some((dormancy::is_dormant(p, now), p.handle().ok()?, p)))
+        .filter(|(role, _)| ops::belongs(role))
+        .filter_map(|p| Some((dormancy::is_dormant(p, now), p.1.handle().ok()?, p)))
         .filter(|(_, handle, _)| handle.to_lowercase().starts_with(&typed))
         .collect();
-    found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2.id().cmp(&b.2.id())));
+    found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)).then(a.2 .0.id().cmp(&b.2 .0.id())));
     found.into_iter().take(most).map(|(_, _, p)| p).collect()
 }
 
 /// How a message's text names `p` so that posting reads it back as `p`: `@` and its name while no
 /// other principal of the project has it, else `@` and the first eight characters of its id, since
 /// posting refuses a name two or more share. Posting stores either as the id.
-pub fn mention_of(principals: &[PrincipalView], p: &PrincipalView) -> String {
-    let handle = p.handle().unwrap_or_default();
+pub fn mention_of(principals: &[(RoleView, PrincipalView)], (role, principal): &(RoleView, PrincipalView)) -> String {
+    let handle = principal.handle().unwrap_or_default();
     if by_name(principals, &handle, None).len() == 1 {
         format!("@{handle}")
     } else {
-        format!("@{}", p.id().to_base64().chars().take(8).collect::<String>())
+        format!("@{}", role.id().to_base64().chars().take(8).collect::<String>())
     }
 }
 
@@ -342,17 +357,17 @@ pub fn scopes_of(principal: EntityId, work: &Work) -> Vec<EntityId> {
         if ops::assignee_of(t).ok().flatten() == Some(principal) {
             saw(scopes_of_task(t.id()), t.updated().unwrap_or(0));
         }
-        if t.created_by().ok().map(EntityId::from) == Some(principal) {
+        if t.created_by().ok() == Some(principal) {
             saw(scopes_of_task(t.id()), t.created().unwrap_or(0));
         }
     }
     for s in work.scopes {
-        if s.created_by().ok().map(EntityId::from) == Some(principal) {
+        if s.created_by().ok() == Some(principal) {
             saw(vec![s.id()], s.created().unwrap_or(0));
         }
     }
     for m in work.messages {
-        if m.author().ok().map(EntityId::from) != Some(principal) {
+        if m.author().ok() != Some(principal) {
             continue;
         }
         let when = m.created().unwrap_or(0);

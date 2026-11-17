@@ -62,7 +62,7 @@ pub fn found(named: Memo<Option<String>>) -> Memo<Found> {
             return session::acting().get().map_or(Found::Waiting, |p| Found::Principal(p.id()));
         };
         match store::principal_named(&handle) {
-            Ok(Some(p)) => return Found::Principal(p.id()),
+            Ok(Some((p, _))) => return Found::Principal(p.id()),
             Err(why) => return Found::Refused(format!("{why}.")),
             Ok(None) => {}
         }

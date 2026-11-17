@@ -379,11 +379,11 @@ pub struct Successors(HashMap<EntityId, EntityId>);
 
 impl Successors {
     /// Each principal of `principals` that a successor took over, with that successor.
-    pub fn of(principals: &[PrincipalView]) -> Successors {
+    pub fn of(principals: &[(RoleView, PrincipalView)]) -> Successors {
         Successors(
             principals
                 .iter()
-                .filter_map(|p| Some((p.id(), EntityId::from(p.succeeded_by().ok().flatten()?))))
+                .filter_map(|(role, _)| Some((role.id(), EntityId::from(role.succeeded_by().ok().flatten()?))))
                 .collect(),
         )
     }
@@ -416,7 +416,7 @@ impl Successors {
 /// it over. A loop, which `fwd principal succeed` never makes, ends where it would come round again.
 async fn reached(graph: &ProjectGraph, principal: EntityId) -> Result<EntityId> {
     let mut chain = vec![principal];
-    while let Followed::Held { found, .. } = graph.follow::<PrincipalView>(chain[chain.len() - 1]).await? {
+    while let Followed::Held { found, .. } = graph.follow::<RoleView>(chain[chain.len() - 1]).await? {
         match found.succeeded_by().ok().flatten().map(EntityId::from) {
             Some(next) if !chain.contains(&next) => chain.push(next),
             _ => break,
@@ -457,7 +457,7 @@ async fn deliver(graph: &ProjectGraph, planned: Vec<Planned>, exclude: Option<En
 /// notification for it is made and found; for a recipient the node holds no principal for, `graph`,
 /// the project whose rule chose it.
 async fn inbox_graph(graph: &ProjectGraph, recipient: EntityId) -> Result<ProjectGraph> {
-    Ok(match graph.follow::<PrincipalView>(recipient).await? {
+    Ok(match graph.follow::<RoleView>(recipient).await? {
         Followed::Held { found, .. } => graph.graph_of(&found)?,
         Followed::NotHeld => graph.clone(),
     })
@@ -504,7 +504,7 @@ async fn mentioned(graph: &ProjectGraph, message: EntityId) -> Result<Vec<Entity
         if rel.status()? != RelationStatus::Accepted || written_by_edit(&rel) {
             continue;
         }
-        if let Followed::Held { record, .. } = graph.follow::<PrincipalView>(rel.to_id()?).await? {
+        if let Followed::Held { record, .. } = graph.follow::<RoleView>(rel.to_id()?).await? {
             if !out.contains(&record) {
                 out.push(record);
             }
@@ -516,7 +516,7 @@ async fn mentioned(graph: &ProjectGraph, message: EntityId) -> Result<Vec<Entity
 /// What a notification caused by a message records of it: the message, its author as the actor,
 /// and what it is about.
 fn message_originator(msg: &MessageView, mc: &ops::MessageContext) -> Result<Value> {
-    let author: EntityId = msg.author()?.into();
+    let author: EntityId = msg.author()?;
     let mut originator = json!({"message_id": msg.id().to_base64(), "actor_id": author.to_base64()});
     if let Some(t) = mc.task_id {
         originator["task_id"] = json!(t.to_base64());
@@ -659,7 +659,7 @@ impl Asked {
 /// or while no triage agent answers for its scope.
 pub(crate) async fn asked_of(
     graph: &ProjectGraph,
-    principals: &[PrincipalView],
+    principals: &[(RoleView, PrincipalView)],
     mc: &ops::MessageContext,
 ) -> Result<Option<Asked>> {
     if let Some(to) = mc.to.as_deref() {
@@ -667,7 +667,7 @@ pub(crate) async fn asked_of(
             return Ok(Some(Asked::Principal(id)));
         }
         return Ok(match naming::by_name(principals, to, None).as_slice() {
-            [principal] => Some(Asked::Principal(principal.id())),
+            [(principal, _)] => Some(Asked::Principal(principal.id())),
             _ => None,
         });
     }
@@ -688,7 +688,7 @@ fn for_front_line(p: Planned, f: ops::FrontLine) -> Planned {
 
 /// Rules 1 to 6, and the rule for a comment on a highlight that is a step, for a new message.
 pub async fn plan_for_message(graph: &ProjectGraph, msg: &MessageView) -> Result<Vec<Planned>> {
-    let author: EntityId = msg.author()?.into();
+    let author: EntityId = msg.author()?;
     let priority = msg.priority()?;
     let mc = ops::MessageContext::from_view(msg)?;
     let msg_target = target("Message", msg.id());
@@ -729,12 +729,12 @@ pub async fn plan_for_message(graph: &ProjectGraph, msg: &MessageView) -> Result
         let mut participants = Vec::new();
         for (id, why) in [(reply_to, Why::ParentAuthor), (root_id, Why::ThreadAuthor)] {
             if let Followed::Held { found, .. } = graph.follow::<MessageView>(id).await? {
-                participants.push((EntityId::from(found.author()?), why));
+                participants.push((found.author()?, why));
             }
         }
         let thread: Vec<MessageView> = ops::messages_about(graph, "thread", root_id).await?;
         for m in thread {
-            participants.push((m.author()?.into(), Why::Participant));
+            participants.push((m.author()?, Why::Participant));
         }
         for (p, why) in participants {
             planned.push(note(p, NotificationType::Replied, msg_target.clone(), why));
@@ -771,7 +771,7 @@ pub async fn plan_for_message(graph: &ProjectGraph, msg: &MessageView) -> Result
         for task in tasks_stepped(graph, anchor).await? {
             let Followed::Held { found: t, .. } = graph.follow::<TaskView>(task).await? else { continue };
             step_of.push(task);
-            let parties = [Some(EntityId::from(t.created_by()?)), ops::assignee_of(&t)?];
+            let parties = [Some(t.created_by()?), ops::assignee_of(&t)?];
             for party in parties.into_iter().flatten() {
                 step_parties.push(party);
                 let step = note(party, NotificationType::CodeCommented, target("CodeAnchor", anchor), Why::StepParty);
@@ -804,14 +804,9 @@ pub async fn plan_for_message(graph: &ProjectGraph, msg: &MessageView) -> Result
     if let Some(decision) = mc.decision_id {
         if let Followed::Held { found: d, .. } = graph.follow::<DecisionView>(decision).await? {
             let about = target("Decision", decision);
-            planned.push(note(
-                d.author()?.into(),
-                NotificationType::DecisionCommented,
-                about.clone(),
-                Why::DecisionAuthor,
-            ));
+            planned.push(note(d.author()?, NotificationType::DecisionCommented, about.clone(), Why::DecisionAuthor));
             if let Some(decider) = d.decided_by()? {
-                planned.push(note(decider.into(), NotificationType::DecisionCommented, about, Why::Decider));
+                planned.push(note(decider, NotificationType::DecisionCommented, about, Why::Decider));
             }
         }
     }
@@ -955,13 +950,13 @@ async fn heard_by_triage(projects: &[ProjectGraph]) -> Result<HashSet<EntityId>>
     for graph in projects {
         let principals = ops::principals(graph).await?;
         let active: HashSet<EntityId> =
-            principals.iter().filter(|p| p.active().unwrap_or(false)).map(|p| p.id()).collect();
+            principals.iter().filter(|(p, _)| !ops::retired(p).unwrap_or(true)).map(|(p, _)| p.id()).collect();
         let asked: Vec<NotificationView> = graph.fetch(questions.as_str()).await?;
         heard.extend(asked.iter().filter_map(|n| {
             let originator: Value = n.originator().ok()?.into();
             let for_triage = originator.get("why").is_none() || why_of(&originator) == Some(Why::Triage);
             let read = n.status().ok()? != NotificationStatus::Unread;
-            let reads_still = active.contains(&EntityId::from(n.recipient().ok()?));
+            let reads_still = active.contains(&n.recipient().ok()?);
             (for_triage && (read || reads_still)).then(|| id_at(&originator, "message_id")).flatten()
         }));
     }
@@ -1009,7 +1004,7 @@ async fn citing_authors(graph: &ProjectGraph, decision: EntityId) -> Result<Vec<
 /// task worked in none to the one that serves the whole project; TaskCreated to the authors of the
 /// messages it was discovered from or motivated by.
 pub async fn plan_for_task_created(graph: &ProjectGraph, task: &TaskView) -> Result<Vec<Planned>> {
-    let creator: EntityId = task.created_by()?.into();
+    let creator: EntityId = task.created_by()?;
     let priority = Priority::Next;
     let originator = json!({"actor_id": creator.to_base64(), "task_id": task.id().to_base64()});
     let tgt = target("Task", task.id());
@@ -1028,7 +1023,7 @@ pub async fn plan_for_task_created(graph: &ProjectGraph, task: &TaskView) -> Res
         let source: EntityId = rel.to_id()?;
         if let Followed::Held { found: m, .. } = graph.follow::<MessageView>(source).await? {
             let created = Planned::new(
-                m.author()?.into(),
+                m.author()?,
                 NotificationType::TaskCreated,
                 priority,
                 tgt.clone(),
@@ -1094,7 +1089,7 @@ pub async fn plan_for_task_status(
             let approver = context.get("approved_by").and_then(Value::as_str).and_then(|s| s.parse::<EntityId>().ok());
             planned.push(match approver {
                 Some(approver) => review(approver, Why::Approver),
-                None => review(task.created_by()?.into(), Why::Creator),
+                None => review(task.created_by()?, Why::Creator),
             });
         }
     }
@@ -1214,7 +1209,7 @@ async fn open_threads(graph: &ProjectGraph, highlight: EntityId, step: EntityId)
 /// the project's, whom it asks.
 async fn open_thread(
     graph: &ProjectGraph,
-    principals: &[PrincipalView],
+    principals: &[(RoleView, PrincipalView)],
     m: &MessageView,
     step: EntityId,
 ) -> Result<Option<OpenThread>> {
@@ -1223,9 +1218,9 @@ async fn open_thread(
     if !opens || m.status()? != MessageStatus::Active {
         return Ok(None);
     }
-    let mut writers = vec![EntityId::from(m.author()?)];
+    let mut writers = vec![m.author()?];
     for reply in ops::messages_about(graph, "thread", m.id()).await? {
-        writers.push(reply.author()?.into());
+        writers.push(reply.author()?);
     }
     let asks = asked_of(graph, principals, &mc).await?.map(|a| a.recipient());
     Ok(Some(OpenThread { message: m.id(), writers, asks, at: m.created()?, priority: m.priority()? }))
@@ -1251,7 +1246,7 @@ pub async fn plan_for_relation(graph: &ProjectGraph, rel: &RelationView) -> Resu
     if kind == RelationKind::Mention {
         return plan_for_edited_mention(graph, rel).await;
     }
-    let creator: EntityId = rel.created_by()?.into();
+    let creator: EntityId = rel.created_by()?;
     let originator = json!({"actor_id": creator.to_base64(), "relation_id": rel.id().to_base64()});
     let mut planned = Vec::new();
     if status == RelationStatus::Proposed {
@@ -1271,7 +1266,7 @@ pub async fn plan_for_relation(graph: &ProjectGraph, rel: &RelationView) -> Resu
             let step = rel.from_id()?;
             let item = BatchItem::Step { relation: rel.id(), step, at: rel.created()? };
             let threads = open_threads(graph, step, rel.id()).await?;
-            for party in [Some(EntityId::from(t.created_by()?)), ops::assignee_of(&t)?].into_iter().flatten() {
+            for party in [Some(t.created_by()?), ops::assignee_of(&t)?].into_iter().flatten() {
                 let mut batch = Batch::of_one(task, item);
                 let mut priority = Priority::Next;
                 if !threads.is_empty() {
@@ -1343,7 +1338,7 @@ async fn plan_for_edited_mention(graph: &ProjectGraph, rel: &RelationView) -> Re
     }
     let message = rel.from_id()?;
     let Ok(msg) = graph.get::<MessageView>(message).await else { return Ok(vec![]) };
-    let Followed::Held { record: named, .. } = graph.follow::<PrincipalView>(rel.to_id()?).await? else {
+    let Followed::Held { record: named, .. } = graph.follow::<RoleView>(rel.to_id()?).await? else {
         return Ok(vec![]);
     };
     let place = |r: &RelationView| (r.created().unwrap_or(0), ops::mention_ordinal(r));
@@ -1358,7 +1353,7 @@ async fn plan_for_edited_mention(graph: &ProjectGraph, rel: &RelationView) -> Re
     if named_before || told_of(graph, reader, message).await? {
         return Ok(vec![]);
     }
-    let editor: EntityId = rel.created_by()?.into();
+    let editor: EntityId = rel.created_by()?;
     let mut originator = message_originator(&msg, &ops::MessageContext::from_view(&msg)?)?;
     originator["actor_id"] = json!(editor.to_base64());
     let mentioned = Planned::new(
@@ -1403,7 +1398,7 @@ async fn told_messages(graph: &ProjectGraph, recipient: EntityId) -> Result<Hash
 /// else the one that serves the whole project, and the project's people, who may accept or reject
 /// it; never its author. A ruling recorded as given notifies no one.
 pub async fn plan_for_decision_created(graph: &ProjectGraph, decision: &DecisionView) -> Result<Vec<Planned>> {
-    let author: EntityId = decision.author()?.into();
+    let author: EntityId = decision.author()?;
     if decision.status()? != DecisionStatus::Proposed {
         return Ok(vec![]);
     }

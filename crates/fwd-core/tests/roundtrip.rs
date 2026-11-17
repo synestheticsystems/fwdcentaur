@@ -41,23 +41,22 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
         .await?
         .id();
 
+    // A principal is the Commons' model, with fwd's role in its project beside it, which names it.
     let daniel = trx
-        .create(&Principal {
+        .create(&Role {
             project: Ref::new(project),
-            kind: PrincipalKind::Human,
-            handle: "dnorman".into(),
-            display_name: "Daniel Norman".into(),
-            auth_subject: Some("github:1234".into()),
             agent_role: None,
-            active: true,
             member: Some(true),
-            subject: None,
             succeeded_by: None,
             serves: None,
             last_active: None,
         })
-        .await?
-        .id();
+        .await?;
+    let identity = ctx.resolve_model_id::<Principal>().await?;
+    let record = Mutable::entity(&*daniel);
+    Principal { kind: PrincipalKind::Human, handle: "dnorman".into(), display_name: "Daniel Norman".into() }
+        .initialize_new_entity(record, identity, record.system_epoch())?;
+    let daniel = daniel.id();
 
     // A repository is the Commons' model, which names no project, placed in one by `Placement`.
     let repo = trx
@@ -81,7 +80,7 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
             context: Json::new(serde_json::json!({"repo_id": repo.to_base64(), "branch": "feat/inbox"})),
             started: Some(now),
             ended: None,
-            created_by: Ref::new(daniel),
+            created_by: daniel,
             created: now,
         })
         .await?
@@ -101,7 +100,7 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
         priority: Some(1),
         labels: Json::new(serde_json::json!(["daemon"])),
         context: Json::new(serde_json::json!({"scope_id": scope.to_base64()})),
-        created_by: Ref::new(daniel),
+        created_by: daniel,
         created: now,
         updated: now,
         closed: None,
@@ -117,7 +116,7 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
             from_id: t_retry,
             to_id: t_ws,
             status: RelationStatus::Accepted,
-            created_by: Ref::new(daniel),
+            created_by: daniel,
             created: now,
             via: Json::new(serde_json::json!({"actor_id": daniel.to_base64()})),
             note: None,
@@ -154,7 +153,7 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
                 serde_json::json!([{"basis_lines": [120, 134], "head_lines": [120, 134], "index_lines": [120, 134]}]),
             ),
             symbol_path: None,
-            created_by: Ref::new(daniel),
+            created_by: daniel,
             created: now,
         })
         .await?
@@ -163,7 +162,7 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
     let message = trx
         .create(&Message {
             project: Ref::new(project),
-            author: Ref::new(daniel),
+            author: daniel,
             created: now,
             content: "Back off, don't hammer the server on reconnect.".into(),
             priority: Priority::Next,
@@ -186,7 +185,7 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
     let notification = trx
         .create(&Notification {
             project: Ref::new(project),
-            recipient: Ref::new(daniel),
+            recipient: daniel,
             notification_type: NotificationType::CodeCommented,
             status: NotificationStatus::Unread,
             priority: Priority::Next,
@@ -210,8 +209,8 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
         context: "Agents reconnect in a tight loop.".into(),
         decision: "Double the delay up to 30s.".into(),
         consequences: "A dropped laptop rejoins within 30s.".into(),
-        author: Ref::new(daniel),
-        decided_by: Some(Ref::new(daniel)),
+        author: daniel,
+        decided_by: Some(daniel),
         created: now,
         decided: Some(now),
         closed_by: None,
@@ -256,7 +255,7 @@ async fn models_round_trip_through_sqlite() -> Result<()> {
     assert_eq!(t_retry.why()?, "Laptops behind NAT drop; agents lose inbox delivery");
     let scope: ScopeView = ctx.get(ids.scope).await?;
     assert_eq!(scope.status()?, ScopeStatus::Active);
-    assert_eq!(EntityId::from(scope.created_by()?), ids.daniel);
+    assert_eq!(scope.created_by()?, ids.daniel);
 
     // Status predicates use the stored snake_case names.
     let proposed: Vec<TaskView> = ctx.fetch("status = 'proposed'").await?;
@@ -300,7 +299,7 @@ async fn models_round_trip_through_sqlite() -> Result<()> {
     assert_eq!(tasks.len(), 2);
     assert!(tasks.iter().all(|t| t.project().map(EntityId::from).ok() == Some(ids.project)));
     for named in [
-        ctx.fetch::<PrincipalView>(in_project("handle = 'dnorman'")?).await?.len(),
+        ctx.fetch::<(RoleView, PrincipalView)>(in_project("handle = 'dnorman'")?).await?.len(),
         ctx.fetch::<(PlacementView, RepositoryView)>(in_project("default_branch = 'main'")?).await?.len(),
         ctx.fetch::<ScopeView>(in_project("created > 0")?).await?.len(),
         ctx.fetch::<RelationView>(in_project("created > 0")?).await?.len(),

@@ -301,8 +301,8 @@ async fn the_text_is_the_same_byte_for_byte_while_what_it_shows_is_unchanged() -
     one_of_each(&s)?;
     let client = s.client(&s.alpha).await?;
     let graph = &client.graph;
-    let tester = naming::principal_named(graph, "tester", None).await?.ok_or_else(|| anyhow!("no tester"))?.id();
-    let agent = naming::principal_named(graph, "impl-sam", None).await?.ok_or_else(|| anyhow!("no impl-sam"))?.id();
+    let tester = naming::principal_named(graph, "tester", None).await?.ok_or_else(|| anyhow!("no tester"))?.0.id();
+    let agent = naming::principal_named(graph, "impl-sam", None).await?.ok_or_else(|| anyhow!("no impl-sam"))?.0.id();
     let at = 1_790_000_000_000;
     let trx = graph.begin();
     let (mut tied_tasks, mut tied_notes) = (Vec::new(), Vec::new());
@@ -321,7 +321,7 @@ async fn the_text_is_the_same_byte_for_byte_while_what_it_shows_is_unchanged() -
             priority: None,
             labels: Json::new(json!([])),
             context: Json::new(json!({})),
-            created_by: Ref::new(tester),
+            created_by: tester,
             created: at,
             updated: at,
             closed: None,
@@ -330,7 +330,7 @@ async fn the_text_is_the_same_byte_for_byte_while_what_it_shows_is_unchanged() -
         tied_tasks.push(trx.create(&task).await?.id());
         let note = Notification {
             project: graph.project(),
-            recipient: Ref::new(agent),
+            recipient: agent,
             notification_type: NotificationType::TaskProposed,
             status: NotificationStatus::Unread,
             priority: Priority::Later,
@@ -581,7 +581,7 @@ async fn the_deadline_ends_the_command_while_its_answer_waits_to_be_read() -> Re
     let client = s.client(&s.alpha).await?;
     let graph = &client.graph;
     let named = |handle: &'static str| async move {
-        naming::principal_named(graph, handle, None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no {handle}"))
+        naming::principal_named(graph, handle, None).await?.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no {handle}"))
     };
     let (tester, agent) = (named("tester").await?, named("impl-sam").await?);
     let trx = graph.begin();
@@ -596,11 +596,11 @@ async fn the_deadline_ends_the_command_while_its_answer_waits_to_be_read() -> Re
             needs_review: false,
             hold: None,
             not_before: None,
-            assignee: Some(Ref::new(agent)),
+            assignee: Some(agent),
             priority: None,
             labels: Json::new(json!([])),
             context: Json::new(json!({})),
-            created_by: Ref::new(tester),
+            created_by: tester,
             created: n,
             updated: n,
             closed: None,
@@ -645,7 +645,7 @@ async fn a_question_asked_by_name_is_found_however_the_name_is_written() -> Resu
     s.json(&s.alpha, Some("main"), &["principal", "rename", name])?;
     let client = s.client(&s.alpha).await?;
     let graph = &client.graph;
-    let tester = naming::principal_named(graph, "tester", None).await?.ok_or_else(|| anyhow!("no tester"))?.id();
+    let tester = naming::principal_named(graph, "tester", None).await?.ok_or_else(|| anyhow!("no tester"))?.0.id();
     let mut asked = Vec::new();
     for (to, text) in [(name.to_string(), "is the retry done?"), (format!("@{name}"), "and the backoff?")] {
         let by_name = fwd_core::ops::MessageContext { to: Some(to), ..Default::default() };
@@ -790,7 +790,7 @@ async fn sparse_records_prime_as_they_did() -> Result<()> {
     let client = s.client(&s.alpha).await?;
     let graph = &client.graph;
     let named = |handle: &'static str| async move {
-        naming::principal_named(graph, handle, None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no {handle}"))
+        naming::principal_named(graph, handle, None).await?.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no {handle}"))
     };
     let (tester, agent) = (named("tester").await?, named("impl-sam").await?);
     let to_agent = fwd_core::ops::MessageContext { to: Some(agent.to_base64()), ..Default::default() };
@@ -915,8 +915,10 @@ async fn an_assignment_that_cannot_be_followed_is_counted_and_the_rest_printed()
     s.json(&s.alpha, Some("main"), &["intention", "assign", &ours.to_base64()])?;
     let client = s.client(&s.alpha).await?;
     let graph = &client.graph;
-    let agent =
-        naming::principal_named(graph, "impl-sam", None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no agent"))?;
+    let agent = naming::principal_named(graph, "impl-sam", None)
+        .await?
+        .map(|(p, _)| p.id())
+        .ok_or_else(|| anyhow!("no agent"))?;
     let gone = EntityId::from_bytes([0; 32]);
     let trx = graph.begin();
     trx.create(&Relation {
@@ -925,7 +927,7 @@ async fn an_assignment_that_cannot_be_followed_is_counted_and_the_rest_printed()
         from_id: gone,
         to_id: agent,
         status: RelationStatus::Accepted,
-        created_by: Ref::new(agent),
+        created_by: agent,
         created: 1,
         via: Json::new(json!({})),
         note: None,

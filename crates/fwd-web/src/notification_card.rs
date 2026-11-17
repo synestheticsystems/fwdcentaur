@@ -160,7 +160,7 @@ pub struct StoreNames;
 
 impl Names for StoreNames {
     fn handle(&self, principal: EntityId) -> Option<String> {
-        store::principal(principal).map(|p| store::named(p.handle().unwrap_or_default(), &p))
+        store::principal(principal).map(|(role, p)| store::named(p.handle().unwrap_or_default(), &role))
     }
     fn task_title(&self, id: EntityId) -> Option<String> {
         store::task(id).map(|t| store::named(t.title().unwrap_or_default(), &t))
@@ -257,7 +257,7 @@ fn batch_view(batch: Batch) -> AnyView {
 /// that recipient (`reason::reply_id`), then when and how urgent; and beneath it, for a batch, the
 /// items it holds.
 fn reason_line(me: EntityId, reader: EntityId, n: &NotificationView) -> AnyView {
-    let reply = n.recipient().ok().and_then(|recipient| reason::reply_id(n.id(), recipient.into(), Some(reader)));
+    let reply = n.recipient().ok().and_then(|recipient| reason::reply_id(n.id(), recipient, Some(reader)));
     let t = n.notification_type().ok();
     let target: Value = n.target().map(Into::into).unwrap_or(Value::Null);
     let originator: Value = n.originator().map(Into::into).unwrap_or(Value::Null);

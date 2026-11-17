@@ -27,24 +27,20 @@ async fn project() -> Result<ProjectGraph> {
 /// forbids a second principal a name, and `fwd principal add` names the one it finds.
 async fn made(graph: &ProjectGraph, handle: &str, kind: PrincipalKind, role: Option<AgentRole>) -> Result<EntityId> {
     let trx = graph.begin();
-    let id = trx
-        .create(&Principal {
+    let made = trx
+        .create(&Role {
             project: graph.project(),
-            kind,
-            handle: handle.into(),
-            display_name: handle.into(),
-            auth_subject: None,
             agent_role: role,
-            active: true,
             member: Some(true),
-            subject: None,
             succeeded_by: None,
             serves: None,
             // Stamped as `fwd principal add` stamps the agent it names.
             last_active: Some(fwd_core::now_ms()),
         })
-        .await?
-        .id();
+        .await?;
+    let record = ankurah::model::Mutable::entity(&*made);
+    trx.add(record, &Principal { kind, handle: handle.into(), display_name: handle.into() }).await?;
+    let id = record.id();
     trx.commit().await?;
     Ok(id)
 }
@@ -55,7 +51,7 @@ fn short(id: EntityId) -> String {
 }
 
 /// The refusal a name met, as its sentence.
-fn refused(result: Result<Option<PrincipalView>>) -> String {
+fn refused(result: Result<Option<(RoleView, PrincipalView)>>) -> String {
     let e = result.expect_err("a name several principals share is refused");
     e.downcast_ref::<Refused>().map(|r| r.0.clone()).unwrap_or_else(|| panic!("not a refusal of a shared name: {e:#}"))
 }
@@ -67,7 +63,7 @@ fn two(a: (EntityId, &str), b: (EntityId, &str)) -> String {
 }
 
 async fn named(graph: &ProjectGraph, name: &str) -> Result<Option<EntityId>> {
-    Ok(naming::principal_named(graph, name, None).await?.map(|p| p.id()))
+    Ok(naming::principal_named(graph, name, None).await?.map(|(p, _)| p.id()))
 }
 
 #[tokio::test]
@@ -106,14 +102,14 @@ async fn a_name_one_principal_has_names_it_as_its_id_does() -> Result<()> {
     let added = ops::add_principal(&graph, &short(alice), None, None, None, Some(daniel), None).await;
     assert_eq!(added.unwrap_err().to_string(), taken, "named by its id, it is still hers");
     assert_eq!(naming::by_name(&ops::principals(&graph).await?, "impl-alice", None).len(), 1, "no second");
-    assert_eq!(ops::role_of(&graph.get::<PrincipalView>(alice).await?), Some(AgentRole::Implementer), "nor a new role");
+    assert_eq!(ops::role_of(&graph.get::<RoleView>(alice).await?), Some(AgentRole::Implementer), "nor a new role");
     Ok(())
 }
 
 #[tokio::test]
 async fn a_name_no_principal_has_names_no_one_and_each_command_says_how_one_is_made() -> Result<()> {
     let graph = project().await?;
-    ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
+    let daniel = ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     assert_eq!(named(&graph, "nobody").await?, None);
     assert_eq!(named(&graph, "abc").await?, None, "too short to start an id");
     let principals = ops::principals(&graph).await?;
@@ -123,7 +119,7 @@ async fn a_name_no_principal_has_names_no_one_and_each_command_says_how_one_is_m
         "no principal of this project is named `nobody`: an agent names itself and selects its role at once, `fwd principal add nobody --role implementer`"
     );
     assert_eq!(
-        ops::retire_principal(&graph, "nobody").await.unwrap_err().to_string(),
+        ops::retire_principal(&graph, "nobody", daniel).await.unwrap_err().to_string(),
         "no one in this project has the handle `@nobody`"
     );
     assert_eq!(
@@ -173,7 +169,7 @@ async fn a_name_two_principals_share_is_refused_listing_each_by_id_role_and_the_
     // Every command refuses the name, and `principal add` makes no third principal of it.
     for refusal in [
         ops::set_role(&graph, "implementer", AgentRole::Implementer, None).await.unwrap_err(),
-        ops::retire_principal(&graph, "implementer").await.unwrap_err(),
+        ops::retire_principal(&graph, "implementer", daniel).await.unwrap_err(),
         ops::add_principal(&graph, "implementer", Some(AgentRole::Implementer), None, None, None, None)
             .await
             .unwrap_err(),
@@ -204,11 +200,11 @@ async fn a_name_two_principals_share_is_refused_listing_each_by_id_role_and_the_
     // The mention search offers the principals that belong whose name starts with what is typed,
     // and writes a shared name's mention by the start of the id, which posting reads back.
     let offered: Vec<EntityId> =
-        naming::mentionable(&principals, "IMPL", 8, fwd_core::now_ms()).iter().map(|p| p.id()).collect();
+        naming::mentionable(&principals, "IMPL", 8, fwd_core::now_ms()).iter().map(|(p, _)| p.id()).collect();
     let mut both = vec![one, other];
     both.sort();
     assert_eq!(offered, both, "without regard to case, by name, then by id");
-    let view = |id: EntityId| principals.iter().find(|p| p.id() == id).expect("a principal of the project");
+    let view = |id: EntityId| principals.iter().find(|(p, _)| p.id() == id).expect("a principal of the project");
     assert_eq!(naming::mention_of(&principals, view(other)), format!("@{}", short(other)));
     assert_eq!(naming::mention_of(&principals, view(daniel)), "@dnorman");
 
@@ -224,7 +220,7 @@ async fn a_retired_principal_is_named_still_and_counts_among_those_sharing_its_n
     let graph = project().await?;
     ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
     let old = ops::add_principal(&graph, "builder", Some(AgentRole::Implementer), None, None, None, None).await?;
-    ops::retire_principal(&graph, "builder").await?;
+    ops::retire_principal(&graph, "builder", old).await?;
     assert_eq!(named(&graph, "builder").await?, Some(old), "retired, it is still named");
     // Its name stays its own: another caller cannot bring it back, nor take the name.
     let taken = ops::add_principal(&graph, "builder", Some(AgentRole::Implementer), None, None, None, None).await;
@@ -236,12 +232,12 @@ async fn a_retired_principal_is_named_still_and_counts_among_those_sharing_its_n
         old,
         "principal add, acting as it, brings it back"
     );
-    ops::retire_principal(&graph, "builder").await?;
+    ops::retire_principal(&graph, "builder", old).await?;
 
     let new = made(&graph, "builder", PrincipalKind::Agent, Some(AgentRole::Implementer)).await?;
     let principals = ops::principals(&graph).await?;
     let offered: Vec<EntityId> =
-        naming::mentionable(&principals, "build", 8, fwd_core::now_ms()).iter().map(|p| p.id()).collect();
+        naming::mentionable(&principals, "build", 8, fwd_core::now_ms()).iter().map(|(p, _)| p.id()).collect();
     assert_eq!(offered, vec![new], "the mention search offers only principals that belong");
     assert_eq!(
         refused(naming::principal_named(&graph, "builder", None).await),
@@ -271,7 +267,7 @@ async fn a_person_and_an_agent_sharing_a_name_are_told_apart_only_where_a_comman
     // A ruling is a person's, and the CLI's own person is found among people.
     assert_eq!(ops::person_by_handle(&graph, "@dnorman").await?, person);
     assert_eq!(
-        naming::principal_named(&graph, "dnorman", Some(PrincipalKind::Human)).await?.map(|p| p.id()),
+        naming::principal_named(&graph, "dnorman", Some(PrincipalKind::Human)).await?.map(|(p, _)| p.id()),
         Some(person)
     );
     assert_eq!(ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?, person);
@@ -323,13 +319,14 @@ async fn an_agent_renames_itself_and_keeps_its_id_and_everything_that_refers_to_
     assert_eq!(ops::rename_principal(&graph, one, "@implementer-replication").await?, one);
     assert_eq!(named(&graph, "implementer-replication").await?, Some(one), "the new name names it");
     assert_eq!(named(&graph, "implementer").await?, Some(other), "and the old one names the other alone");
-    let renamed: PrincipalView = graph.get(one).await?;
+    let (role, renamed) = graph.principal(one).await?;
     assert_eq!(renamed.handle()?, "implementer-replication");
     assert_eq!(renamed.display_name()?, "implementer-replication", "the display name, which was the name, follows");
-    assert_eq!(ops::role_of(&renamed), Some(AgentRole::Implementer), "its role stays");
-    assert_eq!(renamed.subject()?.as_deref(), Some(subject), "and so does the agent bound to it");
-    assert_eq!(EntityId::from(graph.get::<TaskView>(task).await?.created_by()?), one);
-    assert_eq!(EntityId::from(graph.get::<MessageView>(said).await?.author()?), one);
+    assert_eq!(ops::role_of(&role), Some(AgentRole::Implementer), "its role stays");
+    let bound = fwd_core::subject::session_bound_to(&graph, one).await?;
+    assert_eq!(bound.as_deref(), Some(subject), "and so does the agent bound to it");
+    assert_eq!(graph.get::<TaskView>(task).await?.created_by()?, one);
+    assert_eq!(graph.get::<MessageView>(said).await?.author()?, one);
     let unread: Vec<EntityId> = ops::inbox(&graph, one, true).await?.iter().map(|n| n.id()).collect();
     assert_eq!(unread, vec![waiting], "its inbox is its own still");
     let content = graph.get::<MessageView>(mention).await?.content()?;
@@ -340,7 +337,7 @@ async fn an_agent_renames_itself_and_keeps_its_id_and_everything_that_refers_to_
 
     // A display name given apart from the name stays.
     ops::rename_principal(&graph, alice, "impl-alice-2").await?;
-    assert_eq!(graph.get::<PrincipalView>(alice).await?.display_name()?, "Alice");
+    assert_eq!(graph.principal(alice).await?.1.display_name()?, "Alice");
 
     // A name another principal has is refused, listing it, and so is one that names another by
     // its id; the name stays as it was.
@@ -375,6 +372,6 @@ async fn an_agent_renames_itself_and_keeps_its_id_and_everything_that_refers_to_
         "`@dnorman` is a person, whose name is the handle `fwd init` recorded on this machine, by which every command finds them: `fwd principal rename` renames the agent the command acts as"
     );
     assert_eq!(refusal(ops::rename_principal(&graph, alice, " @ ").await), "a name cannot be blank");
-    assert_eq!(graph.get::<PrincipalView>(alice).await?.handle()?, "impl-alice-2");
+    assert_eq!(graph.principal(alice).await?.1.handle()?, "impl-alice-2");
     Ok(())
 }

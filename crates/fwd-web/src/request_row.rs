@@ -349,7 +349,7 @@ fn title(kind: Kind, subject: EntityId) -> AnyView {
             let Some(m) = store::message(subject) else {
                 return view! { <span class="muted">{empty::absent(subject, Some(Model::Message))}</span> }.into_any();
             };
-            let asker = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+            let asker = m.author().ok().map(store::handle_of).unwrap_or_default();
             let text = references::plain(&ops::text(m.content()).unwrap_or_default());
             view! { <span class="who">{asker}</span> " " {first_line(&text, 200)} }.into_any()
         })
@@ -413,7 +413,7 @@ fn meta(kind: Kind, subject: EntityId, sender: Option<EntityId>, at: Memo<i64>, 
         .into_any(),
         Kind::Ruling => (move || {
             let d = store::decision(subject)?;
-            let proposer = d.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+            let proposer = d.author().ok().map(store::handle_of).unwrap_or_default();
             let area = d.area().ok().flatten().map(|a| format!("{a} · "));
             let governs = match ops::governs(&d).ok().flatten() {
                 Some(scope) => lozenges::single(Target::Scope(scope)),
@@ -434,7 +434,7 @@ fn meta(kind: Kind, subject: EntityId, sender: Option<EntityId>, at: Memo<i64>, 
         .into_any(),
         Kind::Proposal => (move || {
             let t = store::task(subject)?;
-            let by = t.created_by().ok().map(|p| store::handle_of(EntityId::from(p))).unwrap_or_default();
+            let by = t.created_by().ok().map(store::handle_of).unwrap_or_default();
             let why = first_line(&ops::text(t.why()).unwrap_or_default(), 120);
             let why = (!why.is_empty()).then(|| view! { <span class="request-quote">{why}</span> " · " });
             Some(view! { "proposed by " {by} " · " {why} })
@@ -860,7 +860,7 @@ pub fn RequestRow(
     // drawn again only when it opens or closes, so it keeps the keyboard while the question changes.
     let asker = Memo::new(move |_| {
         (kind == Kind::Question)
-            .then(|| store::message(subject).and_then(|m| m.author().ok()).map(|a| store::handle_of(EntityId::from(a))))
+            .then(|| store::message(subject).and_then(|m| m.author().ok()).map(store::handle_of))
             .flatten()
             .unwrap_or_default()
     });
@@ -1003,7 +1003,7 @@ pub fn RequestRow(
         let originator: Value = n.originator().ok()?.into();
         let line = match id_at(&originator["message_id"]).and_then(store::message) {
             Some(m) => {
-                let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+                let author = m.author().ok().map(store::handle_of).unwrap_or_default();
                 let text = first_line(&references::plain(&ops::text(m.content()).unwrap_or_default()), 200);
                 view! { <span class="who">{author}</span> " " {text} }.into_any()
             }

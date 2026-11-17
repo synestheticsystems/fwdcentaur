@@ -188,7 +188,7 @@ pub fn TaskAssignee(task: EntityId) -> impl IntoView {
     let offered =
         Memo::new(move |_| store::principal_groups(None).into_iter().flat_map(|g| g.members).collect::<Vec<_>>());
     let take = Callback::new(move |()| {
-        let named = |name: &str| store::principal_named(name).map(|p| p.map(|p| p.id()));
+        let named = |name: &str| store::principal_named(name).map(|p| p.map(|(role, _)| role.id()));
         match assign_to(&typed.get_untracked(), &offered.get_untracked(), named) {
             Ok(None) => close.run(()),
             Ok(Some(chosen)) => {

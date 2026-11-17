@@ -317,7 +317,7 @@ impl FrontLines {
     fn now() -> FrontLines {
         let principals = store::principals();
         let mut scopes = HashMap::new();
-        for p in principals.iter().filter(|p| ops::holds(p, AgentRole::Triage)) {
+        for (p, _) in principals.iter().filter(|(p, _)| ops::holds(p, AgentRole::Triage)) {
             for scope in ops::Serving::of(p).scopes {
                 if let Some(f) = ops::front_line(&principals, Some(scope)) {
                     scopes.insert(scope, f.agent);

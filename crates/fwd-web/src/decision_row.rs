@@ -127,8 +127,8 @@ pub fn closing_section(id: EntityId) -> impl IntoView {
 
 /// Who ruled on a decision and when, or who proposed it: "decided by dnorman, 2026-09-24".
 pub fn ruled(d: &DecisionView) -> String {
-    let author = d.author().ok().map(EntityId::from);
-    let decider = d.decided_by().ok().flatten().map(EntityId::from);
+    let author = d.author().ok();
+    let decider = d.decided_by().ok().flatten();
     let name = |p: Option<EntityId>| p.map(store::handle_of).unwrap_or_default();
     let day = d.decided().ok().flatten().or(d.created().ok()).map(decision_log::date).unwrap_or_default();
     match (d.status().ok(), decider) {

@@ -14,6 +14,7 @@ use ankurah::core::livequery::EntityLiveQuery;
 use ankurah::signals::{Listener, ListenerGuard, Signal};
 use ankurah::{EntityId, LiveQuery};
 use ankurah_commons::cognition::IntentionView;
+use ankurah_commons::identity::IdentityBindingView;
 use ankurah_commons::text::QuotationView;
 use anyhow::Result;
 
@@ -22,9 +23,13 @@ use anyhow::Result;
 pub enum LiveRead {
     /// Every project of the node, which a project made joins.
     Projects,
-    /// The principals of a project bound to an agent of a Claude Code session: one that names
-    /// itself, retires, is renamed or selects another role ([`subject::of_session_selection`]).
-    SessionPrincipals { project: ProjectRecord, session: String },
+    /// The identity bindings of a project of the agents of a Claude Code session: an agent that
+    /// names itself, or one unbound ([`subject::of_session_selection`]).
+    SessionBindings { project: ProjectRecord, session: String },
+    /// A principal bound to an agent of the session, wherever it is: renamed, retired, or given
+    /// another role, each of which a component of its own records, since a change to any
+    /// component of the entity changes the query's result.
+    Principal(EntityId),
     /// The tasks assigned to a principal that are not finished, wherever they are.
     TasksAssignedTo(EntityId),
     /// The open questions a principal asked, wherever they are.
@@ -75,10 +80,12 @@ impl LiveRead {
     pub fn listen(&self, graph: &ProjectGraph, listener: Listener) -> Result<Listening> {
         Ok(match self {
             LiveRead::Projects => listening(graph.query_projects()?, listener),
-            LiveRead::SessionPrincipals { project, session } => {
+            LiveRead::SessionBindings { project, session } => {
                 let bound = subject::of_session_selection(session)?;
-                listening(graph.graph_of_project(project).query::<PrincipalView>(bound)?, listener)
+                let there = graph.graph_of_project(project);
+                listening(there.query_placed_matching::<IdentityBindingView>(bound)?, listener)
             }
+            LiveRead::Principal(principal) => listening(graph.query_placed::<RoleView>(*principal)?, listener),
             LiveRead::TasksAssignedTo(principal) => {
                 listening(graph.query_unfinished_tasks_assigned_to(*principal)?, listener)
             }
@@ -107,8 +114,8 @@ impl LiveRead {
     }
 }
 
-fn listening<V: ankurah::model::View + Clone + Send + Sync + 'static>(
-    query: LiveQuery<V>,
+fn listening<R: ankurah::model::ComponentViews + Clone + Send + Sync + 'static>(
+    query: LiveQuery<R>,
     listener: Listener,
 ) -> Listening {
     Listening { _listener: query.listen(listener), query: query.into() }

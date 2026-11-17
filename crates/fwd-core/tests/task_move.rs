@@ -238,7 +238,7 @@ async fn a_moved_task_takes_what_belongs_to_it_and_leaves_what_does_not() -> Res
     assert_eq!(project_of::<DecisionView>(&t, f.decision).await?, "alpha");
     assert_eq!(project_of::<ScopeView>(&t, t.inbox).await?, "alpha");
     assert_eq!(project_of::<NotificationView>(&t, f.notification).await?, "alpha");
-    assert_eq!(project_of::<PrincipalView>(&t, t.alice).await?, "alpha");
+    assert_eq!(project_of::<RoleView>(&t, t.alice).await?, "alpha");
 
     let left = t.beta.relation(f.in_inbox).await?;
     assert_eq!(left.status()?, RelationStatus::Retracted);
@@ -246,7 +246,7 @@ async fn a_moved_task_takes_what_belongs_to_it_and_leaves_what_does_not() -> Res
     let comment: MessageView = t.beta.get(moved.comment.expect("the move's comment")).await?;
     assert_eq!(ops::text(comment.content())?, "Moved from alpha to beta: it is beta's work");
     assert_eq!(comment.task()?.map(EntityId::from), Some(f.task));
-    assert_eq!(EntityId::from(comment.author()?), t.daniel, "by the mover, alpha's principal");
+    assert_eq!(comment.author()?, t.daniel, "by the mover, alpha's principal");
     let comments = ops::messages_about(&t.beta, "task", f.task).await?;
     assert_eq!(comments.len(), 4, "the move wrote one comment beside the three");
     Ok(())
@@ -318,10 +318,10 @@ async fn the_principals_a_moved_task_names_stay_alphas_and_are_named_with_alpha(
     assert_eq!(ops::assignee_of(&moving)?, Some(t.alice));
     assert_eq!(ops::handle_of(&t.beta, t.alice).await?, "impl-alice in alpha");
     let comment: MessageView = t.beta.get(f.comment).await?;
-    assert_eq!(EntityId::from(comment.author()?), t.daniel);
-    assert_eq!(EntityId::from(t.beta.relation(f.depends_on).await?.created_by()?), t.daniel);
+    assert_eq!(comment.author()?, t.daniel);
+    assert_eq!(t.beta.relation(f.depends_on).await?.created_by()?, t.daniel);
     let record: MessageView = t.beta.get(moved.comment.expect("the move's comment")).await?;
-    assert_eq!(EntityId::from(record.author()?), t.daniel);
+    assert_eq!(record.author()?, t.daniel);
     assert_eq!(ops::handle_of(&t.beta, t.daniel).await?, "dnorman in alpha", "not beta's dnorman");
     assert_ne!(t.daniel, t.their_daniel);
     Ok(())

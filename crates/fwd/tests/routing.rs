@@ -6,10 +6,12 @@
 
 mod common;
 
+use ankurah::ankql::ast::{Parsed, Selection};
 use ankurah::changes::ChangeSet;
 use ankurah::signals::Subscribe;
 use ankurah::EntityId;
 use anyhow::{anyhow, Result};
+use fwd_core::conversion::principals::{self, before_d261};
 use fwd_core::daemon::{self, Autostart};
 use fwd_core::model::*;
 use fwd_core::ops::{self, CreateTask, MessageContext};
@@ -107,7 +109,12 @@ struct Arrivals {
 
 impl Arrivals {
     fn of(graph: &ProjectGraph, recipient: EntityId) -> Result<Arrivals> {
-        let query = graph.query::<NotificationView>(with_id("recipient = ?", recipient)?)?;
+        Arrivals::selected(graph, with_id("recipient = ?", recipient)?)
+    }
+
+    /// The notifications of `graph`'s project that `selection` selects, whoever they are for.
+    fn selected(graph: &ProjectGraph, selection: Selection<Parsed>) -> Result<Arrivals> {
+        let query = graph.query::<NotificationView>(selection)?;
         let (tx, arrived) = mpsc::unbounded_channel();
         let _guard = query.subscribe(move |changes: ChangeSet<NotificationView>| {
             for n in changes.added() {
@@ -205,5 +212,120 @@ async fn one_service_for_two_projects_tells_each_recipient_of_a_write_once_in_it
     let log = std::fs::read_to_string(paths.log_path())?;
     assert_eq!(log.matches("hosting project").count(), 2, "{log}");
     assert_eq!(log.matches("routing service started").count(), 1, "one service for both projects:\n{log}");
+    Ok(())
+}
+
+/// A daemon hosting one project, alpha, that this test's client reaches; and the client.
+async fn alpha(dir: &common::Scratch) -> Result<daemon::Client> {
+    let paths = dir.paths("run", "data");
+    let root = dir.path().join("alpha");
+    std::fs::create_dir_all(&root)?;
+    let ws =
+        project::init(&paths, &root, project::InitOptions { name: Some("alpha"), ..Default::default() })?.0.project;
+    let spawn = Autostart::Spawn { daemon_bin: PathBuf::from(env!("CARGO_BIN_EXE_fwd")) };
+    daemon::ensure_daemon(&paths, &ws, spawn).await
+}
+
+/// A principal of `kind` named `handle` that the build before the move onto the Commons wrote,
+/// holding `role` and serving what `serves` says.
+async fn written_before(
+    graph: &ProjectGraph,
+    kind: PrincipalKind,
+    handle: &str,
+    role: Option<AgentRole>,
+    serves: Option<serde_json::Value>,
+) -> Result<EntityId> {
+    let trx = graph.begin();
+    let made = trx
+        .create(&before_d261::Principal {
+            project: graph.project(),
+            kind,
+            handle: handle.into(),
+            display_name: handle.into(),
+            auth_subject: None,
+            agent_role: role,
+            active: true,
+            member: Some(true),
+            subject: None,
+            succeeded_by: None,
+            serves: serves.map(|s| s.to_string()),
+            last_active: None,
+        })
+        .await?
+        .id();
+    trx.commit().await?;
+    Ok(made)
+}
+
+/// A triage agent that `fwd admin migrate` moves onto the Commons while the daemon runs is known to
+/// routing as it was, and told nothing: the question asked of the project while the daemon read no
+/// principal waits as it did, although the moved agent serves the whole project. The daemon applies
+/// one client's commits in their order, and routing handles what its standing queries hear in that
+/// order, so once the person has been told of a question the agent asked after the move, routing
+/// has handled the move.
+#[tokio::test]
+async fn a_triage_agent_moved_while_the_daemon_runs_is_told_nothing() -> Result<()> {
+    let dir = common::Scratch::new()?;
+    let client = alpha(&dir).await?;
+    let graph = &client.graph;
+    let person = written_before(graph, PrincipalKind::Human, "ines", None, None).await?;
+    let project_wide = Some(serde_json::json!({"project_wide": true}));
+    let triage =
+        written_before(graph, PrincipalKind::Agent, "triage-reef", Some(AgentRole::Triage), project_wide).await?;
+    let asking = MessageContext { asks_project: true, ..Default::default() };
+    ops::post_message(graph, person, "who takes the retry work?", Priority::Now, asking).await?;
+    let mut hers = Arrivals::of(graph, person)?;
+
+    principals::convert(graph).await?;
+    assert_eq!(ops::triage_for(graph, None).await?.map(|f| f.agent), Some(triage), "it serves the whole project");
+    let to_her = MessageContext { to: Some(person.to_base64()), ..Default::default() };
+    let after = ops::post_message(graph, triage, "is the retry work ready?", Priority::Next, to_her).await?;
+    hers.until(NotificationType::QuestionAsked, Some(after)).await?;
+    assert_eq!(held(graph, triage).await?, vec![], "the move told it nothing");
+    Ok(())
+}
+
+/// A triage agent made while the daemon runs is told of the question asked of the project that
+/// waited for one, as before the move onto the Commons.
+#[tokio::test]
+async fn a_triage_agent_made_while_the_daemon_runs_is_told_of_the_waiting_question() -> Result<()> {
+    let dir = common::Scratch::new()?;
+    let client = alpha(&dir).await?;
+    let graph = &client.graph;
+    let person = ops::ensure_principal(graph, "ines", "Ines", PrincipalKind::Human, None).await?;
+    let asking = MessageContext { asks_project: true, ..Default::default() };
+    let waiting = ops::post_message(graph, person, "who takes the retry work?", Priority::Now, asking).await?;
+    let mut asked =
+        Arrivals::selected(graph, with_id("notification_type = 'question_asked' AND recipient != ?", person)?)?;
+
+    let serves = Some(ops::Serves::ProjectWide);
+    let triage = ops::add_principal(graph, "triage-reef", Some(AgentRole::Triage), serves, None, None, None).await?;
+    asked.until(NotificationType::QuestionAsked, Some(waiting)).await?;
+    assert_eq!(held(graph, triage).await?, vec![NotificationType::QuestionAsked]);
+    Ok(())
+}
+
+/// A triage agent made as the first thing a restarted daemon routes, before routing has read any
+/// principal, is told of the question asked of the project that waited for one: routing reads
+/// whether a principal is retired off its role from its first event.
+#[tokio::test]
+async fn a_triage_agent_made_first_after_a_restart_is_told_of_the_waiting_question() -> Result<()> {
+    let dir = common::Scratch::new()?;
+    let client = alpha(&dir).await?;
+    let person = ops::ensure_principal(&client.graph, "ines", "Ines", PrincipalKind::Human, None).await?;
+    let asking = MessageContext { asks_project: true, ..Default::default() };
+    let waiting = ops::post_message(&client.graph, person, "who takes the retry work?", Priority::Now, asking).await?;
+    drop(client);
+    let paths = dir.paths("run", "data");
+    assert!(daemon::stop(&paths).await?);
+    let client = alpha(&dir).await?;
+    let graph = &client.graph;
+    let mut asked =
+        Arrivals::selected(graph, with_id("notification_type = 'question_asked' AND recipient != ?", person)?)?;
+
+    let serves = Some(ops::Serves::ProjectWide);
+    let triage = ops::add_principal(graph, "triage-reef", Some(AgentRole::Triage), serves, None, None, None).await?;
+    asked.until(NotificationType::QuestionAsked, Some(waiting)).await?;
+    assert_eq!(held(graph, triage).await?, vec![NotificationType::QuestionAsked]);
     Ok(())
 }

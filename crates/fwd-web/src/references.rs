@@ -83,7 +83,7 @@ pub fn resolve<I>(text: &str, id: impl Fn(&str) -> Option<I>, handle: impl Fn(&s
 /// project has it too (`fwd_core::naming::by_name`).
 fn resolved(text: &str) -> Vec<Drawn<EntityId>> {
     let handle = |name: &str| match fwd_core::naming::by_name(&store::principals(), name, None).as_slice() {
-        [one] => Some(one.id()),
+        [(one, _)] => Some(one.id()),
         _ => None,
     };
     resolve(text, |inner| inner.parse::<EntityId>().ok().map(store::current), handle)

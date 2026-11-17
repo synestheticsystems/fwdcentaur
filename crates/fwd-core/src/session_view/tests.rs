@@ -477,8 +477,8 @@ fn every_string_is_capped_and_the_whole_document_stays_within_the_budget() {
     assert!(group.sections[0].records[0].title.chars().count() <= TITLE_LIMIT);
 }
 
-/// What the view listens to: the projects, every project's principals of the session, each
-/// principal's working set, the thread of each question that asks the person, answered or not, the
+/// What the view listens to: the projects, every project's bindings of the session's agents, each
+/// principal bound and its working set, the thread of each question that asks the person, answered or not, the
 /// intentions assigned to the principal of the session's own thread, each of those intentions, one
 /// that could not be read included, with the relations that join its quotations to it, and each
 /// record they join.
@@ -489,12 +489,13 @@ fn the_live_reads_cover_what_the_document_is_made_from() {
     let mut view = held(vec![holding(20, "lead-sam", "main", sections, 0)], person(&[id(10)]));
     view.assigned = vec![id(50), id(51)];
     view.quoted = vec![id(60)];
-    let session = |n| LiveRead::SessionPrincipals { project: project(n), session: "s1".into() };
+    let session = |n| LiveRead::SessionBindings { project: project(n), session: "s1".into() };
     let expected = BTreeSet::from([
         LiveRead::Projects,
         session(0),
         session(1),
         session(2),
+        LiveRead::Principal(id(20)),
         LiveRead::QuestionsTo(id(20)),
         LiveRead::QuestionsBy(id(20)),
         LiveRead::QuestionsByName { project: project(0), handle: "lead-sam".into(), of_no_one: false },

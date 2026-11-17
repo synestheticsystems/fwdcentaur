@@ -182,8 +182,8 @@ fn populate(daemon: &Daemon, checkout: &Path) -> Result<Held> {
 /// Every record the project `graph` holds, of every model, as its JSON says it, by its id.
 async fn records(graph: &ProjectGraph) -> Result<BTreeMap<EntityId, Value>> {
     let mut all = BTreeMap::new();
-    for p in graph.all::<PrincipalView>().await? {
-        all.insert(p.id(), ops::json_of_principal(&p)?);
+    for p in graph.principals().await? {
+        all.insert(p.0.id(), ops::json_of_principal(graph, &p).await?);
     }
     for (placement, r) in graph.all_placed::<ankurah_commons::git::RepositoryView>().await? {
         all.insert(
@@ -368,7 +368,7 @@ async fn every_list_in_one_project_prints_its_own_records_a_typed_id_reaches_the
         let graph = graph.clone();
         async move {
             let named = naming::principal_named(&graph, "impl-alice", None).await?;
-            named.map(|p| p.id()).ok_or_else(|| anyhow!("no impl-alice"))
+            named.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no impl-alice"))
         }
     };
     let mut alpha_inbox = Inbox::of(&alpha.graph, alice_of(&alpha.graph).await?).await?;
@@ -406,12 +406,13 @@ async fn a_task_shows_what_it_holds_of_the_other_project_with_that_projects_name
     daemon.json(&daemon.alpha, &["link", &a.cap, "depends_on", &b.cap])?;
     daemon.json(&daemon.alpha, &["link", &a.cap, "worked_in", &b.scope])?;
     daemon.json(&daemon.beta, &["link", &b.retry, "relates_to", &a.cap])?;
-    let their_alice = naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|p| p.id()).expect("hers");
+    let their_alice =
+        naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|(p, _)| p.id()).expect("hers");
     let their_person = ops::person_by_handle(&beta.graph, "dnorman").await?;
     let cap: EntityId = a.cap.parse()?;
     let trx = alpha.graph.begin();
     let held: TaskView = alpha.graph.get(cap).await?;
-    trx.edit(&held)?.assignee()?.set(&Some(ankurah::property::Ref::new(their_alice)))?;
+    trx.edit(&held)?.assignee()?.set(&Some(their_alice))?;
     trx.commit().await?;
     let on_cap = MessageContext { task_id: Some(cap), ..Default::default() };
     ops::post_message(&alpha.graph, their_person, "written in beta", Priority::Next, on_cap).await?;
@@ -490,7 +491,8 @@ async fn renumbered(client: &Client, former: &str, record: EntityId) -> Result<(
 async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_and_as_a_records_argument_in_any_project(
 ) -> Result<()> {
     let Two { daemon, a, b, alpha, beta: _ } = Two::new().await?;
-    let alice = naming::principal_named(&alpha.graph, "impl-alice", None).await?.map(|p| p.id()).expect("impl-alice");
+    let alice =
+        naming::principal_named(&alpha.graph, "impl-alice", None).await?.map(|(p, _)| p.id()).expect("impl-alice");
     let scope: EntityId = a.scope.parse()?;
     let step: EntityId = daemon.made(&daemon.alpha, &["step", "add", &a.retry, &a.cap])?.parse()?;
     let cited = || EntityId::random().to_base64();
@@ -578,7 +580,7 @@ async fn a_write_through_another_projects_id_is_made_there_by_the_caller_there_a
     let comment: EntityId = made["record"]["id"].as_str().ok_or_else(|| anyhow!("no id in {made}"))?.parse()?;
     let written: MessageView = beta.graph.get(comment).await?;
     let carol = ops::person_by_handle(&beta.graph, "carol").await?;
-    assert_eq!(EntityId::from(written.author()?), carol, "written by carol's principal in beta");
+    assert_eq!(written.author()?, carol, "written by carol's principal in beta");
     assert_eq!(written.task()?.map(EntityId::from), Some(b.retry.parse()?));
 
     let shown = ran_in_beta(&daemon, &["--as", "impl-bea", "task", "show", &b.retry])?;
@@ -631,7 +633,7 @@ async fn a_refusal_in_the_project_a_command_ran_in_names_it_and_says_what_it_sug
 async fn a_recipient_of_another_project_replies_and_forwards_through_her_notification() -> Result<()> {
     let Two { daemon, a, b: _, alpha, beta } = Two::new().await?;
     let named = |graph: ProjectGraph, name: &'static str| async move {
-        naming::principal_named(&graph, name, None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no {name}"))
+        naming::principal_named(&graph, name, None).await?.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no {name}"))
     };
     let alice = named(beta.graph.clone(), "impl-alice").await?;
     let daniel = named(beta.graph.clone(), "dnorman").await?;
@@ -645,7 +647,7 @@ async fn a_recipient_of_another_project_replies_and_forwards_through_her_notific
     assert_eq!(replied["settled"], told, "{replied}");
     let made: MessageView = alpha.graph.get(reply).await?;
     assert_eq!(made.reply_to()?.map(EntityId::from), Some(comment.parse()?), "a message of the comment's thread");
-    assert_eq!(EntityId::from(made.author()?), alice, "by her, beta's principal");
+    assert_eq!(made.author()?, alice, "by her, beta's principal");
     assert_eq!(beta.graph.get::<NotificationView>(told.parse()?).await?.status()?, NotificationStatus::Read);
 
     let comment = daemon.made(&daemon.alpha, &["comment", &a.retry, &mention])?;
@@ -708,7 +710,7 @@ async fn a_forward_made_in_another_projects_thread_says_whether_it_waits_where_i
         from_id: unscoped.parse()?,
         to_id: EntityId::random(),
         status: RelationStatus::Accepted,
-        created_by: ankurah::property::Ref::new(person),
+        created_by: person,
         created: fwd_core::now_ms(),
         via: ankurah::property::Json::new(json!({})),
         note: None,
@@ -756,7 +758,7 @@ async fn a_forward_made_in_another_projects_thread_says_whether_it_waits_where_i
 #[tokio::test]
 async fn the_messages_about_a_record_are_listed_wherever_they_are_each_named_with_its_project() -> Result<()> {
     let Two { daemon, a, b: _, alpha: _, beta } = Two::new().await?;
-    let their_daniel = naming::principal_named(&beta.graph, "dnorman", None).await?.map(|p| p.id()).expect("his");
+    let their_daniel = naming::principal_named(&beta.graph, "dnorman", None).await?.map(|(p, _)| p.id()).expect("his");
     let about = MessageContext { task_id: Some(a.retry.parse()?), ..Default::default() };
     let theirs = ops::post_message(&beta.graph, their_daniel, "beta's word on it", Priority::Next, about).await?;
 
@@ -778,7 +780,7 @@ async fn the_messages_about_a_record_are_listed_wherever_they_are_each_named_wit
 #[tokio::test]
 async fn a_notifications_whole_id_typed_in_one_project_marks_it_where_it_is() -> Result<()> {
     let Two { daemon, a: _, b: _, alpha: _, beta } = Two::new().await?;
-    let alice = naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|p| p.id()).expect("hers");
+    let alice = naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|(p, _)| p.id()).expect("hers");
     let told = ops::inbox(&beta.graph, alice, false).await?.first().map(|n| n.id()).expect("her question's notice");
     let read = ran_in_beta(&daemon, &["--as", "impl-alice", "read", &told.to_base64()])?;
     assert_eq!(read["read"], 1, "{read}");
@@ -798,7 +800,7 @@ async fn a_step_another_project_made_is_checked_from_either_project_where_its_re
     let (checked, said) = daemon.json_and_said(&daemon.alpha, &["step", "check", &b.retry, &a.cap])?;
     assert!(!said.contains("NOTE"), "the step's relation is alpha's, where the command started: {said}");
     assert_eq!((&checked["edge"], &checked["checked"]), (&json!(edge.to_base64()), &json!(true)), "{checked}");
-    assert_eq!(beta.graph.relation(edge).await?.closed_by()?.map(EntityId::from), Some(person));
+    assert_eq!(beta.graph.relation(edge).await?.closed_by()?, Some(person));
 
     let (unchecked, said) = daemon.json_and_said(&daemon.beta, &["step", "uncheck", &b.retry, "1"])?;
     let note = format!("NOTE: step `1` of `{}` is from project `alpha`, so this command ran there", b.retry);
@@ -806,7 +808,7 @@ async fn a_step_another_project_made_is_checked_from_either_project_where_its_re
     assert_eq!((&unchecked["checked"], &unchecked["from_project"]), (&json!(false), &json!("alpha")), "{unchecked}");
     daemon.json(&daemon.beta, &["step", "check", &b.retry, &a.cap[..8]])?;
     let r = beta.graph.relation(edge).await?;
-    assert_eq!((r.status()?, r.closed_by()?.map(EntityId::from)), (RelationStatus::Resolved, Some(person)));
+    assert_eq!((r.status()?, r.closed_by()?), (RelationStatus::Resolved, Some(person)));
     Ok(())
 }
 
@@ -1063,8 +1065,8 @@ async fn an_mcp_call_on_the_others_record_or_in_its_scope_runs_there_as_the_thre
     assert!(given["notes"].to_string().contains(&note), "{given}");
     assert_eq!(given["result"]["from_project"], "beta", "{given}");
     let id: EntityId = given["result"]["record"]["id"].as_str().ok_or_else(|| anyhow!("no id in {given}"))?.parse()?;
-    let author: EntityId = beta.graph.get::<MessageView>(id).await?.author()?.into();
-    let bound = beta.graph.get::<PrincipalView>(author).await?.subject()?.unwrap_or_default();
+    let author: EntityId = beta.graph.get::<MessageView>(id).await?.author()?;
+    let bound = fwd_core::subject::session_bound_to(&beta.graph, author).await?.unwrap_or_default();
     assert!(bound.starts_with("codex:") && bound.ends_with("0000000b2fb0"), "the thread's principal in beta: {bound}");
     assert_eq!(records(&alpha.graph).await?, before, "nothing of alpha's changed, and no principal was made there");
 

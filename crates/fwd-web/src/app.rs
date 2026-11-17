@@ -352,7 +352,7 @@ fn ActingPicker() -> impl IntoView {
         let acting = acting.clone();
         move |ev: leptos::ev::Event| {
             let Ok(id) = event_target_value(&ev).parse::<EntityId>() else { return };
-            if let Some(p) = store::principals().into_iter().find(|p| p.id() == id) {
+            if let Some((_, p)) = store::principals().into_iter().find(|(role, _)| role.id() == id) {
                 acting.set(Some(p));
             }
         }

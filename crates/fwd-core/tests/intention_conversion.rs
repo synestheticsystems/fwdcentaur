@@ -17,10 +17,10 @@ use ankurah_commons::records::{Attribution, ClosedView, CreatedView, EditedView}
 use ankurah_commons::registration;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::conversion;
 use fwd_core::durable;
 use fwd_core::intentions::{self, before_d229, Outcome, Parts, Quoted};
 use fwd_core::model::*;
-use fwd_core::ops;
 use fwd_core::project_graph::{Followed, ProjectGraph};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,16 +110,43 @@ impl Store {
         );
         let project = uuid::Uuid::new_v4();
         let alpha = ProjectGraph::ensure(ctx, project, "alpha").await?;
-        let ines = ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?;
-        let tide = ops::ensure_principal(&alpha, "impl-tide", "impl-tide", PrincipalKind::Agent, None).await?;
+        let ines = principal_before(&alpha, "ines", PrincipalKind::Human).await?;
+        let tide = principal_before(&alpha, "impl-tide", PrincipalKind::Agent).await?;
         Ok((Store { _dir: dir, path, project, ines, tide }, alpha))
     }
 
-    /// alpha's graph on the store opened as fwd opens one, seeded with the kept mint.
+    /// alpha's graph on the store opened as fwd opens one, seeded with the kept mint, its
+    /// principals moved onto the Commons as `fwd admin migrate` moves them before its other parts.
     async fn opened(&self) -> Result<ProjectGraph> {
         let node = durable::open(SqliteStorageEngine::open(&self.path).await?).await?;
-        Ok(ProjectGraph::open(node.context_async(DEFAULT_CONTEXT).await?, self.project).await?)
+        let alpha = ProjectGraph::open(node.context_async(DEFAULT_CONTEXT).await?, self.project).await?;
+        conversion::principals::convert(&alpha).await?;
+        Ok(alpha)
     }
+}
+
+/// A principal of `kind` named `handle`, as the build before the kept mint made one.
+async fn principal_before(graph: &ProjectGraph, handle: &str, kind: PrincipalKind) -> Result<EntityId> {
+    let trx = graph.begin();
+    let made = trx
+        .create(&conversion::principals::before_d261::Principal {
+            project: graph.project(),
+            kind,
+            handle: handle.into(),
+            display_name: handle.into(),
+            auth_subject: None,
+            agent_role: None,
+            active: true,
+            member: Some(true),
+            subject: None,
+            succeeded_by: None,
+            serves: None,
+            last_active: None,
+        })
+        .await?
+        .id();
+    trx.commit().await?;
+    Ok(made)
 }
 
 /// What an intention held on the Commons' models of 84ea084: its record, written down by `by`; its
@@ -161,7 +188,7 @@ async fn written(alpha: &ProjectGraph, to: EntityId, old: Old) -> Result<EntityI
         from_id: id,
         to_id: to,
         status: RelationStatus::Accepted,
-        created_by: Ref::new(to),
+        created_by: to,
         created: WRITTEN,
         via: Json::new(serde_json::json!({})),
         note: None,

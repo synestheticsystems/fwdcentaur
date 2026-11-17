@@ -28,7 +28,7 @@ use ankurah_signals::{CurrentObserver, ReactiveGraphObserver};
 use ankurah_storage_indexeddb_wasm::IndexedDBStorageEngine;
 use ankurah_websocket_client_wasm::WebsocketClient;
 use fwd_core::daemon_socket;
-use fwd_core::model::PrincipalView;
+use fwd_core::model::{PrincipalView, RoleView};
 use fwd_core::naming;
 use fwd_core::ops;
 use fwd_core::project_graph::ProjectGraph;
@@ -722,21 +722,22 @@ async fn choose_principal() -> Result<PrincipalView, String> {
         return naming::principal_named(&graph, &named, None)
             .await
             .map_err(|e| format!("{e}."))?
+            .map(|(_, principal)| principal)
             .ok_or_else(|| format!("No principal has the {none} `{named}`."));
     }
-    // `active` is filtered here, not in the predicate: a boolean literal in a predicate misses
-    // entities that arrived over the wire (Ankurah 0.9.3; docs/design/data-model.md).
-    let mut humans: Vec<PrincipalView> = graph
-        .fetch::<PrincipalView>("kind = 'human'")
+    // Whether one is retired is read off its role: a retired principal carries `Closed`.
+    let mut humans: Vec<(RoleView, PrincipalView)> = graph
+        .fetch_principals("kind = 'human'")
         .await
         .map_err(|e| format!("could not list the project's people: {e}"))?
         .into_iter()
-        .filter(|p| p.active().unwrap_or(false))
+        .filter(|(role, _)| !ops::retired(role).unwrap_or(true))
         .collect();
-    humans.sort_by_key(|p| (!ops::belongs(p), p.handle().unwrap_or_default()));
+    humans.sort_by_key(|(role, p)| (!ops::belongs(role), p.handle().unwrap_or_default()));
     humans
         .into_iter()
         .next()
+        .map(|(_, principal)| principal)
         .ok_or_else(|| "This project has no person yet: run `fwd init` in the repository first.".to_string())
 }
 

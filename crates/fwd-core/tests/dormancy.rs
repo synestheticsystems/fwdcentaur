@@ -5,6 +5,7 @@
 use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::conversion;
 use fwd_core::dormancy;
 use fwd_core::durable;
 use fwd_core::model::*;
@@ -31,12 +32,12 @@ async fn project() -> Result<ProjectGraph> {
 
 /// Whether principal `id` shows as dormant at `now`, read from the graph.
 async fn dormant(graph: &ProjectGraph, id: EntityId, now: i64) -> Result<bool> {
-    Ok(dormancy::is_dormant(&graph.get::<PrincipalView>(id).await?, now))
+    Ok(dormancy::is_dormant(&graph.principal(id).await?, now))
 }
 
 /// Records `at` as the time of principal `id`'s last write, as though it had last written then.
 async fn last_wrote(graph: &ProjectGraph, id: EntityId, at: i64) -> Result<()> {
-    let p: PrincipalView = graph.get(id).await?;
+    let p: RoleView = graph.get(id).await?;
     let trx = graph.begin();
     trx.edit(&p)?.last_active()?.set(&Some(at))?;
     trx.commit().await?;
@@ -49,7 +50,8 @@ async fn agent(graph: &ProjectGraph, handle: &str) -> Result<EntityId> {
 }
 
 /// The principal as a build before 2026-09-30 wrote it, with no `last_active`, and with the project
-/// it names: the same collection as `fwd_core::model::Principal`, so what it writes is what a graph
+/// it names: the same collection as fwd's own model of a principal had, which `fwd admin migrate`
+/// moves onto the Commons (`fwd_core::conversion::principals`), so what it writes is what a graph
 /// of then holds.
 mod before {
     use ankurah::{Context, Model, Ref};
@@ -117,9 +119,9 @@ async fn an_agent_quiet_for_thirteen_hours_is_dormant_and_its_next_write_brings_
 
     // Dormant decides nothing: it still belongs, its name still names it, and a question to it
     // still reaches it.
-    let p = graph.get::<PrincipalView>(quiet).await?;
+    let p = graph.get::<RoleView>(quiet).await?;
     assert!(ops::belongs(&p), "a picker still offers it");
-    assert_eq!(naming::principal_named(&graph, "impl-quiet", None).await?.map(|p| p.id()), Some(quiet));
+    assert_eq!(naming::principal_named(&graph, "impl-quiet", None).await?.map(|(p, _)| p.id()), Some(quiet));
     let to = MessageContext { to: Some(quiet.to_base64()), ..Default::default() };
     let asked = ops::post_message(&graph, daniel, "still there?", Priority::Next, to).await?;
     let plan = routing::plan_for_message(&graph, &graph.get::<MessageView>(asked).await?).await?;
@@ -145,18 +147,19 @@ async fn a_person_is_never_dormant_nor_a_retired_agent_and_an_agent_from_before_
     dormancy::wrote(&graph, daniel).await?;
     assert!(!dormant(&graph, daniel, later).await?, "a person quiet for a hundred hours");
     let old_person = before::made(&ctx, graph.project(), "old-person", PrincipalKind::Human).await?;
+    let old_agent = before::made(&ctx, graph.project(), "impl-old", PrincipalKind::Agent).await?;
+    conversion::principals::convert(&graph).await?;
     assert!(!dormant(&graph, old_person, later).await?, "a person from before the stamp");
 
-    let old_agent = before::made(&ctx, graph.project(), "impl-old", PrincipalKind::Agent).await?;
-    let p = graph.get::<PrincipalView>(old_agent).await?;
-    assert_eq!(p.last_active()?, None, "an agent from before the stamp records no write");
+    let p = graph.principal(old_agent).await?;
+    assert_eq!(p.0.last_active()?, None, "an agent from before the stamp records no write");
     assert!(dormancy::is_dormant(&p, fwd_core::now_ms()), "so it is dormant until its next write");
     dormancy::wrote(&graph, old_agent).await?;
     assert!(!dormant(&graph, old_agent, fwd_core::now_ms()).await?, "which brings it back");
 
     let finished = agent(&graph, "impl-finished").await?;
     last_wrote(&graph, finished, fwd_core::now_ms() - 13 * HOUR).await?;
-    ops::retire_principal(&graph, "impl-finished").await?;
+    ops::retire_principal(&graph, "impl-finished", finished).await?;
     assert!(!dormant(&graph, finished, fwd_core::now_ms()).await?, "retired, it is no picker's, dormant or not");
     Ok(())
 }
@@ -183,12 +186,12 @@ async fn the_mention_search_offers_the_agents_at_work_before_the_dormant_ones() 
     last_wrote(&graph, quiet, now - 13 * HOUR).await?;
     let principals = ops::principals(&graph).await?;
     let offered = |most: usize| -> Vec<EntityId> {
-        naming::mentionable(&principals, "impl", most, now).iter().map(|p| p.id()).collect()
+        naming::mentionable(&principals, "impl", most, now).iter().map(|(p, _)| p.id()).collect()
     };
     assert_eq!(offered(8), vec![busy, busier, quiet], "the dormant agent after the others, whatever its name");
     assert_eq!(offered(2), vec![busy, busier], "and out of the first offers");
     assert_eq!(
-        naming::mentionable(&principals, "impl-a", 8, now).iter().map(|p| p.id()).collect::<Vec<_>>(),
+        naming::mentionable(&principals, "impl-a", 8, now).iter().map(|(p, _)| p.id()).collect::<Vec<_>>(),
         vec![quiet],
         "still offered where its name is typed"
     );

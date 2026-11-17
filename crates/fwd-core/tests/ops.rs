@@ -171,7 +171,7 @@ async fn move_comments(graph: &ProjectGraph, task: EntityId) -> Result<Vec<(Enti
     for m in ops::messages_about(graph, "task", task).await? {
         let context: serde_json::Value = m.context()?.into();
         if let Some(mv) = context.get(ops::MOVE_KEY).and_then(|v| v.as_str()) {
-            found.push((EntityId::from(m.author()?), ops::text(m.content())?, mv.to_string()));
+            found.push((m.author()?, ops::text(m.content())?, mv.to_string()));
         }
     }
     Ok(found)
@@ -712,7 +712,7 @@ async fn a_message_reaches_only_whom_it_is_addressed_to() -> Result<()> {
     assert_eq!(heard, expected);
     // With the triage agent retired, a question asked of the project reaches no one: it waits,
     // listed on the Questions page as asked of the project.
-    ops::retire_principal(&graph, "triage-bot").await?;
+    ops::retire_principal(&graph, "triage-bot", c.triage).await?;
     let waiting = ops::post_message(&graph, bob, "anyone?", Priority::Now, of_project).await?;
     assert!(reasons(&graph, waiting).await?.is_empty(), "no one holds triage");
     Ok(())
@@ -826,7 +826,7 @@ async fn the_questions_that_waited_reach_the_agent_that_comes_to_answer_for_thei
         .map(|n| n.id())
         .collect();
     ops::set_notification_status(&graph, &read, NotificationStatus::Read).await?;
-    ops::retire_principal(&graph, "triage-bot").await?;
+    ops::retire_principal(&graph, "triage-bot", triage).await?;
     assert!(routing::plan_for_waiting_questions(&graph).await?.is_empty(), "no agent answers for it now");
     let alice = ops::set_role(&graph, "impl-alice", AgentRole::Triage, Some(ops::Serves::ProjectWide)).await?;
     let planned = routing::plan_for_waiting_questions(&graph).await?;
@@ -1307,7 +1307,7 @@ async fn a_scope_is_made_and_edited_a_field_at_a_time() -> Result<()> {
     };
     let id = ops::create_scope(&graph, c.daniel, spec).await?;
     let s: ScopeView = graph.get(id).await?;
-    assert_eq!((s.status()?, s.started()?, EntityId::from(s.created_by()?)), (ScopeStatus::Planned, None, c.daniel));
+    assert_eq!((s.status()?, s.started()?, s.created_by()?), (ScopeStatus::Planned, None, c.daniel));
     let shown = ops::json_of_scope(&s)?;
     assert_eq!(shown["context"]["repo"], "github.com/synesthetic/fwdcentaur", "a remote URL is stored as its key");
     assert_eq!(shown["branches"], json!(["main", "feat/hosting"]), "each branch once, trimmed, no blanks");
@@ -1644,7 +1644,7 @@ async fn a_mention_reaches_its_person_through_its_relation_only() -> Result<()> 
     let old = trx
         .create(&Message {
             project: graph.project(),
-            author: ankurah::property::Ref::new(c.daniel),
+            author: c.daniel,
             created: fwd_core::now_ms(),
             content: "@impl-alice have a look".into(),
             priority: Priority::Next,
@@ -1762,7 +1762,7 @@ async fn an_author_edits_a_message_in_place_and_its_mentions_follow_the_text() -
     let edited = after.edited()?.expect("an edit records when it was made");
     assert!(edited >= created);
     assert_eq!(ops::json_of_message(&after)?["edited"], edited);
-    assert_eq!(after.edited_by()?.map(EntityId::from), Some(c.triage), "and who made it, the author here");
+    assert_eq!(after.edited_by()?, Some(c.triage), "and who made it, the author here");
     assert_eq!(ops::json_of_message(&after)?["edited_by"], c.triage.to_base64());
 
     let edges = ops::relations_from(&graph, question, Some(RelationKind::Mention)).await?;
@@ -1770,7 +1770,7 @@ async fn an_author_edits_a_message_in_place_and_its_mentions_follow_the_text() -
     assert_eq!(edge(to_task).status()?, RelationStatus::Accepted, "the task, still named, keeps its relation");
     let gone = edge(to_alice);
     assert_eq!(gone.status()?, RelationStatus::Retracted, "Alice, no longer named, has hers retracted");
-    assert_eq!(gone.closed_by()?.map(EntityId::from), Some(c.triage));
+    assert_eq!(gone.closed_by()?, Some(c.triage));
     assert_eq!(
         gone.closed_reason()?.as_deref(),
         Some("the message's text no longer names it: an edit of the text removed the reference")
@@ -1923,14 +1923,14 @@ async fn steps_are_added_listed_checked_and_unchecked() -> Result<()> {
     ops::check_step(&graph, c.daniel, first, true).await?;
     let checked: RelationView = graph.get(first).await?;
     assert_eq!(checked.status()?, RelationStatus::Resolved);
-    assert_eq!(checked.closed_by()?.map(EntityId::from), Some(c.daniel));
+    assert_eq!(checked.closed_by()?, Some(c.daniel));
     assert!(checked.closed()?.is_some());
     ops::check_step(&graph, c.daniel, first, true).await?;
     assert_eq!(listed(graph.clone()).await?[0], (first, RelationStatus::Resolved), "checking twice changes nothing");
     ops::check_step(&graph, c.daniel, first, false).await?;
     let unchecked: RelationView = graph.get(first).await?;
     assert_eq!(
-        (unchecked.status()?, unchecked.closed_by()?.map(EntityId::from), unchecked.closed()?),
+        (unchecked.status()?, unchecked.closed_by()?, unchecked.closed()?),
         (RelationStatus::Accepted, None, None)
     );
 
@@ -1956,13 +1956,13 @@ async fn steps_are_added_listed_checked_and_unchecked() -> Result<()> {
 async fn thread_state(graph: &ProjectGraph, message: EntityId) -> Result<(MessageStatus, Option<EntityId>)> {
     let m: MessageView = graph.get(message).await?;
     assert_eq!(m.resolved()?.is_some(), m.resolved_by()?.is_some(), "who resolved it and when go together");
-    Ok((m.status()?, m.resolved_by()?.map(EntityId::from)))
+    Ok((m.status()?, m.resolved_by()?))
 }
 
 async fn step_state(graph: &ProjectGraph, edge: EntityId) -> Result<(RelationStatus, Option<EntityId>)> {
     let r: RelationView = graph.get(edge).await?;
     assert_eq!(r.closed()?.is_some(), r.closed_by()?.is_some(), "who checked it and when go together");
-    Ok((r.status()?, r.closed_by()?.map(EntityId::from)))
+    Ok((r.status()?, r.closed_by()?))
 }
 
 /// How many messages, relations and notifications the project holds: moving a step and its thread
@@ -3102,7 +3102,7 @@ async fn a_tasks_scopes_change_in_one_write_down_to_none_telling_no_one() -> Res
         .collect();
     assert_eq!(off.len(), 1);
     assert_eq!(off[0].status()?, RelationStatus::Retracted);
-    assert_eq!(off[0].closed_by()?.map(EntityId::from), Some(c.implementer), "who took it off");
+    assert_eq!(off[0].closed_by()?, Some(c.implementer), "who took it off");
     // Taken off one by one, the last too: in no scope.
     ops::change_scopes(&graph, c.daniel, t, &[], &[c.scope]).await?;
     ops::change_scopes(&graph, c.daniel, t, &[], &[docs, hosting]).await?;
@@ -3232,7 +3232,7 @@ async fn a_task_made_in_a_scope_is_worked_in_it_from_the_start() -> Result<()> {
         ops::relations_from(&graph, made_in, Some(RelationKind::WorkedIn))
             .await?
             .iter()
-            .map(|r| (r.to_id().unwrap(), r.status().unwrap(), r.created_by().unwrap().into()))
+            .map(|r| (r.to_id().unwrap(), r.status().unwrap(), r.created_by().unwrap()))
             .collect();
     assert_eq!(edges, vec![(c.scope, RelationStatus::Accepted, c.daniel)]);
     let context = serde_json::Value::from(graph.get::<TaskView>(made_in).await?.context()?);
@@ -3266,7 +3266,7 @@ async fn a_task_made_in_a_scope_is_worked_in_it_from_the_start() -> Result<()> {
     assert_eq!(ops::migrate_recorded_scopes(&graph, c.daniel).await?, vec![(older, c.scope)]);
     assert_eq!(ops::worked_in(&graph, older).await?, vec![c.scope]);
     let placed = ops::relations_from(&graph, older, Some(RelationKind::WorkedIn)).await?;
-    assert_eq!(EntityId::from(placed[0].created_by()?), c.daniel, "made by whoever ran the migration");
+    assert_eq!(placed[0].created_by()?, c.daniel, "made by whoever ran the migration");
     for left in [taken_off, unheld] {
         assert_eq!(ops::worked_in(&graph, left).await?, Vec::<EntityId>::new());
     }
@@ -3312,7 +3312,7 @@ async fn the_migration_clears_the_owner_and_heartbeat_scopes_had_before_d108() -
     }
     assert_eq!(shown(graph.clone(), c.scope).await?, before, "nothing else about a scope changes");
     let scope: ScopeView = graph.get(c.scope).await?;
-    assert_eq!(EntityId::from(scope.created_by()?), c.implementer, "who made it is still recorded");
+    assert_eq!(scope.created_by()?, c.implementer, "who made it is still recorded");
     assert_eq!(ops::migrate_scopes(&graph).await?, ops::ScopeMigration::default(), "a second run changes nothing");
     Ok(())
 }
@@ -3339,7 +3339,7 @@ async fn the_migration_carries_assignment_edges_over_to_the_field_once() -> Resu
                 from_id: task,
                 to_id: scope,
                 status,
-                created_by: ankurah::property::Ref::new(c.daniel),
+                created_by: c.daniel,
                 created,
                 via: ankurah::property::Json::new(serde_json::json!({})),
                 note: None,
@@ -3451,17 +3451,14 @@ async fn decisions_are_numbered_moved_by_verbs_and_named_by_number() -> Result<(
 
     // A person's own ruling is accepted and decided by them; a relayed one names who ruled.
     let v1: DecisionView = graph.get(d1).await?;
-    assert_eq!(
-        (v1.status()?, v1.decided_by()?.map(ankurah::EntityId::from)),
-        (DecisionStatus::Accepted, Some(c.daniel))
-    );
+    assert_eq!((v1.status()?, v1.decided_by()?), (DecisionStatus::Accepted, Some(c.daniel)));
     assert!(v1.decided()?.is_some());
     let v3: DecisionView = graph.get(d3).await?;
-    assert_eq!(EntityId::from(v3.author()?), c.triage);
-    assert_eq!(v3.decided_by()?.map(EntityId::from), Some(c.daniel));
+    assert_eq!(v3.author()?, c.triage);
+    assert_eq!(v3.decided_by()?, Some(c.daniel));
     assert_eq!(v3.area()?.as_deref(), Some("process"), "the area is kept trimmed");
     let v2: DecisionView = graph.get(d2).await?;
-    assert_eq!((v2.status()?, v2.decided_by()?.map(EntityId::from)), (DecisionStatus::Proposed, None));
+    assert_eq!((v2.status()?, v2.decided_by()?), (DecisionStatus::Proposed, None));
 
     // D<number> and a unique prefix name a decision; the wrong kind and a short prefix are refused.
     assert_eq!(ops::resolve_id(&graph, "D2", &[ops::Kind::Decision]).await?, d2);
@@ -3486,12 +3483,12 @@ async fn decisions_are_numbered_moved_by_verbs_and_named_by_number() -> Result<(
         DecisionStatus::Rejected
     );
     let v2: DecisionView = graph.get(d2).await?;
-    assert_eq!(v2.decided_by()?.map(EntityId::from), Some(c.daniel), "whoever rejects a proposal rules on it");
+    assert_eq!(v2.decided_by()?, Some(c.daniel), "whoever rejects a proposal rules on it");
     assert_eq!(v2.closed_reason()?.as_deref(), Some("a cap is safer"));
     let comments = ops::messages_about(&graph, "decision", d2).await?;
     assert_eq!(comments.len(), 1);
     assert_eq!(comments[0].content()?, "Rejected: a cap is safer");
-    assert_eq!(EntityId::from(comments[0].author()?), c.daniel);
+    assert_eq!(comments[0].author()?, c.daniel);
 
     // Supersession: the successor must be accepted and another decision; the old one is marked,
     // linked and commented in one write.
@@ -3503,7 +3500,7 @@ async fn decisions_are_numbered_moved_by_verbs_and_named_by_number() -> Result<(
     ops::move_decision(&graph, c.daniel, d4, DecisionMove::Accept, "measured it").await?;
     ops::supersede_decision(&graph, c.daniel, d1, d4, "jitter avoids stampedes").await?;
     let v1: DecisionView = graph.get(d1).await?;
-    assert_eq!((v1.status()?, v1.closed_by()?.map(EntityId::from)), (DecisionStatus::Superseded, Some(c.daniel)));
+    assert_eq!((v1.status()?, v1.closed_by()?), (DecisionStatus::Superseded, Some(c.daniel)));
     let lineage = ops::relations_to(&graph, d1, Some(RelationKind::Supersedes)).await?;
     assert_eq!(lineage.iter().map(|r| r.from_id().unwrap()).collect::<Vec<_>>(), vec![d4]);
     assert_eq!(
@@ -3545,22 +3542,19 @@ async fn a_ruling_recorded_on_a_persons_word_names_them_as_its_decider() -> Resu
     // Accepted by the triage agent on Daniel's word: Daniel ruled, and the triage agent wrote the note.
     ops::move_decision_for(&graph, c.triage, c.daniel, name, DecisionMove::Accept, "Daniel said yes").await?;
     let v: DecisionView = graph.get(name).await?;
-    assert_eq!((v.status()?, v.decided_by()?.map(EntityId::from)), (DecisionStatus::Accepted, Some(c.daniel)));
+    assert_eq!((v.status()?, v.decided_by()?), (DecisionStatus::Accepted, Some(c.daniel)));
     let notes = ops::messages_about(&graph, "decision", name).await?;
     assert_eq!(notes.len(), 1);
-    assert_eq!(
-        (EntityId::from(notes[0].author()?), notes[0].content()?),
-        (c.triage, "Accepted: Daniel said yes".into())
-    );
+    assert_eq!((notes[0].author()?, notes[0].content()?), (c.triage, "Accepted: Daniel said yes".into()));
 
     // Declined likewise: the decider is the one who closed it, and the note is the triage agent's.
     ops::move_decision_for(&graph, c.triage, c.daniel, license, DecisionMove::Reject, "not yet").await?;
     let v: DecisionView = graph.get(license).await?;
     assert_eq!(
-        (v.status()?, v.decided_by()?.map(EntityId::from), v.closed_by()?.map(EntityId::from)),
+        (v.status()?, v.decided_by()?, v.closed_by()?),
         (DecisionStatus::Rejected, Some(c.daniel), Some(c.daniel))
     );
-    assert_eq!(EntityId::from(ops::messages_about(&graph, "decision", license).await?[0].author()?), c.triage);
+    assert_eq!(ops::messages_about(&graph, "decision", license).await?[0].author()?, c.triage);
 
     // The exported log names the person as the one who ruled, and the triage agent as the filer.
     let log = fwd_core::decision_log::render(&fwd_core::decision_log::entries(&graph).await?);
@@ -3819,8 +3813,8 @@ async fn d_and_five_digits_is_a_decision_number_first_and_else_the_start_of_an_i
             context: String::new(),
             decision: String::new(),
             consequences: String::new(),
-            author: ankurah::property::Ref::new(c.daniel),
-            decided_by: Some(ankurah::property::Ref::new(c.daniel)),
+            author: c.daniel,
+            decided_by: Some(c.daniel),
             created: fwd_core::now_ms(),
             decided: Some(fwd_core::now_ms()),
             closed_by: None,
@@ -4230,11 +4224,11 @@ async fn a_closing_note_exports_with_the_names_of_what_it_names() -> Result<()> 
         context: String::new(),
         decision: "wait a second between tries".into(),
         consequences: String::new(),
-        author: ankurah::property::Ref::new(c.daniel),
-        decided_by: Some(ankurah::property::Ref::new(c.daniel)),
+        author: c.daniel,
+        decided_by: Some(c.daniel),
         created: at,
         decided: Some(at),
-        closed_by: Some(ankurah::property::Ref::new(c.daniel)),
+        closed_by: Some(c.daniel),
         closed: Some(at),
         closed_reason: Some(format!("[[{}]] replaced the wait", waiting.to_base64())),
         closed_reason_message: None,

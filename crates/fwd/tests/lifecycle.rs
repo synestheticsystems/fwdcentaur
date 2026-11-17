@@ -14,7 +14,7 @@
 
 mod common;
 
-use ankurah::property::{Json, Ref};
+use ankurah::property::Json;
 use ankurah::EntityId;
 use anyhow::{anyhow, Result};
 use common::Scratch;
@@ -87,24 +87,8 @@ async fn data_persists_across_daemon_restarts() -> Result<()> {
     let (_dir, paths, ws) = setup()?;
     let task_id = {
         let client = daemon::ensure_daemon(&paths, &ws, spawn()).await?;
+        let me = ops::ensure_principal(&client.graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
         let trx = client.graph.begin();
-        let me = trx
-            .create(&Principal {
-                project: client.graph.project(),
-                kind: PrincipalKind::Human,
-                handle: "dnorman".into(),
-                display_name: "Daniel".into(),
-                auth_subject: None,
-                agent_role: None,
-                active: true,
-                member: Some(true),
-                subject: None,
-                succeeded_by: None,
-                serves: None,
-                last_active: None,
-            })
-            .await?
-            .id();
         let now = fwd_core::now_ms();
         let task = trx
             .create(&Task {
@@ -121,7 +105,7 @@ async fn data_persists_across_daemon_restarts() -> Result<()> {
                 priority: None,
                 labels: Json::new(serde_json::json!([])),
                 context: Json::new(serde_json::json!({})),
-                created_by: Ref::new(me),
+                created_by: me,
                 created: now,
                 updated: now,
                 closed: None,
@@ -696,23 +680,23 @@ async fn a_write_committed_while_its_daemon_was_gone_is_not_reported_as_made() -
     let write = client.while_writing(async {
         when_gone.await?;
         let trx = client.graph.begin();
-        let made = trx
-            .create(&Principal {
-                project: client.graph.project(),
-                kind: PrincipalKind::Agent,
-                handle: "impl-unheard".into(),
-                display_name: "impl-unheard".into(),
-                auth_subject: None,
-                agent_role: Some(AgentRole::Implementer),
-                active: true,
-                member: Some(true),
-                subject: None,
-                succeeded_by: None,
-                serves: None,
-                last_active: None,
-            })
-            .await?
-            .id();
+        let role = Role {
+            project: client.graph.project(),
+            agent_role: Some(AgentRole::Implementer),
+            member: Some(true),
+            succeeded_by: None,
+            serves: None,
+            last_active: None,
+        };
+        let made = trx.create(&role).await?;
+        let record = ankurah::model::Mutable::entity(&*made);
+        let identity = Principal {
+            kind: PrincipalKind::Agent,
+            handle: "impl-unheard".into(),
+            display_name: "impl-unheard".into(),
+        };
+        trx.add(record, &identity).await?;
+        let made = record.id();
         trx.commit().await?;
         let _ = committed.send(made);
         when_back.await?;
@@ -734,7 +718,7 @@ async fn a_write_committed_while_its_daemon_was_gone_is_not_reported_as_made() -
     let (again, made) = away_and_back.map_err(|e| anyhow!("{e:#}; the write ended with {written:?}"))?;
     let error = written.expect_err("the write was reported as made");
     assert_eq!(error.downcast_ref::<daemon::Lost>(), Some(&daemon::Lost::Unconfirmed { port }), "{error:#}");
-    assert!(ops::principals(&again.graph).await?.iter().all(|p| p.id() != made), "the daemon holds the write");
+    assert!(ops::principals(&again.graph).await?.iter().all(|(p, _)| p.id() != made), "the daemon holds the write");
 
     drop((client, again));
     assert!(daemon::stop(&paths).await?);

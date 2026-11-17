@@ -352,8 +352,8 @@ fn decision_line(d: DecisionView, selected: Memo<Option<EntityId>>, scope: Memo<
 /// 2026-09-24", "proposed by claude, 2026-09-26", "rejected by dnorman, 2026-09-26".
 fn ruled(d: &DecisionView) -> String {
     let who = |p: Option<EntityId>| p.map(store::handle_of).unwrap_or_default();
-    let author = d.author().ok().map(EntityId::from);
-    let decider = d.decided_by().ok().flatten().map(EntityId::from);
+    let author = d.author().ok();
+    let decider = d.decided_by().ok().flatten();
     let day = d.decided().ok().flatten().or(d.created().ok()).map(decision_log::date).unwrap_or_default();
     match (d.status().ok(), decider) {
         (Some(DecisionStatus::Proposed), _) | (_, None) => format!("proposed by {}, {day}", who(author)),

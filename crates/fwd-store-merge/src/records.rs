@@ -9,6 +9,7 @@ use std::str::FromStr;
 use ankurah::property::Json;
 use ankurah::{EntityId, Ref};
 use fwd_core::anchoring::anchor_key;
+use fwd_core::conversion::principals::before_d261::{Principal, PrincipalView};
 use fwd_core::conversion::repos::before_d261::{Repo, RepoView};
 use fwd_core::model::*;
 use fwd_core::project_graph::{ProjectGraph, ProjectTransaction};
@@ -329,6 +330,9 @@ impl<'a> Fields<'a> {
             .map(|id| Some(Some(id)))
             .map_err(|e| self.refuse(format!("{field} holds {old:?}: {e}")))
     }
+    fn opt_id(&mut self, field: &'static str) -> Result<Option<EntityId>, Unrepresentable> {
+        Ok(self.opt_reference(field, None)?.flatten())
+    }
     fn opt_ref<T>(&mut self, field: &'static str) -> Result<Option<Ref<T>>, Unrepresentable> {
         Ok(self.opt_reference(field, None)?.flatten().map(Ref::new))
     }
@@ -343,9 +347,6 @@ impl<'a> Fields<'a> {
     }
     fn id_later(&mut self, field: Patchable) -> Result<EntityId, Unrepresentable> {
         self.id(field.name(), Some(field))
-    }
-    fn reference<T>(&mut self, field: &'static str) -> Result<Ref<T>, Unrepresentable> {
-        self.id(field, None).map(Ref::new)
     }
 
     /// A JSON value with every string that is the id of a record of the project replaced by its
@@ -466,7 +467,7 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             context: f.json(Patchable::ScopeContext)?,
             started: f.opt_int("started")?,
             ended: f.opt_int("ended")?,
-            created_by: f.reference("created_by")?,
+            created_by: f.id("created_by", None)?,
             created: f.int("created")?,
         }),
         "Task" => Made::Task(Task {
@@ -476,14 +477,14 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             why: f.text("why")?,
             done_when: f.text("done_when")?,
             status: f.word("status")?,
-            assignee: f.opt_ref("assignee")?,
+            assignee: f.opt_id("assignee")?,
             needs_review: f.boolean("needs_review")?,
             hold: f.opt_text("hold")?,
             not_before: f.opt_int("not_before")?,
             priority: f.opt_int("priority")?,
             labels: f.json(Patchable::TaskLabels)?,
             context: f.json(Patchable::TaskContext)?,
-            created_by: f.reference("created_by")?,
+            created_by: f.id("created_by", None)?,
             created: f.int("created")?,
             updated: f.int("updated")?,
             closed: f.opt_int("closed")?,
@@ -518,7 +519,7 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
                 context_after: f.text("context_after")?,
                 pieces: f.json(Patchable::CodeAnchorPieces)?,
                 symbol_path: f.opt_text("symbol_path")?,
-                created_by: f.reference("created_by")?,
+                created_by: f.id("created_by", None)?,
                 created: f.int("created")?,
             })
         }
@@ -532,18 +533,18 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             context: f.text("context")?,
             decision: f.text("decision")?,
             consequences: f.text("consequences")?,
-            author: f.reference("author")?,
-            decided_by: f.opt_ref("decided_by")?,
+            author: f.id("author", None)?,
+            decided_by: f.opt_id("decided_by")?,
             created: f.int("created")?,
             decided: f.opt_int("decided")?,
-            closed_by: f.opt_ref("closed_by")?,
+            closed_by: f.opt_id("closed_by")?,
             closed: f.opt_int("closed")?,
             closed_reason: f.opt_text("closed_reason")?,
             closed_reason_message: f.opt_ref_later(Patchable::DecisionClosedReasonMessage)?,
         }),
         "Message" => Made::Message(Message {
             project,
-            author: f.reference("author")?,
+            author: f.id("author", None)?,
             created: f.int("created")?,
             content: f.text("content")?,
             priority: f.word("priority")?,
@@ -555,10 +556,10 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             reply_to: f.opt_ref_later(Patchable::MessageReplyTo)?,
             thread: f.opt_ref_later(Patchable::MessageThread)?,
             context: f.json(Patchable::MessageContext)?,
-            resolved_by: f.opt_ref("resolved_by")?,
+            resolved_by: f.opt_id("resolved_by")?,
             resolved: f.opt_int("resolved")?,
             edited: f.opt_int("edited")?,
-            edited_by: f.opt_ref("edited_by")?,
+            edited_by: f.opt_id("edited_by")?,
         }),
         "Relation" => Made::Relation(Relation {
             project,
@@ -566,18 +567,18 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             from_id: f.id_later(Patchable::RelationFromId)?,
             to_id: f.id_later(Patchable::RelationToId)?,
             status: f.word("status")?,
-            created_by: f.reference("created_by")?,
+            created_by: f.id("created_by", None)?,
             created: f.int("created")?,
             via: f.json(Patchable::RelationVia)?,
             note: f.opt_text("note")?,
             position: f.opt_text("position")?,
-            closed_by: f.opt_ref("closed_by")?,
+            closed_by: f.opt_id("closed_by")?,
             closed: f.opt_int("closed")?,
             closed_reason: f.opt_text("closed_reason")?,
         }),
         "Notification" => Made::Notification(Notification {
             project,
-            recipient: f.reference("recipient")?,
+            recipient: f.id("recipient", None)?,
             notification_type: f.word("notification_type")?,
             status: f.word("status")?,
             priority: f.word("priority")?,

@@ -2,7 +2,7 @@
 //! docs/research/anchoring-robust-proposal.md), the resolution cache in the sidecar rather than
 //! on the entity, and anchors of the first cut gaining a key and basis.
 
-use ankurah::property::{Json, Ref};
+use ankurah::property::Json;
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
@@ -162,7 +162,7 @@ async fn first_cut(graph: &ProjectGraph, me: EntityId, repo: EntityId, old: Firs
             context_after: after.into(),
             pieces: Json::new(serde_json::json!([])),
             symbol_path: None,
-            created_by: Ref::new(me),
+            created_by: me,
             created: fwd_core::now_ms(),
         })
         .await?

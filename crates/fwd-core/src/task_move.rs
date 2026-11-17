@@ -379,7 +379,7 @@ async fn bring(
         }
         if retracting {
             taken.status()?.set(&RelationStatus::Retracted)?;
-            taken.closed_by()?.set(&Some(Ref::new(by)))?;
+            taken.closed_by()?.set(&Some(by))?;
             taken.closed()?.set(&Some(t))?;
             taken.closed_reason()?.set(&Some(why.to_string()))?;
         }
@@ -395,7 +395,7 @@ async fn bring(
             from_id: task,
             to_id: scope,
             status: RelationStatus::Accepted,
-            created_by: Ref::new(by),
+            created_by: by,
             created: t,
             via: Json::new(json!({"actor_id": by.to_base64()})),
             note: None,
@@ -436,7 +436,7 @@ async fn arrive(
     let comment = trx
         .create(&Message {
             project: trx.project(),
-            author: Ref::new(by),
+            author: by,
             created: t,
             content,
             priority: Priority::Next,

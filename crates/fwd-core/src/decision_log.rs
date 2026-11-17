@@ -237,12 +237,12 @@ pub async fn why_closed(graph: &ProjectGraph, d: &DecisionView) -> Result<Option
 pub async fn entries(graph: &ProjectGraph) -> Result<Vec<Entry>> {
     let decisions = ops::decisions(graph).await?;
     let number: HashMap<EntityId, i64> = decisions.iter().filter_map(|d| Some((d.id(), d.number().ok()?))).collect();
-    let principals: Vec<PrincipalView> = graph.all().await?;
+    let principals = graph.principals().await?;
     let handle = |id: EntityId| {
         principals
             .iter()
-            .find(|p| p.id() == id)
-            .and_then(|p| p.handle().ok())
+            .find(|(role, _)| role.id() == id)
+            .and_then(|(_, p)| p.handle().ok())
             .unwrap_or_else(|| id.to_base64()[..8].to_string())
     };
     let scopes: Vec<ScopeView> = graph.all().await?;
@@ -275,7 +275,7 @@ pub async fn entries(graph: &ProjectGraph) -> Result<Vec<Entry>> {
                 let words: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
                 let short: String = words.chars().take(80).collect();
                 let more = if words.chars().count() > 80 { "…" } else { "" };
-                let by = ops::handle_of(graph, m.author()?.into()).await?;
+                let by = ops::handle_of(graph, m.author()?).await?;
                 decided_in.push(ops::in_project(format!("the message “{short}{more}” by {by}"), &project));
             }
         }
@@ -294,10 +294,10 @@ pub async fn entries(graph: &ProjectGraph) -> Result<Vec<Entry>> {
             context: ops::text(d.context()).unwrap_or_default(),
             decision: ops::text(d.decision()).unwrap_or_default(),
             consequences: ops::text(d.consequences()).unwrap_or_default(),
-            author: d.author().map(|a| handle(a.into())).unwrap_or_default(),
-            decided_by: d.decided_by().ok().flatten().map(|p| handle(p.into())),
+            author: d.author().map(&handle).unwrap_or_default(),
+            decided_by: d.decided_by().ok().flatten().map(&handle),
             date: d.decided().ok().flatten().unwrap_or(d.created().unwrap_or(0)),
-            closed_by: d.closed_by().ok().flatten().map(|p| handle(p.into())),
+            closed_by: d.closed_by().ok().flatten().map(&handle),
             closed: d.closed().ok().flatten(),
             closing_note,
             supersedes: numbered(supersedes.iter().filter(|(f, _)| *f == id).map(|(_, t)| *t).collect()),

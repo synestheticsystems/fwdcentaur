@@ -40,9 +40,13 @@ enum Event {
     Relation(RelationView),
     DecisionAdded(DecisionView, Option<DecisionStatus>),
     DecisionUpdated(DecisionView, Option<DecisionStatus>),
-    /// A principal made or changed, with what it served as a triage agent as the change arrived:
-    /// none while it holds no triage or is retired (`ops::triage_standing`).
-    Principal(PrincipalView, Option<ops::Serving>),
+    /// A principal made or changed, by its role, with what it served as a triage agent as the
+    /// change arrived: none while it holds no triage or is retired (`ops::triage_standing`).
+    Principal(RoleView, Option<ops::Serving>),
+    /// A principal `fwd admin migrate` moved onto the Commons while routing runs, which the query
+    /// comes to hold in an update, with what it serves: remembered as at routing's start, so that
+    /// moving a triage agent tells no one.
+    PrincipalMoved(RoleView, Option<ops::Serving>),
 }
 
 impl Event {
@@ -53,7 +57,7 @@ impl Event {
             Event::TaskAdded(t, ..) | Event::TaskUpdated(t, ..) => node.graph_of(t),
             Event::Relation(r) => node.graph_of(r),
             Event::DecisionAdded(d, _) | Event::DecisionUpdated(d, _) => node.graph_of(d),
-            Event::Principal(p, _) => node.graph_of(p),
+            Event::Principal(p, _) | Event::PrincipalMoved(p, _) => node.graph_of(p),
         }?)
     }
 }
@@ -82,7 +86,7 @@ pub struct Routing {
     _tasks: LiveQuery<TaskView>,
     _relations: LiveQuery<RelationView>,
     _decisions: LiveQuery<DecisionView>,
-    _principals: LiveQuery<PrincipalView>,
+    _principals: LiveQuery<RoleView>,
     _guards: Vec<ankurah::signals::SubscriptionGuard>,
     _worker: tokio::task::JoinHandle<()>,
 }
@@ -98,7 +102,7 @@ pub async fn start(node: NodeGraph) -> Result<Routing> {
     let tasks = node.query_all::<TaskView>()?;
     let relations = node.query_all::<RelationView>()?;
     let decisions = node.query_all::<DecisionView>()?;
-    let principals = node.query_all::<PrincipalView>()?;
+    let principals = node.query_all::<RoleView>()?;
     messages.wait_initialized().await?;
     tasks.wait_initialized().await?;
     relations.wait_initialized().await?;
@@ -164,10 +168,18 @@ pub async fn start(node: NodeGraph) -> Result<Routing> {
     }
     {
         let tx = tx.clone();
-        guards.push(principals.subscribe(move |cs: ChangeSet<PrincipalView>| {
-            for p in cs.added().into_iter().chain(cs.updated()) {
-                let standing = ops::triage_standing(&p);
-                let _ = tx.send(Event::Principal(p, standing));
+        guards.push(principals.subscribe(move |cs: ChangeSet<RoleView>| {
+            for change in &cs.changes {
+                let event = match change {
+                    ItemChange::Add { item, events } if !creates(events) => {
+                        Event::PrincipalMoved(item.clone(), ops::triage_standing(item))
+                    }
+                    ItemChange::Add { item, .. } | ItemChange::Update { item, .. } => {
+                        Event::Principal(item.clone(), ops::triage_standing(item))
+                    }
+                    _ => continue,
+                };
+                let _ = tx.send(event);
             }
         }));
     }
@@ -189,17 +201,23 @@ pub async fn start(node: NodeGraph) -> Result<Routing> {
 /// that comes to match a query in an update is added too: one of fwd's records does when
 /// `fwd admin migrate` gives it the components of the Commons' models a query reads, and telling of
 /// it would tell everyone again of every record converted. A record made carries its creation in
-/// the events that add it.
+/// the events that add it ([`creates`]). This holds while each query reads only components a
+/// record carries from its creation: a query over one added later in a record's life would see
+/// that addition as a record added without its creation, which this drops.
 fn made<R: ComponentViews + Clone>(cs: &ChangeSet<R>) -> Vec<R> {
     cs.changes
         .iter()
         .filter_map(|change| match change {
-            ItemChange::Add { item, events } if events.iter().any(|e| e.payload.is_entity_create()) => {
-                Some(item.clone())
-            }
+            ItemChange::Add { item, events } if creates(events) => Some(item.clone()),
             _ => None,
         })
         .collect()
+}
+
+/// Whether `events`, those a change set adds a record with, make the record, rather than give an
+/// existing one what the query reads.
+fn creates(events: &[ankurah::proto::Attested<ankurah::proto::Event>]) -> bool {
+    events.iter().any(|e| e.payload.is_entity_create())
 }
 
 /// The last status routing saw for each task and decision, the last assignee for each task, and
@@ -233,7 +251,7 @@ impl Statuses {
                 statuses.decisions.insert(d.id(), s);
             }
         }
-        for p in node.all::<PrincipalView>().await? {
+        for p in node.all::<RoleView>().await? {
             statuses.triage.insert(p.id(), ops::triage_standing(&p));
         }
         Ok(statuses)
@@ -249,7 +267,9 @@ async fn worker(node: NodeGraph, mut rx: mpsc::UnboundedReceiver<Event>, mut sta
             Event::TaskAdded(t, ..) => Some(t.id()),
             Event::Relation(r) => Some(r.id()),
             Event::DecisionAdded(d, _) => Some(d.id()),
-            Event::TaskUpdated(..) | Event::DecisionUpdated(..) | Event::Principal(..) => None,
+            Event::TaskUpdated(..) | Event::DecisionUpdated(..) | Event::Principal(..) | Event::PrincipalMoved(..) => {
+                None
+            }
         };
         if let Some(id) = key {
             if handled.contains(&id) {
@@ -304,6 +324,7 @@ async fn handle(node: &NodeGraph, event: Event, statuses: &mut Statuses) -> Resu
             Event::DecisionAdded(..) => "decision_added",
             Event::DecisionUpdated(..) => "decision_updated",
             Event::Principal(..) => "principal",
+            Event::PrincipalMoved(..) => "principal_moved",
         },
         "routing event"
     );
@@ -343,7 +364,7 @@ async fn handle(node: &NodeGraph, event: Event, statuses: &mut Statuses) -> Resu
             match statuses.decisions.insert(d.id(), current) {
                 // Whoever repealed or superseded it is recorded on it, and is left out.
                 Some(previous) if previous != current && d.status().ok() == Some(current) => {
-                    let actor = d.closed_by()?.map(EntityId::from);
+                    let actor = d.closed_by()?;
                     routing::plan_for_decision_status(graph, &d, previous, actor).await?
                 }
                 _ => vec![],
@@ -367,6 +388,11 @@ async fn handle(node: &NodeGraph, event: Event, statuses: &mut Statuses) -> Resu
             }
             planned
         }
+        // A principal moved onto the Commons was there before, so what it serves is no change.
+        Event::PrincipalMoved(p, standing) => {
+            statuses.triage.insert(p.id(), standing);
+            Vec::new()
+        }
     };
     if !planned.is_empty() {
         let ids = routing::apply(graph, &planned).await?;
@@ -389,7 +415,7 @@ mod tests {
     async fn project() -> Result<(NodeGraph, ProjectGraph)> {
         let node = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
         let ctx = node.context_async(DEFAULT_CONTEXT).await?;
-        Ok((NodeGraph::new(ctx.clone()), ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "routing").await?))
+        Ok((NodeGraph::new(ctx.clone()).await?, ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "routing").await?))
     }
 
     /// How many notifications of `kind` `who` has.
@@ -603,7 +629,7 @@ mod tests {
             .await?;
         let carried = Assigned { assignee: Some(Some(bob)), by: Some(ops::MIGRATED.into()) };
         let trx = graph.begin();
-        trx.edit(&view)?.assignee()?.set(&Some(ankurah::property::Ref::new(bob)))?;
+        trx.edit(&view)?.assignee()?.set(&Some(bob))?;
         trx.commit().await?;
         handle(&node, Event::TaskUpdated(view, Some(TaskStatus::Open), carried), &mut statuses).await?;
         assert_eq!(told(&graph, bob, NotificationType::TaskAssigned).await?, 1, "still the one from the reassignment");
@@ -674,7 +700,7 @@ mod tests {
 
     /// The event a principal's change sends, read as the change arrives.
     async fn principal(graph: &ProjectGraph, id: EntityId) -> Result<Event> {
-        let view: PrincipalView = graph.get(id).await?;
+        let view: RoleView = graph.get(id).await?;
         let standing = ops::triage_standing(&view);
         Ok(Event::Principal(view, standing))
     }
@@ -824,7 +850,7 @@ mod tests {
         read_all(&graph, bot).await?;
         let second = ask(&graph, daniel, "is Windows in scope?").await?;
         handle(&node, message(&graph, second).await?, &mut statuses).await?;
-        ops::retire_principal(&graph, "triage-1").await?;
+        ops::retire_principal(&graph, "triage-1", bot).await?;
         handle(&node, principal(&graph, bot).await?, &mut statuses).await?;
         let third = ask(&graph, daniel, "who reviews the connector?").await?;
         handle(&node, message(&graph, third).await?, &mut statuses).await?;
@@ -834,7 +860,7 @@ mod tests {
 
         // Alice reads them and is retired; a fourth waits; triage-4 succeeds her, and hears of it.
         read_all(&graph, alice).await?;
-        ops::retire_principal(&graph, "impl-alice").await?;
+        ops::retire_principal(&graph, "impl-alice", alice).await?;
         handle(&node, principal(&graph, alice).await?, &mut statuses).await?;
         let fourth = ask(&graph, daniel, "does the daemon restart on update?").await?;
         handle(&node, message(&graph, fourth).await?, &mut statuses).await?;
@@ -926,7 +952,7 @@ mod tests {
         assert_eq!(asked(&graph, bot).await?, vec![(waited, "triage".to_string())]);
         // Retired, it leaves the question unread in an inbox no agent reads; brought back with its
         // role, it reads that inbox again, and hears of the question no second time.
-        ops::retire_principal(&graph, "triage-bot").await?;
+        ops::retire_principal(&graph, "triage-bot", bot).await?;
         handle(&node, principal(&graph, bot).await?, &mut statuses).await?;
         ops::add_principal(&graph, "triage-bot", None, None, None, Some(bot), None).await?;
         handle(&node, principal(&graph, bot).await?, &mut statuses).await?;
@@ -961,7 +987,7 @@ mod tests {
         assert_eq!(asked(&graph, first).await?, vec![(early, "triage".to_string())]);
 
         read_all(&graph, first).await?;
-        ops::retire_principal(&graph, "triage-1").await?;
+        ops::retire_principal(&graph, "triage-1", first).await?;
         handle(&node, principal(&graph, first).await?, &mut statuses).await?;
         let late = ask(&graph, daniel, "is Windows in scope?").await?;
         let second = ops::add_principal(
@@ -1027,7 +1053,7 @@ mod tests {
         let spec = CreateTask { title: "Use the connector".into(), after: vec![moving], ..Default::default() };
         let waiting = ops::create_task(&alpha, daniel, spec).await?;
         ops::assign(&alpha, daniel, waiting, Some(alice)).await?;
-        let node = NodeGraph::new(ctx.clone());
+        let node = NodeGraph::new(ctx.clone()).await?;
         let _routing = start(node.clone()).await?;
         let made_before = node.all::<NotificationView>().await?.len();
         let (mut alices, _query, _guard) = arrivals(&alpha, alice)?;

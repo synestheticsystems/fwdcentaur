@@ -57,6 +57,16 @@ impl ProjectGraph {
         Ok(every.iter().map(|(p, _)| Ok((p.id(), p.project_id()?))).collect::<Result<_, PropertyError>>()?)
     }
 
+    /// A live query on the project's placed records `args` selects, read as
+    /// [`ProjectGraph::fetch_placed`] reads them.
+    pub fn query_placed_matching<R: ComponentViews>(
+        &self,
+        args: impl TryInto<MatchArgs<Parsed>, Error = impl Into<RetrievalError>>,
+    ) -> Result<LiveQuery<(PlacementView, R)>, RetrievalError> {
+        let args = args.try_into().map_err(Into::into)?;
+        self.ctx.query(self.scoped(args))
+    }
+
     /// A live query on the placed record `id` through `R`'s components, wherever it is, which
     /// tells of each change of what they hold.
     pub fn query_placed<R: ComponentViews>(&self, id: EntityId) -> Result<LiveQuery<R>, RetrievalError> {
@@ -136,15 +146,17 @@ impl ProjectTransaction {
         Ok(component.initialize_new_entity(record, model, record.system_epoch())?)
     }
 
-    /// The component `M` of the placed record `placement` is on, to change in this transaction. A
-    /// record of another project is refused as [`ProjectTransaction::edit`] refuses it.
+    /// The component `M` of the record `placing` is on, to change in this transaction: `placing` is
+    /// the component that names the record's project, a placed record's `Placement` or a
+    /// principal's `Role`. A record of another project is refused as [`ProjectTransaction::edit`]
+    /// refuses it.
     pub fn edit_placed<'rec, 'trx: 'rec, M: Model>(
         &'trx self,
-        placement: &PlacementView,
+        placing: &impl InProjectView,
     ) -> Result<MutableBorrow<'rec, M::Mutable>, ProjectGraphError> {
-        match placement.project_id()? {
-            project if project == self.project => Ok(self.trx.edit::<M>(placement.entity())?),
-            project => Err(ProjectGraphError::OfAnotherProject { record: placement.id(), project }),
+        match placing.project_id()? {
+            project if project == self.project => Ok(self.trx.edit::<M>(placing.entity())?),
+            project => Err(ProjectGraphError::OfAnotherProject { record: placing.id(), project }),
         }
     }
 }
