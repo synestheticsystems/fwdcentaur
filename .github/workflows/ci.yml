@@ -6,8 +6,9 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
-    # cargo test --workspace takes about three minutes here and the whole job about thirteen; on 2026-09-30 a test waited for good and the job ran on toward the six-hour limit until cancelled (run 36783874154).
-    timeout-minutes: 30
+    # The whole job has taken 17 to 28 minutes with the cache restored, and over 30 when a change of the pins leaves the cache cold: run 44055982477 reached its last step after 26 minutes and was cancelled at 30.
+    # The limit is still a guard: on 2026-09-30 a test waited for good and the job ran on toward the six-hour limit until cancelled (run 36783874154).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       # The toolchain rust-toolchain.toml pins, so that CI and a developer's machine run the same
