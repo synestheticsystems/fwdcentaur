@@ -11,9 +11,10 @@ use ankurah::model::Mutable;
 use ankurah::property::{Json, Ref};
 use ankurah::proto::{Attested, Event};
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Model, ModelId, Node, PermissiveAgent, View};
-use ankurah_commons::akev::{Creation, ModelDefinitions};
+use ankurah_commons::akev::Genesis;
 use ankurah_commons::cognition::{Intention, IntentionView};
 use ankurah_commons::records::{Attribution, ClosedView, CreatedView, EditedView};
+use ankurah_commons::registration;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::durable;
@@ -69,9 +70,8 @@ fn own_attribution(side: Side) -> Result<(EntityId, Vec<Attested<Event>>)> {
         Side::Below => [3; 32],
         Side::Above => [0; 32],
     };
-    let definitions =
-        ModelDefinitions::declared(old::Attribution::descriptor(), |_| Creation { at: WRITTEN as u64, nonce });
-    let events = definitions.events()?;
+    let geneses = registration::definitions(old::Attribution::descriptor(), |_, _| (nonce, WRITTEN as u64))?;
+    let events = geneses.iter().map(Genesis::event).collect::<Result<Vec<_>, _>>()?;
     let own = events[0].entity_id;
     assert_eq!(
         own < minted(Attribution::descriptor()),

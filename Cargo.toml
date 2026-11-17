@@ -29,7 +29,7 @@ ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "
 # (`fwd_core::durable`). `text` holds the quotation that says whose words an intention's description
 # holds; `git`, `graph`, `messaging` and `work` hold what fwd's own models move onto, one kind of
 # record at a time (D223), and the kinds of edge its relations are written as (`fwd_core::edge_kinds`).
-ankurah-commons        = { git = "https://github.com/ankurah/commons", rev = "fa9ac91525ca3e9f93edfb9f01e47ce423685276", default-features = false, features = ["cognition", "git", "graph", "identity", "messaging", "records", "text", "work"] }
+ankurah-commons        = { git = "https://github.com/ankurah/commons", rev = "f1ef03a3f085f5ee729d410193ad6ee5a2ae4570", default-features = false, features = ["cognition", "git", "graph", "identity", "messaging", "records", "text", "work"] }
 # The connection pool ankurah-storage-sqlite is built on, the same major: the CLI builds the pool
 # of its in-memory store itself (crates/fwd-core/src/daemon.rs, `ephemeral_store`).
 bb8                    = "0.9"

@@ -75,9 +75,10 @@ dependencies = [
 [[package]]
 name = "ankurah-commons"
 version = "0.0.0"
-source = "git+https://github.com/ankurah/commons?rev=fa9ac91525ca3e9f93edfb9f01e47ce423685276#fa9ac91525ca3e9f93edfb9f01e47ce423685276"
+source = "git+https://github.com/ankurah/commons?rev=f1ef03a3f085f5ee729d410193ad6ee5a2ae4570#f1ef03a3f085f5ee729d410193ad6ee5a2ae4570"
 dependencies = [
  "ankurah",
+ "base64 0.22.1",
  "serde",
  "strum 0.26.3",
 ]

@@ -26,7 +26,7 @@ impl RelationKind {
         RelationKind::iter().find(|word| *word != RelationKind::MotivatedBy && word.minted() == kind)
     }
 
-    /// The id of the kind's record, as `graph/edge_kinds.akev` in the Commons states it.
+    /// The id of the kind's record, as the Commons' kept mint states it (`graph/edge_kind.akev`).
     fn minted(self) -> &'static str {
         match self {
             RelationKind::DependsOn => "ojLY_tMxG-XheeqJcGK1uLJWXF8xFSj5yB0QAsQOKrE",
