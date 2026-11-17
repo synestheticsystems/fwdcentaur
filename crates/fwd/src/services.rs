@@ -9,13 +9,14 @@
 //! the record's id, stay right. Views are live, so the caches of statuses, assignees and what each
 //! triage agent serves store values, and what a change set travels with its event, read when the
 //! change arrived. A fresh entity is reported by the change set as both `added` and
-//! `appeared`, so only `added` is consumed, and a bounded set of handled ids guards against
-//! duplicates. What one author does on one task grows the notification its recipient already
-//! holds unread (rule 10), which routing finds in the graph each time rather than in a cache: a
-//! step and its comment join the same one whichever arrives first, after a restart as before it,
-//! and an item routed twice is held once (`routing::apply`).
+//! `appeared`, so only `added` is consumed, and of it only what the change made ([`made`]); a
+//! bounded set of handled ids guards against duplicates. What one author does on one task grows
+//! the notification its recipient already holds unread (rule 10), which routing finds in the graph
+//! each time rather than in a cache: a step and its comment join the same one whichever arrives
+//! first, after a restart as before it, and an item routed twice is held once (`routing::apply`).
 
-use ankurah::changes::ChangeSet;
+use ankurah::changes::{ChangeSet, ItemChange};
+use ankurah::model::ComponentViews;
 use ankurah::signals::Subscribe;
 use ankurah::{EntityId, LiveQuery};
 use anyhow::{anyhow, Result};
@@ -115,7 +116,7 @@ pub async fn start(node: NodeGraph) -> Result<Routing> {
                 updated = cs.updated().len(),
                 "message changeset"
             );
-            for m in cs.added() {
+            for m in made(&cs) {
                 let _ = tx.send(Event::Message(m));
             }
         }));
@@ -130,7 +131,7 @@ pub async fn start(node: NodeGraph) -> Result<Routing> {
                 updated = cs.updated().len(),
                 "task changeset"
             );
-            for t in cs.added() {
+            for t in made(&cs) {
                 let (status, assigned) = (t.status().ok(), Assigned::of(&t));
                 let _ = tx.send(Event::TaskAdded(t, status, assigned));
             }
@@ -143,7 +144,7 @@ pub async fn start(node: NodeGraph) -> Result<Routing> {
     {
         let tx = tx.clone();
         guards.push(relations.subscribe(move |cs: ChangeSet<RelationView>| {
-            for r in cs.added() {
+            for r in made(&cs) {
                 let _ = tx.send(Event::Relation(r));
             }
         }));
@@ -151,7 +152,7 @@ pub async fn start(node: NodeGraph) -> Result<Routing> {
     {
         let tx = tx.clone();
         guards.push(decisions.subscribe(move |cs: ChangeSet<DecisionView>| {
-            for d in cs.added() {
+            for d in made(&cs) {
                 let status = d.status().ok();
                 let _ = tx.send(Event::DecisionAdded(d, status));
             }
@@ -182,6 +183,23 @@ pub async fn start(node: NodeGraph) -> Result<Routing> {
         _guards: guards,
         _worker: worker,
     })
+}
+
+/// The records `cs` adds to a standing query that its change made, which routing tells of. A record
+/// that comes to match a query in an update is added too: one of fwd's records does when
+/// `fwd admin migrate` gives it the components of the Commons' models a query reads, and telling of
+/// it would tell everyone again of every record converted. A record made carries its creation in
+/// the events that add it.
+fn made<R: ComponentViews + Clone>(cs: &ChangeSet<R>) -> Vec<R> {
+    cs.changes
+        .iter()
+        .filter_map(|change| match change {
+            ItemChange::Add { item, events } if events.iter().any(|e| e.payload.is_entity_create()) => {
+                Some(item.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The last status routing saw for each task and decision, the last assignee for each task, and
@@ -1030,6 +1048,63 @@ mod tests {
         assert_eq!(Value::from(told.target()?)["id"], waiting.to_base64());
         let made = node.all::<NotificationView>().await?;
         assert_eq!(made.len(), made_before + 1, "the finish told her, and nothing told anyone else: {made:?}");
+        Ok(())
+    }
+
+    /// A task whose own entity an update gives the Commons' task and a `Placement`, as `fwd admin
+    /// migrate` moves a record, comes to match a standing query over those components, and the
+    /// change set adds it as it adds a task made with them; routing takes only the task made.
+    #[tokio::test]
+    async fn a_record_that_an_update_gives_a_querys_components_is_added_but_only_a_record_made_is_routed() -> Result<()>
+    {
+        use ankurah::model::Mutable;
+        use ankurah_commons::work;
+        let store = durable::open(SqliteStorageEngine::open_in_memory().await?).await?;
+        let ctx = store.context_async(DEFAULT_CONTEXT).await?;
+        let graph = ProjectGraph::ensure(ctx.clone(), uuid::Uuid::new_v4(), "routing").await?;
+        let ines = ops::ensure_principal(&graph, "ines", "Ines", PrincipalKind::Human, None).await?;
+        let title = "Cap the retry delay";
+        let old = ops::create_task(&graph, ines, CreateTask { title: title.into(), ..Default::default() }).await?;
+        let commons_task = || work::Task {
+            title: title.into(),
+            what: String::new(),
+            why: String::new(),
+            done_when: String::new(),
+            status: work::TaskStatus::Open,
+            hold: None,
+            priority: None,
+            labels: ankurah::property::Json::new(serde_json::json!([])),
+        };
+
+        let query = ctx.query::<(PlacementView, work::TaskView)>("true")?;
+        query.wait_initialized().await?;
+        let (tx, mut changes) = mpsc::unbounded_channel();
+        let _guard = query.subscribe(move |cs: ChangeSet<(PlacementView, work::TaskView)>| {
+            let ids =
+                |found: Vec<(PlacementView, work::TaskView)>| found.iter().map(|(p, _)| p.id()).collect::<Vec<_>>();
+            let _ = tx.send((ids(cs.added()), ids(made(&cs))));
+        });
+        let task: TaskView = graph.get(old).await?;
+        let trx = graph.begin();
+        let edited = trx.edit(&task)?;
+        let record = Mutable::entity(&*edited);
+        trx.add(record, &Placement { project: graph.project() }).await?;
+        trx.add(record, &commons_task()).await?;
+        trx.commit().await?;
+        let trx = graph.begin();
+        let fresh = trx.create_placed(&commons_task()).await?.id();
+        trx.commit().await?;
+
+        // The minute only detects a change that never comes.
+        let (mut added, mut routed) = (Vec::new(), Vec::new());
+        while !(added.contains(&old) && added.contains(&fresh)) {
+            let (a, m) = tokio::time::timeout(std::time::Duration::from_secs(60), changes.recv())
+                .await?
+                .ok_or_else(|| anyhow!("the query ended"))?;
+            added.extend(a);
+            routed.extend(m);
+        }
+        assert_eq!(routed, vec![fresh]);
         Ok(())
     }
 }

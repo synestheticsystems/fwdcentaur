@@ -4,7 +4,7 @@ Draft for discussion, 2026-09-24; revised the same day after Daniel's answers to
 
 ## Conventions
 
-- **Project**: an intention graph, a UUID and a name; a set of repositories identified by their upstream remotes, never by a clone or a worktree (R, 2026-09-25). The daemon keeps every project in one durable node and one store (`../DECISIONS.md`, D135), where each project has a `Project` record and every record of the nine models below names its project in a `project` field, set when the record is made, and an intention in the `Placement` component on its entity (Intention, below); only a task's move to another project changes it, for the task and what belongs to it (`cli.md`, "Moving tasks to another project"). That field groups a project's records, and every list and live query holds one project's alone: every read and write goes through a project's graph, which adds it to them; while a record's relations, an id a record holds and an id someone types reach a record of any project, which is named beside it (D176, D181; `daemon.md`, "Projects in one node"). Checkouts (clones and worktrees) are local, dynamic and never in the graph.
+- **Project**: an intention graph, a UUID and a name; a set of repositories identified by their upstream remotes, never by a clone or a worktree (R, 2026-09-25). The daemon keeps every project in one durable node and one store (`../DECISIONS.md`, D135), where each project has a `Project` record and every record of the nine models below names its project in a `project` field, set when the record is made, and an intention or a repository in the `Placement` component on its entity (Intention, below); only a task's move to another project changes it, for the task and what belongs to it (`cli.md`, "Moving tasks to another project"). That field groups a project's records, and every list and live query holds one project's alone: every read and write goes through a project's graph, which adds it to them; while a record's relations, an id a record holds and an id someone types reach a record of any project, which is named beside it (D176, D181; `daemon.md`, "Projects in one node"). Checkouts (clones and worktrees) are local, dynamic and never in the graph.
 - **Identity**: every entity has an Ankurah `EntityId` (ULID, shown as its base64 string), and in v1 that full id is the identifier everywhere: CLI arguments, JSON output, `context` maps, notification refs (Daniel, Q3: sequential numbers are the most human-friendly and the least Ankurah-friendly; use the full id for now). The `T72`, `M15`, `S3`, `N120`, `C40` forms in these docs are placeholders for readability, not a feature. Human-friendly short ids are filed as a later task (T18: options are unique base64 prefixes like git short SHAs, which need no coordination, or project-sequential numbers, which need a single numberer). Since 2026-09-26 two narrow steps have been taken, both with the decision records: the CLI takes the first six characters or more of an id when they begin the id of exactly one entity the command could use (the first option, for the command line only), and a decision carries its project's number, cited as `D<number>` (the second option, for decisions only, numbered from the decisions themselves rather than by a numbering service).
 - **Timestamps** are i64 milliseconds since epoch, wall clock, informational only; Ankurah's causal ordering decides merges.
 - **Enumerations** are Rust enums stored as strings (the simplikeys `impl_wrapper_type!` plus `Property` pattern); unknown values are preserved, displayed as-is, and treated as "unknown" by rules.
@@ -62,18 +62,19 @@ A principal is someone's part in one project, and names that project, so every p
 
 `last_active` records when the principal last wrote to the graph, so that the pickers and `fwd principal list` can show an agent that has written nothing for twelve hours as dormant, below the others, where the users left behind by finished agents no longer crowd out the agents at work (`../DECISIONS.md`, D123: a subagent retires its own user when its job ends, and nothing retires a user by time, since fwd cannot tell a quiet agent from a gone one; `crates/fwd-core/src/dormancy.rs`). Every client stamps it through one function, `dormancy::wrote`, once a write of its has succeeded, but for two kinds of write that are no agent's work on the graph: marking notifications read or dismissed, which reads an inbox, and `fwd admin migrate`, the person's upkeep of the graph (task bWI438nh counts a message, a task change, a relation, a decision and a principal change as an agent's activity). The CLI stamps the principal a command acts as after every command that writes work into the project or changes a principal, and never after marking notifications or after `fwd admin migrate`; it stamps only once the command has run without error, so that a refused command stamps no one, and within the part of the command that ends it when its daemon went away, so that a stamp the daemon never got ends the command as a lost write does. The page and the extension stamp the principal they act as after each of their other writes. `fwd principal add`, anew or with `--succeeds`, stamps the agent it makes as it makes it, since the command that names an agent acts as another principal, or as none. The field is stored rather than read from what each principal wrote because two of the kinds of write that count leave nothing a reader could find: a task's changes after its creation set its `updated` and record no author, and a principal's changes record no time at all; an entity's id is the hash of its creation event rather than a time, and Ankurah's events carry a time but no author (D123's consequences name the field; where each client stamps it, and that an agent with none reads as dormant, are the lead's rulings of 2026-09-30 on task bWI438nh). An agent that is not retired is dormant when its `last_active` is more than twelve hours old by the reader's clock, or when it has none, as every agent recorded before 2026-09-30 has none until its next write: the finished agents of before then go below the others at once, one still at work comes back at its next write, and nothing fills the field in for them. A person is never dormant. Dormant is an overlay for display, derived as a task's availability overlays are (Task, below), and never enforced: a dormant agent is still offered, below the others, still addressable, still reached by routing, and still writes, and its next write makes it active again.
 
-### Repo
+### Repository
 
-A registered repository. Anchors reference it so a project can span several repositories.
+A registered repository. Anchors reference it so a project can span several repositories. It is the Commons' `git.Repository` (`ankurah-commons`, `git`), placed in its project by a `Placement` as an intention is (Intention, below):
 
 ```rust
-#[derive(Model)]
-pub struct Repo {
-    pub name: String,
+pub struct Repository {
+    #[active_type(LWW)] pub name: String,
     pub remote_urls: Json,     // ["git@github.com:org/x.git", ...]
-    pub default_branch: String,
+    #[active_type(LWW)] pub default_branch: String,
 }
 ```
+
+A checkout registers its repository by its upstream (`ops::ensure_repo`), and an anchor's checkout is found by the upstreams its repository answers to (`ops::repo_upstreams`). Until 2026-11-17 a repository was fwd's own model `Repo`, the same three fields with a `project`; that model stays on the entity, and `fwd admin migrate` gives each the Commons' component and a `Placement`, keeping its id, which anchors hold (`cli.md`, "Maintenance"); a scope names a repository by its upstream's key, never by its id.
 
 ### Task
 
@@ -202,7 +203,7 @@ An interior sub-entity of a file (Manifold's pointing contract applied to source
 ```rust
 #[derive(Model)]
 pub struct CodeAnchor {
-    pub repo: Ref<Repo>,
+    pub repo: EntityId,              // a Repository's (above): a plain id, as a relation's end is, since the Commons' model has no page bindings a Ref could name
     pub path: String,                // repo-relative, at the anchored version
     pub anchor_key: Option<String>,  // "fwd-anchor:1:" + sha256(repo, path, basis_blob, range); absent on anchors made before keys until backfilled
     pub span_key: Option<String>,    // "fwd-span:1:" + sha256(anchored text, whitespace runs collapsed); absent for a whole file

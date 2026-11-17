@@ -777,16 +777,21 @@ enum OlderClient {
     /// Built for the one store before it held the Commons' kept mint, the first generation of
     /// `fwd_core::daemon_socket::GENERATION`.
     BeforeTheKeptMint,
+    /// Built for the one store before its repositories moved onto the Commons' models, the second
+    /// generation.
+    BeforeCommonsRepositories,
 }
 
 impl OlderClient {
-    const ALL: [OlderClient; 2] = [OlderClient::PerProjectStores, OlderClient::BeforeTheKeptMint];
+    const ALL: [OlderClient; 3] =
+        [OlderClient::PerProjectStores, OlderClient::BeforeTheKeptMint, OlderClient::BeforeCommonsRepositories];
 
     /// The route at which such a client asks for its socket.
     fn path(self) -> &'static str {
         match self {
             OlderClient::PerProjectStores => "/p/{project}/ws",
             OlderClient::BeforeTheKeptMint => "/p/{project}/one-store/ws",
+            OlderClient::BeforeCommonsRepositories => "/p/{project}/one-store/2/ws",
         }
     }
 
@@ -795,6 +800,7 @@ impl OlderClient {
         match self {
             OlderClient::PerProjectStores => "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n",
             OlderClient::BeforeTheKeptMint => "This fwd daemon's store holds the Commons' kept mint, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n",
+            OlderClient::BeforeCommonsRepositories => "This fwd daemon's store keeps its repositories on the Commons' models, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n",
         }
     }
 
@@ -1213,7 +1219,7 @@ mod tests {
     }
 
     /// A client built for an earlier store asks for its socket where the daemons of that store
-    /// served it, at the per-project socket or at the one store's before the kept mint, and is
+    /// served it, at the per-project socket or at the one store's of an earlier generation, and is
     /// refused with `410 Gone` and the sentence saying why and what to do, whatever project it
     /// names, so that it never reads this store; a client of this build asks where
     /// `fwd_core::daemon_socket` says, and its socket opens.
@@ -1234,6 +1240,7 @@ mod tests {
         let refused = [
             ("/p/{project}/ws", "This fwd daemon keeps every project in one store, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n"),
             ("/p/{project}/one-store/ws", "This fwd daemon's store holds the Commons' kept mint, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n"),
+            ("/p/{project}/one-store/2/ws", "This fwd daemon's store keeps its repositories on the Commons' models, and this client's build of fwd is older than the daemon's: restart it, or reload this page, from the build the daemon runs.\n"),
         ];
         for (path, refusal) in refused {
             for named in [project.id, Uuid::nil()] {

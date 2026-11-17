@@ -13,22 +13,23 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/synestheticsystems/fwdcentaur"
 
 [workspace.dependencies]
-# Pinned by hash (docs/DECISIONS.md, D23: fwdcentaur pins Ankurah by hash) to Ankurah's branch
-# fwd-pin/portable-genesis: its main at 5919b1a0, and a durable node that imports events made outside
-# it, which seeding the Commons' kept mint needs. crates/fwd-store-convert converts stores written by
-# Ankurah f8e85d2, on the feat/storage-node-sqlite-wasm branch, into this revision's format.
+# Pinned by hash (docs/DECISIONS.md, D23: fwdcentaur pins Ankurah by hash) to Ankurah's main at
+# c8df01cc, where a durable node imports events made outside it, which seeding the Commons' kept mint
+# needs. crates/fwd-store-convert converts stores written by Ankurah f8e85d2, on the
+# feat/storage-node-sqlite-wasm branch, into this revision's format.
 # crates/fwd-host stays on f8e85d2 until storage/sqlite-node, the SQLite engine it runs on in Node.js,
 # reaches Ankurah main.
-ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "22c997d27f50466ab5b9559ddf00c631842cf4d7", features = ["derive"] }
-ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "22c997d27f50466ab5b9559ddf00c631842cf4d7" }
-ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "22c997d27f50466ab5b9559ddf00c631842cf4d7" }
-ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "22c997d27f50466ab5b9559ddf00c631842cf4d7" }
+ankurah                = { git = "https://github.com/ankurah/ankurah", rev = "c8df01cc9354a1236d36443476baf7dc65f8ddee", features = ["derive"] }
+ankurah-storage-sqlite = { git = "https://github.com/ankurah/ankurah", rev = "c8df01cc9354a1236d36443476baf7dc65f8ddee" }
+ankurah-websocket-server = { git = "https://github.com/ankurah/ankurah", rev = "c8df01cc9354a1236d36443476baf7dc65f8ddee" }
+ankurah-websocket-client = { git = "https://github.com/ankurah/ankurah", rev = "c8df01cc9354a1236d36443476baf7dc65f8ddee" }
 # The shared model definitions fwd's intentions are built on, at a commit that pins the same Ankurah
 # revision as the lines above: crates of two revisions would not share Ankurah's types. Its models
 # declare the ids of their kept mint, which every durable node fwd opens imports first
 # (`fwd_core::durable`). `text` holds the quotation that says whose words an intention's description
-# holds.
-ankurah-commons        = { git = "https://github.com/ankurah/commons", rev = "57be49abe9e91e380598716f0b4a94017c12e01f", default-features = false, features = ["cognition", "records", "identity", "text"] }
+# holds; `git`, `graph`, `messaging` and `work` hold what fwd's own models move onto, one kind of
+# record at a time (D223), and the kinds of edge its relations are written as (`fwd_core::edge_kinds`).
+ankurah-commons        = { git = "https://github.com/ankurah/commons", rev = "f1ef03a3f085f5ee729d410193ad6ee5a2ae4570", default-features = false, features = ["cognition", "git", "graph", "identity", "messaging", "records", "text", "work"] }
 # The connection pool ankurah-storage-sqlite is built on, the same major: the CLI builds the pool
 # of its in-memory store itself (crates/fwd-core/src/daemon.rs, `ephemeral_store`).
 bb8                    = "0.9"

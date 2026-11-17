@@ -9,6 +9,7 @@ use std::str::FromStr;
 use ankurah::property::Json;
 use ankurah::{EntityId, Ref};
 use fwd_core::anchoring::anchor_key;
+use fwd_core::conversion::repos::before_d261::{Repo, RepoView};
 use fwd_core::model::*;
 use fwd_core::project_graph::{ProjectGraph, ProjectTransaction};
 
@@ -489,12 +490,12 @@ pub fn build(model: &'static str, f: &mut Fields, project: Ref<Project>) -> Resu
             closed_reason: f.opt_text("closed_reason")?,
         }),
         "CodeAnchor" => {
-            let repo: Ref<Repo> = f.reference("repo")?;
+            let repo = f.id("repo", None)?;
             let path = f.text("path")?;
             let basis_blob = f.opt_text("basis_blob")?;
             let (start_line, end_line, whole_file) =
                 (f.int("start_line")?, f.int("end_line")?, f.opt_bool("whole_file")?);
-            let anchor_key = rekeyed(f, *repo, &path, basis_blob.as_deref(), (start_line, end_line, whole_file))?;
+            let anchor_key = rekeyed(f, repo, &path, basis_blob.as_deref(), (start_line, end_line, whole_file))?;
             Made::CodeAnchor(CodeAnchor {
                 project,
                 repo,

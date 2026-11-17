@@ -11,9 +11,10 @@ use ankurah::model::Mutable;
 use ankurah::property::{Json, Ref};
 use ankurah::proto::{Attested, Event};
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Model, ModelId, Node, PermissiveAgent, View};
-use ankurah_commons::akev::{Creation, ModelDefinitions};
+use ankurah_commons::akev::Genesis;
 use ankurah_commons::cognition::{Intention, IntentionView};
 use ankurah_commons::records::{Attribution, ClosedView, CreatedView, EditedView};
+use ankurah_commons::registration;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::durable;
@@ -69,9 +70,8 @@ fn own_attribution(side: Side) -> Result<(EntityId, Vec<Attested<Event>>)> {
         Side::Below => [3; 32],
         Side::Above => [0; 32],
     };
-    let definitions =
-        ModelDefinitions::declared(old::Attribution::descriptor(), |_| Creation { at: WRITTEN as u64, nonce });
-    let events = definitions.events()?;
+    let geneses = registration::definitions(old::Attribution::descriptor(), |_, _| (nonce, WRITTEN as u64))?;
+    let events = geneses.iter().map(Genesis::event).collect::<Result<Vec<_>, _>>()?;
     let own = events[0].entity_id;
     assert_eq!(
         own < minted(Attribution::descriptor()),
@@ -242,6 +242,8 @@ async fn each_intention_moves_whole(side: Side) -> Result<()> {
     assert_eq!(quotation.text()?, "Readers keep their place, in the speaker's words");
     assert_eq!((*recorded.by()?, recorded.created()?.unix_millis(), quotation.said()?), (tide, WRITTEN, None));
     assert!(quoted.entity().has_membership(&ModelId::EntityId(minted(Attribution::descriptor()))));
+    let mark = alpha.component_of::<MigratedView>(quoted).await?.expect("marked as the conversion's");
+    assert_eq!(mark.migration()?, "intention_words");
     let speaker = intentions::whose_words(&alpha, for_ines).await?.and_then(|(speaker, _)| speaker);
     assert_eq!(speaker, Some(ines), "her words, as the node's own attribution said");
 

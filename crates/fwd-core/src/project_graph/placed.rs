@@ -63,13 +63,14 @@ impl ProjectGraph {
         self.ctx.query(selecting(equals("id", Value::EntityId(id))))
     }
 
-    /// The component `V` of the placed record `placement` is on; none when the record does not
-    /// carry it, as a record carries `LastEdit` only once edited and `Attribution` only when
-    /// someone else wrote its words down.
-    pub async fn component_of<V: View>(&self, placement: &PlacementView) -> Result<Option<V>, RetrievalError> {
+    /// The component `V` of the record `record` is a view of; none when the record does not carry
+    /// it, as a record carries `Edited` only once edited and `Attribution` only when someone else
+    /// wrote its words down, and one of fwd's own models carries the Commons' only once
+    /// `fwd admin migrate` has moved it onto them.
+    pub async fn component_of<V: View>(&self, record: &impl View) -> Result<Option<V>, RetrievalError> {
         // A view of a model the node has not bound is refused before it looks at the record.
         self.ctx.resolve_model_id::<V::Model>().await?;
-        match V::from_entity(placement.entity().clone()) {
+        match V::from_entity(record.entity().clone()) {
             Ok(component) => Ok(Some(component)),
             Err(RetrievalError::MissingComponent { .. }) => Ok(None),
             Err(e) => Err(e),

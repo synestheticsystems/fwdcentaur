@@ -195,23 +195,6 @@ pub struct Principal {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Repo
-
-/// A registered repository, keyed by its upstream (`remote_urls`). Anchors reference it so a project can span several repositories.
-#[derive(Model, Debug, Clone, Serialize, Deserialize)]
-pub struct Repo {
-    /// The project the record belongs to, set when it is made; only a move to another project
-    /// changes it.
-    pub project: Ref<Project>,
-    #[active_type(LWW)]
-    pub name: String,
-    /// `["git@github.com:org/x.git", ...]`
-    pub remote_urls: Json,
-    #[active_type(LWW)]
-    pub default_branch: String,
-}
-
-// ---------------------------------------------------------------------------------------------
 // Task
 
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
@@ -312,7 +295,19 @@ pub struct Task {
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
 #[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::Display,
+    strum::EnumString,
+    strum::EnumIter,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum RelationKind {
@@ -480,7 +475,10 @@ pub struct CodeAnchor {
     /// The project the record belongs to, set when it is made; only a move to another project
     /// changes it.
     pub project: Ref<Project>,
-    pub repo: Ref<Repo>,
+    /// The repository the file is in, a record placed with the Commons' `git.Repository`: a plain
+    /// id, stored as a `Ref` is, since that model generates no bindings for the page, which a `Ref`
+    /// to it would need.
+    pub repo: EntityId,
     /// Repo-relative, at the anchored version.
     #[active_type(LWW)]
     pub path: String,
@@ -933,6 +931,21 @@ pub struct Decision {
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Placement {
     pub project: Ref<Project>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Migrated
+
+/// The part of `fwd admin migrate` that made the record, as a component on the record's own entity.
+/// What a move onto the Commons' models makes, such as a quotation of an intention's words, states
+/// what the move read in records people wrote, and the mark tells it from a record someone made. A
+/// migration is no record of its own, so it is named by text.
+#[derive(Model, Debug, Clone, Serialize, Deserialize)]
+#[model(no_ffi)]
+pub struct Migrated {
+    /// The move's name, such as `intention_words`.
+    #[active_type(LWW)]
+    pub migration: String,
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -1,14 +1,16 @@
 //! Repositories are identified by their upstream remote, never by a worktree or a directory
-//! (Daniel, 2026-09-25): clones and worktrees of one upstream share one `Repo` entity.
+//! (Daniel, 2026-09-25): clones and worktrees of one upstream share one repository record.
 
 use ankurah::policy::DEFAULT_CONTEXT;
+use ankurah::property::Json;
+use ankurah_commons::git::{Repository, RepositoryView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::anchoring::git;
 use fwd_core::durable;
-use fwd_core::model::RepoView;
 use fwd_core::ops::{self, repo_key};
 use fwd_core::project_graph::ProjectGraph;
+use serde_json::json;
 use std::path::Path;
 
 /// The graph of a project alone in a store in memory.
@@ -48,15 +50,38 @@ async fn clones_and_worktrees_of_one_upstream_share_one_repo() -> Result<()> {
     let from_clone = ops::ensure_repo(&graph, &clone).await?;
     assert_eq!(from_main, from_worktree, "a worktree is the same repository");
     assert_eq!(from_main, from_clone, "another clone spelling the same upstream differently is the same repository");
-    let repos: Vec<RepoView> = graph.fetch("default_branch != ''").await?;
+    let repos = graph.all_placed::<RepositoryView>().await?;
     assert_eq!(repos.len(), 1);
-    assert_eq!(repos[0].name()?, "simulator", "named after the directory that registered it");
+    assert_eq!(repos[0].1.name()?, "simulator", "named after the directory that registered it");
+    assert!(graph.models_labelled("repo").await?.is_empty(), "and no model of before the move is defined");
 
     // No remote, no identity: refused, never keyed by a directory name.
     let local = dir.path().join("local-only");
     init_repo(&local, None)?;
     let err = ops::ensure_repo(&graph, &local).await.unwrap_err().to_string();
     assert!(err.contains("no origin remote"), "{err}");
+    Ok(())
+}
+
+/// A repository recorded with no default branch is still the one its upstream names: a checkout of
+/// that upstream gets it, and no second one is registered. (Until repositories moved onto the
+/// Commons' model, the lookup read only those with a default branch.)
+#[tokio::test]
+async fn a_repository_with_no_default_branch_is_found_by_its_upstream() -> Result<()> {
+    let graph = project().await?;
+    let trx = graph.begin();
+    let recorded = Repository {
+        name: "simulator".into(),
+        remote_urls: Json::new(json!(["git@example.com:acme/simulator.git"])),
+        default_branch: String::new(),
+    };
+    let id = trx.create_placed(&recorded).await?.id();
+    trx.commit().await?;
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("simulator");
+    init_repo(&root, Some("https://example.com/acme/simulator"))?;
+    assert_eq!(ops::ensure_repo(&graph, &root).await?, id);
+    assert_eq!(graph.all_placed::<RepositoryView>().await?.len(), 1);
     Ok(())
 }
 

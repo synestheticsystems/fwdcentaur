@@ -17,6 +17,7 @@ pub mod anchoring;
 #[cfg(feature = "native")]
 pub mod backup;
 mod calendar;
+pub mod conversion;
 #[cfg(feature = "native")]
 pub mod daemon;
 pub mod daemon_socket;
@@ -24,6 +25,7 @@ pub mod decision_log;
 pub mod dormancy;
 #[cfg(feature = "native")]
 pub mod durable;
+pub mod edge_kinds;
 pub mod file_mention;
 pub mod former_ids;
 pub mod guidance;
