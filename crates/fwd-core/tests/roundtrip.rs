@@ -62,8 +62,8 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
     // A repository is the Commons' model, which names no project, placed in one by `Placement`.
     let repo = trx
         .create(&Repository {
-            name: "fwdcentaur".into(),
-            remote_urls: Json::new(serde_json::json!(["git@github.com:synestheticsystems/fwdcentaur.git"])),
+            name: "simulator".into(),
+            remote_urls: Json::new(serde_json::json!(["git@example.com:acme/simulator.git"])),
             default_branch: "main".into(),
         })
         .await?;

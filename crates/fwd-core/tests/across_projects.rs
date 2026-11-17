@@ -420,8 +420,8 @@ async fn whole_file(graph: &ProjectGraph, by: EntityId) -> Result<EntityId> {
     let trx = graph.begin();
     let repo = trx
         .create_placed(&ankurah_commons::git::Repository {
-            name: "fwdcentaur".into(),
-            remote_urls: ankurah::property::Json::new(json!(["git@github.com:synestheticsystems/fwdcentaur.git"])),
+            name: "simulator".into(),
+            remote_urls: ankurah::property::Json::new(json!(["git@example.com:acme/simulator.git"])),
             default_branch: "main".into(),
         })
         .await?
