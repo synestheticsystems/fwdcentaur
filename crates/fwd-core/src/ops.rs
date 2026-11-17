@@ -251,13 +251,36 @@ pub async fn ensure_principal(
     kind: PrincipalKind,
     role: Option<AgentRole>,
 ) -> Result<EntityId> {
+    match found_by_name(graph, handle, kind).await? {
+        Some(found) => Ok(found),
+        None => made_unless_unmoved(graph, handle, display_name, kind, role).await,
+    }
+}
+
+/// The principal of `kind` that has the name `handle`, refusing a name two or more share.
+async fn found_by_name(graph: &ProjectGraph, handle: &str, kind: PrincipalKind) -> Result<Option<EntityId>> {
     let found = principals(graph).await?;
     match naming::by_name(&found, handle, Some(kind)).as_slice() {
-        [] => {}
-        [one] => return Ok(one.0.id()),
-        several => return Err(naming::refused(graph, handle, several, false).await?.into()),
+        [] => Ok(None),
+        [(role, _)] => Ok(Some(role.id())),
+        several => Err(naming::refused(graph, handle, several, false).await?.into()),
     }
+}
+
+/// Makes the principal [`ensure_principal`] found no one by, once the project holds no principal
+/// `fwd admin migrate` has not moved; but should the migration have moved the one it missed
+/// between that lookup and the guard, that one, which a second lookup finds.
+async fn made_unless_unmoved(
+    graph: &ProjectGraph,
+    handle: &str,
+    display_name: &str,
+    kind: PrincipalKind,
+    role: Option<AgentRole>,
+) -> Result<EntityId> {
     refuse_unmoved(graph).await?;
+    if let Some(found) = found_by_name(graph, handle, kind).await? {
+        return Ok(found);
+    }
     let trx = graph.begin();
     let made = trx
         .create(&Role {
@@ -498,6 +521,8 @@ pub async fn add_principal(
     if name.is_empty() {
         bail!("a name cannot be blank");
     }
+    refuse_unmoved(graph).await?;
+    let acting = caller_since_the_move(graph, acting, subject).await?;
     let existing = naming::principal_named(graph, name, None).await?;
     // The agent's session or thread bound to the principal the name names.
     let bound = match &existing {
@@ -570,9 +595,6 @@ pub async fn add_principal(
         None => subject.map(str::to_string),
     };
     one_lead_per_session(graph, taking, session.as_deref(), &handle, &itself).await?;
-    if existing.is_none() {
-        refuse_unmoved(graph).await?;
-    }
     let trx = graph.begin();
     let id = match existing {
         Some((p, _)) => {
@@ -624,6 +646,21 @@ pub async fn add_principal(
     Ok(id)
 }
 
+/// The principal a command that carries `subject` acts as, `acting` as its caller found it, or,
+/// where it found none, the one the subject is bound to now: a caller is found before the command
+/// runs, and `fwd admin migrate` may have moved the principal the subject is bound to since, which
+/// the command must not take for a newcomer and bind a second time.
+async fn caller_since_the_move(
+    graph: &ProjectGraph,
+    acting: Option<EntityId>,
+    subject: Option<&str>,
+) -> Result<Option<EntityId>> {
+    match (acting, subject) {
+        (None, Some(subject)) => Ok(subject::principal_of(graph, subject).await?.map(|(role, _)| role.id())),
+        (acting, _) => Ok(acting),
+    }
+}
+
 /// `fwd principal bind`: the Claude Code agent `subject` takes over the principal `name` names, a
 /// principal from before the fwd plugin that no agent is bound to (`claude`, a pilot's lead), so
 /// that the agent's commands act as it from then on (docs/design/agents-and-inbox.md, "An agent's
@@ -642,6 +679,7 @@ pub async fn bind_principal(
     named_by_as: Option<EntityId>,
 ) -> Result<EntityId> {
     let name = naming::bare(name);
+    refuse_unmoved(graph).await?;
     let Some((p, principal)) = naming::principal_named(graph, name, None).await? else {
         bail!(
             "no principal of this project is named `{name}`, so there is none to take over: an agent new to the project names itself, `fwd principal add {name} --role {ROLE_WORDS}`"
@@ -681,7 +719,6 @@ pub async fn bind_principal(
     // once `fwd principal add` brings it back, which checks it then.
     let counted = holds(&p, AgentRole::Lead).then_some(AgentRole::Lead);
     one_lead_per_session(graph, counted, Some(subject), &handle, &[p.id()]).await?;
-    refuse_unmoved(graph).await?;
     let trx = graph.begin();
     // The agent takes the principal over itself, saying so twice.
     subject::bind(&trx, p.id(), subject, p.id(), None).await?;
@@ -708,6 +745,7 @@ pub async fn admin_bind(graph: &ProjectGraph, name: &str, subject: &str, by: Ent
         );
     }
     let name = naming::bare(name);
+    refuse_unmoved(graph).await?;
     let Some((p, principal)) = naming::principal_named(graph, name, None).await? else {
         bail!("no principal of this project is named `{name}`, so there is none to bind");
     };
@@ -749,7 +787,6 @@ pub async fn admin_bind(graph: &ProjectGraph, name: &str, subject: &str, by: Ent
         held.push(binding);
     }
     one_lead_per_session(graph, Some(AgentRole::Lead), Some(subject), &handle, &[p.id()]).await?;
-    refuse_unmoved(graph).await?;
     let trx = graph.begin();
     for binding in &held {
         subject::unbind(&trx, binding, by).await?;
@@ -887,6 +924,8 @@ pub async fn add_successor(
     if name.is_empty() {
         bail!("a name cannot be blank");
     }
+    refuse_unmoved(graph).await?;
+    let acting = caller_since_the_move(graph, acting, subject).await?;
     if let Some((p, principal)) = naming::principal_named(graph, name, None).await? {
         let handle = principal.handle()?;
         if acting == Some(p.id()) {
@@ -924,7 +963,6 @@ pub async fn add_successor(
     one_triage_per_scope(graph, &serving, name, &[old.id()]).await?;
     one_lead_per_session(graph, Some(role), subject, name, &[old.id()]).await?;
     let unread = unread_of(graph, &old).await?;
-    refuse_unmoved(graph).await?;
     let trx = graph.begin();
     let made = trx
         .create(&Role {
@@ -990,7 +1028,8 @@ async fn unread_of(graph: &ProjectGraph, old: &RoleView) -> Result<Vec<Notificat
     Ok(graph.fetch(with_id("recipient = ? AND status = 'unread'", old.id())?).await?)
 }
 
-/// Hands `old`'s job to `heir` in `trx`: `old` is retired by `heir` with `heir` as its successor and
+/// Hands `old`'s job to `heir` in `trx`: `old` is retired by `heir`, unless it was retired before,
+/// with `heir` as its successor and
 /// holds no role, and serves nothing, any more, since its role and its scopes move (the caller
 /// gives them to `heir`), so that one brought back selects a role and takes scopes anew; and its
 /// `unread` notifications move to `heir`, each recording whom it was for (`for_id`), the one change
@@ -1001,7 +1040,10 @@ async fn hand_over(
     heir: EntityId,
     unread: &[NotificationView],
 ) -> Result<()> {
-    trx.close(old, &retirement(heir)).await?;
+    // One retired already keeps when and by whom.
+    if !retired(old)? {
+        trx.close(old, &retirement(heir)).await?;
+    }
     let m = trx.edit(old)?;
     m.succeeded_by()?.set(&Some(Ref::new(heir)))?;
     if role_of(old).is_some() {
@@ -4780,8 +4822,9 @@ pub fn json_of_notification(n: &NotificationView) -> Result<Value> {
 }
 
 /// A principal as every command prints it: its identity, its role in the project, whether it is
-/// retired (`active`, as fwd has always printed it) and the agent bound to it.
-pub async fn json_of_principal(graph: &ProjectGraph, (p, principal): &(RoleView, PrincipalView)) -> Result<Value> {
+/// retired (`active`, as fwd has always printed it) and `session`, the agent's session or thread
+/// bound to it (`subject::session_bound_to`, or for a list `subject::sessions_bound`).
+pub fn json_of_principal((p, principal): &(RoleView, PrincipalView), session: Option<&str>) -> Result<Value> {
     Ok(json!({
         "id": p.id().to_base64(),
         "kind": principal.kind()?.to_string(),
@@ -4792,7 +4835,7 @@ pub async fn json_of_principal(graph: &ProjectGraph, (p, principal): &(RoleView,
         "member": p.member()?,
         "belongs": belongs(p),
         // The Claude Code agent or Codex thread whose commands act as it, when one is bound.
-        "subject": subject::session_bound_to(graph, p.id()).await?,
+        "subject": session,
         // The principal that took over its job (`fwd principal succeed`), whom what reaches it reaches.
         "succeeded_by": p.succeeded_by().ok().flatten().map(|s| EntityId::from(s).to_base64()),
         // What it answers first for as a triage agent (`Serving`): the ids of the scopes it serves
@@ -5679,3 +5722,6 @@ pub fn json_of_anchor(a: &CodeAnchorView) -> Result<Value> {
         "created": a.created()?,
     }))
 }
+
+#[cfg(test)]
+mod tests;

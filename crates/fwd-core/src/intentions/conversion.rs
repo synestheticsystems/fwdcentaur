@@ -3,12 +3,12 @@
 //! Commons' kept mint (D256).
 
 use super::quotation::quote;
-use super::{at, principal_ref, Outcome};
+use super::{at, Outcome};
 use crate::conversion;
 use crate::model::{Placement, PlacementView};
 use crate::project_graph::ProjectGraph;
 use ankurah::model::Mutable;
-use ankurah::{EntityId, Model, ModelId, PropertyId, Value, View};
+use ankurah::{EntityId, Model, ModelId, PropertyId, Ref, Value, View};
 use ankurah_commons::cognition::{Intention, IntentionView};
 use ankurah_commons::records::{Attribution, Closed, ClosedView, Created, CreatedView, Edited, EditedView};
 use ankurah_commons::text::Quotation;
@@ -241,7 +241,7 @@ async fn additions(
             };
             Some(Closed {
                 closed: Some(at(when)),
-                by: c.closed_by()?.map(|closer| principal_ref(*closer)),
+                by: c.closed_by()?.map(|closer| Ref::new(*closer)),
                 outcome: Some(ended.to_string()),
                 reason: c.reason()?,
             })
@@ -252,10 +252,10 @@ async fn additions(
     let words = old.words()?;
     Ok(Ok(Additions {
         intention: Intention { title: old.title()?, description: words.clone() },
-        created: Created { created: at(created), by: principal_ref(written_by) },
+        created: Created { created: at(created), by: Ref::new(written_by) },
         edited: match &last_edit {
             Some(edit) => {
-                Some(Edited { edited: at(edit.edited()?), by: edit.edited_by()?.map(|editor| principal_ref(*editor)) })
+                Some(Edited { edited: at(edit.edited()?), by: edit.edited_by()?.map(|editor| Ref::new(*editor)) })
             }
             None => None,
         },
@@ -266,7 +266,7 @@ async fn additions(
             said: (speaker == Some(last_writer)).then(|| at(last_written)),
             source: None,
         },
-        recorded: Created { created: at(last_written), by: principal_ref(last_writer) },
+        recorded: Created { created: at(last_written), by: Ref::new(last_writer) },
         speaker,
         placement,
     }))

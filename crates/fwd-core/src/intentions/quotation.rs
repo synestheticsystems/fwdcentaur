@@ -6,13 +6,13 @@
 //! move to the Commons' edges. Each wording given makes a quotation, so an intention reworded keeps
 //! the quotations of its words before, and its latest says whose words it holds now.
 
-use super::{at, principal_ref};
+use super::at;
 use crate::model::{Migrated, PlacementView, RelationKind, RelationStatus};
 use crate::ops;
 use crate::project_graph::{Followed, ProjectGraph, ProjectTransaction};
 use crate::rules;
 use ankurah::model::Mutable;
-use ankurah::property::PropertyError;
+use ankurah::property::{PropertyError, Ref};
 use ankurah::EntityId;
 use ankurah_commons::records::{Attribution, AttributionView, Created, CreatedView};
 use ankurah_commons::text::{Quotation, QuotationView};
@@ -35,7 +35,7 @@ pub(super) async fn quote_given(
 ) -> Result<EntityId> {
     let said = (speaker == by).then(|| at(now));
     let quotation = Quotation { text: words, said, source: None };
-    let created = Created { created: at(now), by: principal_ref(by) };
+    let created = Created { created: at(now), by: Ref::new(by) };
     quote(trx, intention, &quotation, &created, Some(speaker), by, None).await
 }
 
@@ -57,7 +57,7 @@ pub(super) async fn quote(
     let record = Mutable::entity(&*made);
     trx.add(record, created).await?;
     if speaker != Some(*created.by) {
-        trx.add(record, &Attribution { speaker: speaker.map(principal_ref) }).await?;
+        trx.add(record, &Attribution { speaker: speaker.map(Ref::new) }).await?;
     }
     let mut via = json!({"actor_id": by.to_base64()});
     if let Some(migration) = migration {

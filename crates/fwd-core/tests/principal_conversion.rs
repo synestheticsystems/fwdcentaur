@@ -145,11 +145,15 @@ fn printed_before(old: &before_d261::PrincipalView) -> Result<Value> {
     }))
 }
 
-/// The JSON every command prints for each of `ids`, as it reads the principal now.
+/// The JSON every command prints for each of `ids`, as it reads the principal now, its session read
+/// for one principal and for a list alike.
 async fn prints(graph: &ProjectGraph, ids: &[EntityId]) -> Result<Vec<Value>> {
+    let sessions = subject::sessions_bound(graph).await?;
     let mut out = Vec::new();
     for id in ids {
-        out.push(ops::json_of_principal(graph, &graph.principal(*id).await?).await?);
+        let one = subject::session_bound_to(graph, *id).await?;
+        assert_eq!(sessions.get(id), one.as_ref(), "read for a list as for one principal");
+        out.push(ops::json_of_principal(&graph.principal(*id).await?, one.as_deref())?);
     }
     Ok(out)
 }
@@ -166,7 +170,8 @@ async fn binding(graph: &ProjectGraph, subject: &str) -> Result<(EntityId, Entit
 }
 
 /// A person signed in with an account, an agent bound to its session, a triage agent bound to a
-/// Codex thread and serving the whole project, an agent another succeeded and retired, one whose
+/// Codex thread and serving the whole project, an agent another succeeded and retired, an agent
+/// bound to its session and signed in with an account as well, one whose
 /// role is the old word `supervisor`, and one recorded before membership and dormancy were, as the
 /// build before the move wrote them: each moves keeping its id and its old component; prints what
 /// it printed; its subjects bind it, made by itself at the move and marked as the move's, and a
@@ -218,6 +223,17 @@ async fn each_principal_moves_whole_and_every_command_finds_and_prints_it_as_bef
         },
     )
     .await?;
+    let both = written(
+        &before,
+        before_d261::Principal {
+            agent_role: Some(AgentRole::Reviewer),
+            member: Some(true),
+            subject: Some("claude-code:s1/a3".into()),
+            auth_subject: Some("github:5502".into()),
+            ..principal(&before, PrincipalKind::Agent, "reviewer-both")
+        },
+    )
+    .await?;
     let bare = written(&before, principal(&before, PrincipalKind::Agent, "impl-bare")).await?;
     let trx = ctx.begin();
     let old_role = trx
@@ -232,7 +248,7 @@ async fn each_principal_moves_whole_and_every_command_finds_and_prints_it_as_bef
         .await?
         .id();
     trx.commit().await?;
-    let mut ids = vec![person, tide, reef, gone, bare, old_role];
+    let mut ids = vec![person, tide, reef, gone, both, bare, old_role];
     ids.sort();
     drop(before);
 
@@ -253,6 +269,7 @@ async fn each_principal_moves_whole_and_every_command_finds_and_prints_it_as_bef
         (tide, "impl-tide".to_string(), false, 1),
         (reef, "triage-reef".to_string(), false, 1),
         (gone, "impl-gone".to_string(), true, 0),
+        (both, "reviewer-both".to_string(), false, 2),
         (bare, "impl-bare".to_string(), false, 0),
         (old_role, "supervisor".to_string(), false, 0),
     ];
@@ -261,7 +278,7 @@ async fn each_principal_moves_whole_and_every_command_finds_and_prints_it_as_bef
 
     // Every command prints each as before, and finds it as before.
     assert_eq!(prints(&alpha, &ids).await?, printed);
-    for id in [person, tide, reef, gone, bare, old_role] {
+    for id in [person, tide, reef, gone, both, bare, old_role] {
         let old: before_d261::PrincipalView = alpha.get(id).await?;
         assert_eq!(old.project()?, alpha.project(), "the old component stays");
     }
@@ -275,6 +292,9 @@ async fn each_principal_moves_whole_and_every_command_finds_and_prints_it_as_bef
     assert_eq!(binding(&alpha, "github:4401").await?, (person, person, Some("principal_auth_subject".into())));
     assert_eq!(binding(&alpha, "claude-code:s1/a1").await?, (tide, tide, Some("principal_subject".into())));
     assert_eq!(binding(&alpha, "codex:t9/t9").await?, (reef, reef, Some("principal_subject".into())));
+    assert_eq!(binding(&alpha, "claude-code:s1/a3").await?, (both, both, Some("principal_subject".into())));
+    assert_eq!(binding(&alpha, "github:5502").await?, (both, both, Some("principal_auth_subject".into())));
+    assert_eq!(subject::caller(&alpha, "claude-code:s1/a3", None).await?, Some(both), "its account aside");
 
     // The retired one is closed at the move, by no one, and the mark says the time is the move's.
     let (retired, _) = alpha.principal(gone).await?;
@@ -339,8 +359,9 @@ async fn a_principal_that_would_lose_part_of_what_it_holds_stops_the_run_before_
 /// While a project holds a principal not moved yet, nothing makes a principal or binds a subject
 /// there, since one found missing may be that principal: the person's find-or-make and an agent
 /// naming itself, by the name of one not moved or by another, are each refused naming the
-/// migration, and make nothing; once the move has run, the person and the agent are found, no
-/// second is made, and a new agent is made and bound.
+/// migration, and make nothing; once the move has run, a command whose caller was found before it
+/// finished is refused as the agent it is, the person and the agent are found, no second is made,
+/// and a new agent is made and bound.
 #[tokio::test]
 async fn nothing_makes_a_principal_or_a_binding_beside_one_not_moved_yet() -> Result<()> {
     let (_store, _, alpha) = Store::new().await?;
@@ -384,6 +405,22 @@ async fn nothing_makes_a_principal_or_a_binding_beside_one_not_moved_yet() -> Re
     assert!(subject::bindings_of(&alpha, "claude-code:s1/a2").await?.is_empty(), "nor bound");
 
     principals::convert(&alpha).await?;
+    // A command whose caller was found before the move finished took the agent for a newcomer:
+    // naming itself anew, or as a successor, is refused as for the agent it is, and binds nothing.
+    let stale = ops::add_principal(
+        &alpha,
+        "impl-new",
+        Some(AgentRole::Implementer),
+        None,
+        None,
+        None,
+        Some("claude-code:s1/a1"),
+    );
+    assert!(refusal(stale.await).contains("which is @impl-tide already"));
+    let succeeding =
+        ops::add_successor(&alpha, "impl-next", None, None, None, None, Some("claude-code:s1/a1"), "impl-tide");
+    assert!(format!("{:#}", succeeding.await.expect_err("refused")).contains("which is @impl-tide already"));
+    assert_eq!(subject::bindings_of(&alpha, "claude-code:s1/a1").await?.len(), 1, "bound once");
     assert_eq!(ops::ensure_principal(&alpha, "ines", "Ines", PrincipalKind::Human, None).await?, person);
     assert_eq!(subject::caller(&alpha, "claude-code:s1/a1", None).await?, Some(agent));
     let again = ops::add_principal(&alpha, "impl-tide", None, None, None, Some(agent), Some("claude-code:s1/a1"));
@@ -400,5 +437,34 @@ async fn nothing_makes_a_principal_or_a_binding_beside_one_not_moved_yet() -> Re
     );
     let new = new.await?;
     assert_eq!(subject::caller(&alpha, "claude-code:s1/a2", None).await?, Some(new), "a new agent is made and bound");
+    Ok(())
+}
+
+/// One agent session with a principal in each of two projects, as the build before the move wrote
+/// them: the move in one project binds that project's principal alone, and leaves the other
+/// project's as it was, until the move runs there too; then the session acts as each project's own.
+#[tokio::test]
+async fn a_session_with_a_principal_in_two_projects_moves_with_each_project() -> Result<()> {
+    let (_store, ctx, alpha) = Store::new().await?;
+    let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
+    let session = "claude-code:s1/a1";
+    let agent = |graph: &ProjectGraph| before_d261::Principal {
+        agent_role: Some(AgentRole::Implementer),
+        subject: Some(session.into()),
+        ..principal(graph, PrincipalKind::Agent, "impl-tide")
+    };
+    let ours = written(&alpha, agent(&alpha)).await?;
+    let theirs = written(&beta, agent(&beta)).await?;
+
+    principals::convert(&alpha).await?;
+    assert_eq!(subject::caller(&alpha, session, None).await?, Some(ours));
+    let old: before_d261::PrincipalView = beta.get(theirs).await?;
+    assert!(beta.component_of::<RoleView>(&old).await?.is_none(), "the other project's is as it was");
+    assert!(subject::bindings_of(&beta, session).await?.is_empty());
+    assert_eq!(subject::caller(&beta, session, None).await?, None);
+
+    principals::convert(&beta).await?;
+    assert_eq!(subject::caller(&beta, session, None).await?, Some(theirs));
+    assert_eq!(subject::caller(&alpha, session, None).await?, Some(ours), "each project's own");
     Ok(())
 }

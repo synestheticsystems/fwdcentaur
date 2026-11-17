@@ -42,6 +42,16 @@ pub fn closed(record: &impl View) -> Result<bool, RetrievalError> {
 }
 
 impl ProjectGraph {
+    /// Whether the record `record` is a view of is closed, as [`closed`] reads it, for a reader that
+    /// does not know whether the node has bound `Closed` yet: this binds it first.
+    pub async fn is_closed(&self, record: &impl View) -> Result<bool, RetrievalError> {
+        let closing: Option<ClosedView> = self.component_of(record).await?;
+        Ok(match closing {
+            Some(closing) => closing.closed()?.is_some(),
+            None => false,
+        })
+    }
+
     /// Every principal of the project, retired or not.
     pub async fn principals(&self) -> Result<Vec<(RoleView, PrincipalView)>, RetrievalError> {
         bind_principal_parts(&self.ctx).await?;

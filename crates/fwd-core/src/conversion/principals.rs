@@ -116,8 +116,10 @@ async fn unmoved(graph: &ProjectGraph) -> Result<Vec<before_d261::PrincipalView>
 /// and keeping its id, which every record that names the principal holds: its kind, its handle
 /// and its display name as they are; fwd's `Role` with its project, its role, whether it belongs,
 /// what it serves, who succeeded it and when it last wrote; for its `subject` and its
-/// `auth_subject`, where set, an `IdentityBinding` placed in its project, made now by the
-/// principal itself, whose own command or sign-in stated the subject; and, where it was retired,
+/// `auth_subject`, where set, an `IdentityBinding` placed in its project, credited at the move to
+/// the principal it binds, since the move happens before the migration finds whom it acts as and
+/// fwd never recorded who stated the subject (the principal itself, by `fwd principal add` or
+/// `bind`, but the person, for a lead `fwd admin bind` bound); and, where it was retired,
 /// `Closed` at the time of the conversion by no one. What the conversion states for the first time
 /// carries `Migrated`, naming the field it was read from. A role word outside the fixed set, which
 /// every reader reads as none and which `ops::migrate_roles` carries over before this part runs,

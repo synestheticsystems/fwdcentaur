@@ -282,11 +282,17 @@ impl Known {
 /// The working set of every active principal bound to an agent of the Claude Code session
 /// `session`, in the projects `known` holds: those of its own thread first, then its subagents',
 /// each in `known`'s order of projects, then by name, then by id. What the person's view of a
-/// session shows (`session_view`).
-pub async fn read_session(graph: &ProjectGraph, known: &Known, session: &str, extent: &Extent) -> Result<Vec<Holding>> {
+/// session shows (`session_view`). Beside them, every principal the session's agents are bound
+/// to, retired or not, whose return the view listens for.
+pub async fn read_session(
+    graph: &ProjectGraph,
+    known: &Known,
+    session: &str,
+    extent: &Extent,
+) -> Result<(Vec<Holding>, Vec<EntityId>)> {
     let projects: Vec<ProjectRecord> = known.projects.iter().map(|(project, _)| project.clone()).collect();
     let mut read = Read { projects: &projects, extent, handles: HashMap::new() };
-    let (mut own, mut subagents) = (Vec::new(), Vec::new());
+    let (mut own, mut subagents, mut every) = (Vec::new(), Vec::new(), Vec::new());
     for (project, principals) in &known.projects {
         let there = graph.graph_of_project(project);
         let of_session = subject::of_session(&there, session).await?;
@@ -294,6 +300,7 @@ pub async fn read_session(graph: &ProjectGraph, known: &Known, session: &str, ex
             principals.iter().filter(|(role, _)| of_session.contains(&role.id())).collect();
         bound.sort_by_key(|(role, principal)| (principal.handle().ok(), role.id()));
         for p in bound {
+            every.push(p.0.id());
             if ops::retired(&p.0)? {
                 continue;
             }
@@ -306,7 +313,7 @@ pub async fn read_session(graph: &ProjectGraph, known: &Known, session: &str, ex
         }
     }
     own.extend(subagents);
-    Ok(own)
+    Ok((own, every))
 }
 
 /// One read of a working set: what it reads, and what it has read once and names records by.

@@ -182,8 +182,9 @@ fn populate(daemon: &Daemon, checkout: &Path) -> Result<Held> {
 /// Every record the project `graph` holds, of every model, as its JSON says it, by its id.
 async fn records(graph: &ProjectGraph) -> Result<BTreeMap<EntityId, Value>> {
     let mut all = BTreeMap::new();
+    let sessions = fwd_core::subject::sessions_bound(graph).await?;
     for p in graph.principals().await? {
-        all.insert(p.0.id(), ops::json_of_principal(graph, &p).await?);
+        all.insert(p.0.id(), ops::json_of_principal(&p, sessions.get(&p.0.id()).map(String::as_str))?);
     }
     for (placement, r) in graph.all_placed::<ankurah_commons::git::RepositoryView>().await? {
         all.insert(

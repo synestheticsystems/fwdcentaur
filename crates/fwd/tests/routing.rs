@@ -13,8 +13,9 @@ use ankurah::EntityId;
 use anyhow::{anyhow, Result};
 use fwd_core::conversion::principals::{self, before_d261};
 use fwd_core::daemon::{self, Autostart};
+use fwd_core::dormancy;
 use fwd_core::model::*;
-use fwd_core::ops::{self, CreateTask, MessageContext};
+use fwd_core::ops::{self, CreateScope, CreateTask, MessageContext};
 use fwd_core::project;
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::query::with_id;
@@ -257,14 +258,56 @@ async fn written_before(
     Ok(made)
 }
 
+/// One who asks only to order the test: once a question asked of them reaches them, routing has
+/// handled everything written before it, since the daemon applies one client's commits in their
+/// order and routing handles what its standing queries hear in that order.
+struct Observer {
+    id: EntityId,
+    told: Arrivals,
+}
+
+impl Observer {
+    /// A principal of the Commons' models, made directly as `fwd principal add` makes one, which a
+    /// project whose principals have not moved yet does not let a command make.
+    async fn made(graph: &ProjectGraph) -> Result<Observer> {
+        let trx = graph.begin();
+        let role = Role {
+            project: graph.project(),
+            agent_role: Some(AgentRole::Reviewer),
+            member: Some(true),
+            succeeded_by: None,
+            serves: None,
+            last_active: None,
+        };
+        let made = trx.create(&role).await?;
+        let record = ankurah::model::Mutable::entity(&*made);
+        let identity = Principal {
+            kind: PrincipalKind::Agent,
+            handle: "reviewer-obs".into(),
+            display_name: "reviewer-obs".into(),
+        };
+        trx.add(record, &identity).await?;
+        let id = record.id();
+        trx.commit().await?;
+        Ok(Observer { id, told: Arrivals::of(graph, id)? })
+    }
+
+    /// Returns once routing has handled everything `by` and others wrote before now.
+    async fn caught_up(&mut self, graph: &ProjectGraph, by: EntityId) -> Result<()> {
+        let to = MessageContext { to: Some(self.id.to_base64()), ..Default::default() };
+        let asked = ops::post_message(graph, by, "seen?", Priority::Next, to).await?;
+        self.told.until(NotificationType::QuestionAsked, Some(asked)).await
+    }
+}
+
 /// A triage agent that `fwd admin migrate` moves onto the Commons while the daemon runs is known to
-/// routing as it was, and told nothing: the question asked of the project while the daemon read no
-/// principal waits as it did, although the moved agent serves the whole project. The daemon applies
-/// one client's commits in their order, and routing handles what its standing queries hear in that
-/// order, so once the person has been told of a question the agent asked after the move, routing
-/// has handled the move.
+/// routing as it was, serving the whole project, and told nothing by the move: the question asked
+/// of the project while the daemon read no principal waits as it did; a change of the agent that
+/// leaves what it serves as it was tells it nothing either, which a routing that had not remembered
+/// it would take for a change of what it serves. A change of what it serves then tells it of the
+/// question, as for any agent; and once it is retired, a new question reaches no one.
 #[tokio::test]
-async fn a_triage_agent_moved_while_the_daemon_runs_is_told_nothing() -> Result<()> {
+async fn a_triage_agent_moved_while_the_daemon_runs_is_remembered_as_it_was() -> Result<()> {
     let dir = common::Scratch::new()?;
     let client = alpha(&dir).await?;
     let graph = &client.graph;
@@ -272,16 +315,32 @@ async fn a_triage_agent_moved_while_the_daemon_runs_is_told_nothing() -> Result<
     let project_wide = Some(serde_json::json!({"project_wide": true}));
     let triage =
         written_before(graph, PrincipalKind::Agent, "triage-reef", Some(AgentRole::Triage), project_wide).await?;
+    let mut observer = Observer::made(graph).await?;
+    let mut its = Arrivals::of(graph, triage)?;
     let asking = MessageContext { asks_project: true, ..Default::default() };
-    ops::post_message(graph, person, "who takes the retry work?", Priority::Now, asking).await?;
-    let mut hers = Arrivals::of(graph, person)?;
+    let waiting = ops::post_message(graph, person, "who takes the retry work?", Priority::Now, asking.clone()).await?;
+    observer.caught_up(graph, person).await?;
 
     principals::convert(graph).await?;
+    observer.caught_up(graph, person).await?;
     assert_eq!(ops::triage_for(graph, None).await?.map(|f| f.agent), Some(triage), "it serves the whole project");
-    let to_her = MessageContext { to: Some(person.to_base64()), ..Default::default() };
-    let after = ops::post_message(graph, triage, "is the retry work ready?", Priority::Next, to_her).await?;
-    hers.until(NotificationType::QuestionAsked, Some(after)).await?;
     assert_eq!(held(graph, triage).await?, vec![], "the move told it nothing");
+
+    dormancy::wrote(graph, triage).await?;
+    observer.caught_up(graph, person).await?;
+    assert_eq!(held(graph, triage).await?, vec![], "nor a change that leaves what it serves as it was");
+
+    let scope =
+        ops::create_scope(graph, person, CreateScope { title: "Retry work".into(), ..Default::default() }).await?;
+    ops::serve(graph, "triage-reef", ops::Serves::Scope(scope)).await?;
+    its.until(NotificationType::QuestionAsked, Some(waiting)).await?;
+    assert_eq!(held(graph, triage).await?, vec![NotificationType::QuestionAsked], "a change of what it serves");
+
+    ops::retire_principal(graph, "triage-reef", person).await?;
+    observer.caught_up(graph, person).await?;
+    ops::post_message(graph, person, "and the backoff?", Priority::Now, asking).await?;
+    observer.caught_up(graph, person).await?;
+    assert_eq!(held(graph, triage).await?, vec![NotificationType::QuestionAsked], "retired, it hears no new one");
     Ok(())
 }
 

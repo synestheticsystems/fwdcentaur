@@ -1,11 +1,12 @@
 //! Whom a command acts as once principals are the Commons' `identity.Principal` and the subjects
 //! that act as them are identity bindings: an agent's command, stamped as the fwd plugin stamps it
 //! or run by its hook, acts as the principal its session binds in the project the command runs in;
-//! a subject bound to no one, or no longer, acts as no one; a retired principal's writes are
-//! refused; and in a project whose principals `fwd admin migrate` has not moved yet, nothing makes
-//! a principal or binds a session, until the migration has run. Each test runs the CLI against a
-//! scratch daemon of its own that hosts two projects, alpha and beta, that the person `tester`
-//! made.
+//! a subject bound to no one acts as no one; a retired principal's writes are refused; who retires
+//! a principal is recorded; and in a project whose principals `fwd admin migrate` has not moved yet,
+//! as every project's are when this build is first installed, every command that needs to know
+//! whom it acts as is refused, naming the migration, until the migration, run by the person or by
+//! an agent bound there, has moved them. Each test runs the CLI against a scratch daemon of its own
+//! that hosts two projects, alpha and beta.
 
 mod common;
 
@@ -14,7 +15,7 @@ use common::Scratch;
 use fwd_core::conversion::principals::before_d261;
 use fwd_core::daemon::{self, Autostart, Client};
 use fwd_core::model::*;
-use fwd_core::project::{NamedProject, Paths};
+use fwd_core::project::{self, NamedProject, Paths};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -126,9 +127,8 @@ fn subject(agent: &str) -> String {
 }
 
 /// One agent named in alpha and in beta acts as alpha's principal in alpha and beta's in beta,
-/// stamped and by its hook; a subject bound to no one acts as no one, and its write is refused;
-/// unbound, the subject a retired principal held acts as no one; and a retired principal's own
-/// write is refused, naming how it comes back.
+/// stamped and by its hook; a subject bound to no one acts as no one, and its write is refused; and
+/// a retired principal's own write is refused, naming how it comes back.
 #[test]
 fn a_command_acts_as_the_principal_its_session_binds_in_the_project_it_runs_in() -> Result<()> {
     let s = Daemon::new()?;
@@ -157,53 +157,191 @@ fn a_command_acts_as_the_principal_its_session_binds_in_the_project_it_runs_in()
     Ok(())
 }
 
-/// In a project that still holds a principal the build before the move onto the Commons wrote, an
-/// agent's command made nothing: its session acts as no one, by its hook too, naming itself is
-/// refused naming `fwd admin migrate` and the project, and no principal or binding is made. Once
-/// the migration has run, the same commands act as the principal moved, and none is made beside it.
+/// What the person `tester` and the agent `impl-old`, bound to the session's agent a1, are in beta
+/// as the build before the move onto the Commons wrote them: their ids.
+struct Unmoved {
+    person: String,
+    agent: String,
+}
+
+impl Daemon {
+    /// A daemon whose project alpha `tester` made with this build, and whose project beta holds
+    /// only principals of the build before the move, the person's among them, as every project the
+    /// daemon hosts does when this build is first installed: beta is made with no principal, and
+    /// its principals are written as that build wrote them.
+    async fn unmoved() -> Result<(Daemon, Unmoved)> {
+        let scratch = Scratch::new()?;
+        let paths = scratch.paths("run", "data");
+        let checkout = |name: &str| -> Result<PathBuf> {
+            let root = scratch.path().join(name);
+            std::fs::create_dir_all(&root)?;
+            fwd_core::anchoring::git(&root, &["init", "-q", "-b", "main"])?;
+            fwd_core::anchoring::git(&root, &["remote", "add", "origin", &format!("git@example.com:acme/{name}.git")])?;
+            Ok(root)
+        };
+        let (alpha, beta) = (checkout("alpha")?, checkout("beta")?);
+        let daemon = Daemon { paths, alpha, beta, _scratch: scratch };
+        daemon.json(&daemon.alpha, None, &["init", "--name", "alpha", "--handle", "tester"])?;
+        let options = project::InitOptions { name: Some("beta"), ..Default::default() };
+        let beta = project::init(&daemon.paths, &daemon.beta, options)?.0.project;
+        let spawn = Autostart::Spawn { daemon_bin: PathBuf::from(env!("CARGO_BIN_EXE_fwd")) };
+        let client = daemon::ensure_daemon(&daemon.paths, &beta, spawn).await?;
+        let graph = &client.graph;
+        let trx = graph.begin();
+        let mut ids = Vec::new();
+        for (kind, handle, role, subject) in [
+            (PrincipalKind::Human, "tester", None, None),
+            (PrincipalKind::Agent, "impl-old", Some(AgentRole::Implementer), Some(subject("a1"))),
+        ] {
+            let old = before_d261::Principal {
+                project: graph.project(),
+                kind,
+                handle: handle.into(),
+                display_name: handle.into(),
+                auth_subject: None,
+                agent_role: role,
+                active: true,
+                member: Some(true),
+                subject,
+                succeeded_by: None,
+                serves: None,
+                last_active: None,
+            };
+            ids.push(trx.create(&old).await?.id().to_base64());
+        }
+        trx.commit().await?;
+        let [person, agent] = <[String; 2]>::try_from(ids).map_err(|_| anyhow!("two principals"))?;
+        Ok((daemon, Unmoved { person, agent }))
+    }
+
+    /// The ids `fwd principal list --all` lists in `checkout`'s project, as the person.
+    fn listed(&self, checkout: &Path) -> Result<Vec<String>> {
+        let all = self.json(checkout, None, &["principal", "list", "--all"])?;
+        let mut ids: Vec<String> =
+            all.as_array().into_iter().flatten().filter_map(|p| p["id"].as_str().map(str::to_string)).collect();
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Asserts that, before the migration, each command beta's person or its bound agent a1 runs
+    /// that needs to know whom it acts as is refused, naming the migration, and a1's hook prints
+    /// nothing.
+    fn refused_before_the_migration(&self) -> Result<()> {
+        let migrate = "the project beta holds principals that `fwd admin migrate` has not moved";
+        for (agent, args) in [
+            (None, &["whoami"][..]),
+            (None, &["task", "create", "Cap the retry delay"][..]),
+            (Some("a1"), &["whoami"][..]),
+            (Some("a1"), &["task", "list"][..]),
+        ] {
+            let out = self.run(&self.beta, agent, args)?;
+            let said = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success() && said.contains(migrate), "{agent:?} {args:?}: {said}");
+        }
+        assert_eq!(self.hook(&self.beta, "a1")?, "", "the hook acts for no one");
+        Ok(())
+    }
+
+    /// Asserts that, after the migration, beta's person and a1 each act as itself, keeping its id,
+    /// and that beta holds those two principals alone.
+    fn each_acts_as_itself(&self, unmoved: &Unmoved) -> Result<()> {
+        let person = self.json(&self.beta, None, &["whoami"])?;
+        assert_eq!(person["principal"]["id"], unmoved.person.as_str());
+        assert_eq!(self.whoami(&self.beta, "a1")?["id"], unmoved.agent.as_str());
+        assert!(self.hook(&self.beta, "a1")?.contains("impl-old"), "the hook acts for it");
+        let mut both = vec![unmoved.person.clone(), unmoved.agent.clone()];
+        both.sort();
+        assert_eq!(self.listed(&self.beta)?, both, "none beside them");
+        Ok(())
+    }
+}
+
+/// The ids `fwd admin migrate` printed as the principals it moved.
+fn moved(migrated: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = migrated["principals_moved"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["id"].as_str().map(str::to_string))
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Where every principal predates the move, the person's included, every command that needs to
+/// know whom it acts as is refused, naming the migration; the person's `fwd admin migrate` moves
+/// them, keeping their ids, and each acts as itself after it.
 #[tokio::test]
-async fn nothing_makes_a_principal_beside_one_not_moved_until_the_migration_runs() -> Result<()> {
-    let s = Daemon::new()?;
-    let client = s.client(&s.alpha).await?;
-    let graph = &client.graph;
-    let trx = graph.begin();
-    let old = trx
-        .create(&before_d261::Principal {
-            project: graph.project(),
-            kind: PrincipalKind::Agent,
-            handle: "impl-old".into(),
-            display_name: "impl-old".into(),
-            auth_subject: None,
-            agent_role: Some(AgentRole::Implementer),
-            active: true,
-            member: Some(true),
-            subject: Some(subject("a1")),
-            succeeded_by: None,
-            serves: None,
-            last_active: None,
-        })
-        .await?
-        .id();
-    trx.commit().await?;
-    drop(client);
-    let listed = || s.json(&s.alpha, None, &["principal", "list", "--all"]);
-    let before = listed()?;
+async fn the_person_moves_a_project_whose_every_principal_predates_the_move() -> Result<()> {
+    let (d, unmoved) = Daemon::unmoved().await?;
+    d.refused_before_the_migration()?;
+    let migrated = d.json(&d.beta, None, &["admin", "migrate"])?;
+    let mut both = vec![unmoved.person.clone(), unmoved.agent.clone()];
+    both.sort();
+    assert_eq!(moved(&migrated), both);
+    d.each_acts_as_itself(&unmoved)?;
+    assert_eq!(moved(&d.json(&d.beta, None, &["admin", "migrate"])?), Vec::<String>::new(), "a second run");
+    Ok(())
+}
 
-    assert_eq!(s.hook(&s.alpha, "a1")?, "", "the hook acts for no one");
-    assert_eq!(s.whoami(&s.alpha, "a1")?, Value::Null);
-    let named = s.run(&s.alpha, Some("a1"), &["principal", "add", "impl-old", "--role", "implementer"])?;
-    assert!(!named.status.success());
-    let said = String::from_utf8_lossy(&named.stderr);
-    assert!(said.contains("the project alpha holds principals that `fwd admin migrate` has not moved"), "{said}");
-    assert_eq!(listed()?, before, "no principal was made");
+/// The agent bound there may run the migration first, as itself.
+#[tokio::test]
+async fn the_bound_agent_moves_a_project_whose_every_principal_predates_the_move() -> Result<()> {
+    let (d, unmoved) = Daemon::unmoved().await?;
+    d.refused_before_the_migration()?;
+    let migrated = d.json(&d.beta, Some("a1"), &["admin", "migrate"])?;
+    let mut both = vec![unmoved.person.clone(), unmoved.agent.clone()];
+    both.sort();
+    assert_eq!(moved(&migrated), both);
+    d.each_acts_as_itself(&unmoved)?;
+    Ok(())
+}
 
-    let migrated = s.json(&s.alpha, None, &["admin", "migrate"])?;
-    assert_eq!(migrated["principals_moved"][0]["id"], old.to_base64());
-    let me = s.whoami(&s.alpha, "a1")?;
-    assert_eq!((&me["id"], &me["handle"]), (&json!(old.to_base64()), &json!("impl-old")));
-    assert!(s.hook(&s.alpha, "a1")?.contains("impl-old"), "the hook acts for it");
-    s.json(&s.alpha, Some("a1"), &["principal", "add", "impl-old", "--role", "implementer"])?;
-    let handles: Vec<Value> = listed()?.as_array().into_iter().flatten().map(|p| p["handle"].clone()).collect();
-    assert_eq!(handles.iter().filter(|h| **h == "impl-old").count(), 1, "and none beside it: {handles:?}");
+/// A migration refused for its caller once it has moved the principals, as an agent that has not
+/// named itself is, says on standard error what it moved, since that is written: the next run moves
+/// nothing.
+#[tokio::test]
+async fn a_migration_refused_after_it_moved_the_principals_says_what_it_moved() -> Result<()> {
+    let (d, unmoved) = Daemon::unmoved().await?;
+    let out = d.run(&d.beta, Some("a2"), &["admin", "migrate"])?;
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && said.contains("which has not named itself in this project"), "{said}");
+    assert!(said.contains("principals moved onto the Commons' identity.Principal"), "{said}");
+    for (id, handle) in [(&unmoved.person, "@tester"), (&unmoved.agent, "@impl-old")] {
+        assert!(said.contains(&format!("{} {handle}", &id[..8])), "{said}");
+    }
+    assert_eq!(moved(&d.json(&d.beta, None, &["admin", "migrate"])?), Vec::<String>::new());
+    d.each_acts_as_itself(&unmoved)?;
+    Ok(())
+}
+
+/// Whoever a command acts as retires a principal: one a typed `--as` names, by its name, its id or
+/// the start of its id, and an agent that retires itself.
+#[tokio::test]
+async fn a_retirement_records_whom_the_command_acts_as() -> Result<()> {
+    let d = Daemon::new()?;
+    let made = |name: &str| -> Result<String> {
+        let added = d.json(&d.alpha, None, &["--as", name, "principal", "add", name, "--role", "implementer"])?;
+        Ok(added["record"]["id"].as_str().ok_or_else(|| anyhow!("no id in {added}"))?.to_string())
+    };
+    let a = made("impl-a")?;
+    let client = d.client(&d.alpha).await?;
+    let retired_by = |id: String| {
+        let graph = client.graph.clone();
+        async move {
+            let role: RoleView = graph.get(id.parse()?).await?;
+            let closed: ankurah_commons::records::ClosedView = graph.component_of(&role).await?.expect("retired");
+            anyhow::Ok(closed.by()?.map(|by| (*by).to_base64()))
+        }
+    };
+    for (by, retired) in [("impl-a", "impl-b"), (a.as_str(), "impl-c"), (&a[..8], "impl-d")] {
+        let id = made(retired)?;
+        d.json(&d.alpha, None, &["--as", by, "principal", "retire", retired])?;
+        assert_eq!(retired_by(id).await?, Some(a.clone()), "--as {by}");
+    }
+    let itself = d.json(&d.alpha, Some("a1"), &["principal", "add", "impl-e", "--role", "implementer"])?;
+    d.json(&d.alpha, Some("a1"), &["principal", "retire", "impl-e"])?;
+    let itself = itself["record"]["id"].as_str().ok_or_else(|| anyhow!("no id"))?.to_string();
+    assert_eq!(retired_by(itself.clone()).await?, Some(itself), "an agent retiring itself");
     Ok(())
 }

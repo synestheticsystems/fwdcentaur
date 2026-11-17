@@ -1711,17 +1711,57 @@ struct App {
 /// from the supervisor role to the fixed roles (`ops::migrate_roles`), then moves them onto the
 /// Commons (`fwd_core::conversion::principals`), which copies what the first recorded. Every
 /// command finds its caller among the principals moved and their bindings, and in a project not
-/// yet moved it would find none.
-struct MovedFirst {
-    roles: ops::RoleMigration,
-    principals: Vec<fwd_core::conversion::principals::Converted>,
-}
+/// yet moved it would find none. It holds what it did as the command prints it: `triage`,
+/// `roles_cleared`, `readdressed`, `members`, `visitors`, `readers` and `principals_moved`.
+struct MovedFirst(serde_json::Map<String, Value>);
 
 impl MovedFirst {
     async fn run(graph: &ProjectGraph) -> Result<MovedFirst> {
         let roles = ops::migrate_roles(graph).await?;
-        let principals = fwd_core::conversion::principals::convert(graph).await?;
-        Ok(MovedFirst { roles, principals })
+        let moved = fwd_core::conversion::principals::convert(graph).await?;
+        let ids = |list: &[EntityId]| list.iter().map(|id| json!(id.to_base64())).collect::<Vec<_>>();
+        // A principal by its id, with its handle to read it by.
+        let named = |id: EntityId| async move {
+            anyhow::Ok(json!({"id": id.to_base64(), "handle": ops::handle_of(graph, id).await?}))
+        };
+        let mut done = serde_json::Map::new();
+        for (key, list) in
+            [("roles_cleared", &roles.roles_cleared), ("members", &roles.members), ("readers", &roles.readers)]
+        {
+            let mut out = Vec::new();
+            for id in list {
+                out.push(named(*id).await?);
+            }
+            done.insert(key.to_string(), Value::Array(out));
+        }
+        let mut visitors = Vec::new();
+        for (id, written) in &roles.visitors {
+            let mut v = named(*id).await?;
+            v["messages"] = json!(written);
+            visitors.push(v);
+        }
+        done.insert("visitors".into(), Value::Array(visitors));
+        let triage = match roles.triage {
+            Some(id) => named(id).await?,
+            None => Value::Null,
+        };
+        done.insert("triage".into(), triage);
+        done.insert("readdressed".into(), json!(ids(&roles.readdressed)));
+        let moved = moved.iter().map(|c| {
+            json!({"id": c.principal.to_base64(), "handle": c.handle, "retired": c.retired, "bindings": ids(&c.bindings)})
+        });
+        done.insert("principals_moved".into(), Value::Array(moved.collect()));
+        Ok(MovedFirst(done))
+    }
+
+    /// What it did, for people, when it did anything: the lines `fwd admin migrate --format text`
+    /// prints for it, which a command refused after it says on standard error, since what it did
+    /// is written.
+    fn said(&self) -> Option<String> {
+        let v = Value::Object(self.0.clone());
+        let did = self.0.iter().any(|(_, list)| list.as_array().is_some_and(|l| !l.is_empty()))
+            || !self.0["triage"].is_null();
+        did.then(|| [roles_text(&v), vec![principals_text(&v)]].concat().join("\n"))
     }
 }
 
@@ -2039,8 +2079,8 @@ async fn standing_of(graph: &ProjectGraph, name: &str) -> Option<ops::Serving> {
 /// agent serves named, `serves.scopes` holding `{"id", "title"}` for each, so that a reader of `fwd
 /// principal list` or `fwd whoami` sees what each triage agent answers first for without looking
 /// the scopes up.
-async fn principal_json(graph: &ProjectGraph, p: &(RoleView, PrincipalView)) -> Result<Value> {
-    let mut v = ops::json_of_principal(graph, p).await?;
+async fn principal_json(graph: &ProjectGraph, p: &(RoleView, PrincipalView), session: Option<&str>) -> Result<Value> {
+    let mut v = ops::json_of_principal(p, session)?;
     if let Some(scopes) = v["serves"]["scopes"].as_array().cloned() {
         let mut named = Vec::with_capacity(scopes.len());
         for id in scopes.iter().filter_map(Value::as_str) {
@@ -2055,10 +2095,16 @@ async fn principal_json(graph: &ProjectGraph, p: &(RoleView, PrincipalView)) -> 
     Ok(v)
 }
 
+/// The principal `id` as every command prints it ([`principal_json`]), with the session bound to it.
+async fn principal_json_of(graph: &ProjectGraph, id: EntityId) -> Result<Value> {
+    let session = subject::session_bound_to(graph, id).await?;
+    principal_json(graph, &graph.principal(id).await?, session.as_deref()).await
+}
+
 /// Prints the principal `id` as `fwd principal add`, `role` and `retire` do: its JSON, or for people its
 /// line in `fwd principal list --format text` ([`principal_line`]).
 async fn print_principal(app: &App, id: EntityId) -> Result<()> {
-    let v = principal_json(app.graph(), &app.graph().principal(id).await?).await?;
+    let v = principal_json_of(app.graph(), id).await?;
     match app.format {
         Format::Text => {
             println!("{}", principal_line(&v));
@@ -2074,10 +2120,10 @@ async fn print_principal(app: &App, id: EntityId) -> Result<()> {
 /// to it) beside it, or with `--format text` its line and a sentence saying so.
 async fn print_succession(app: &App, done: &ops::Succession, made: bool) -> Result<()> {
     let graph = app.graph();
-    let successor = principal_json(graph, &graph.principal(done.successor).await?).await?;
+    let successor = principal_json_of(graph, done.successor).await?;
     let line = principal_line(&successor);
     let mut v = if made { made_json(successor) } else { successor };
-    v["succeeded"] = principal_json(graph, &graph.principal(done.old).await?).await?;
+    v["succeeded"] = principal_json_of(graph, done.old).await?;
     v["moved"] = json!(done.moved);
     match app.format {
         Format::Text => {
@@ -2831,68 +2877,78 @@ async fn run_cli() -> Result<()> {
             }
             _ => None,
         };
+        let said_first = moved_first.as_ref().and_then(MovedFirst::said);
         let calling = Calling { subject, typed_as, thread_hook, scope_typed };
-        let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
-        app.moving = placed.moving.take();
-        app.moved_first = moved_first;
-        if let Whose::Other(there) = &placed.project {
-            app.place_in(&placed.because, &there.name);
-        }
-        // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
-        // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
-        // after it, as a question a retired triage agent never heard of reaches the next one (task
-        // Wbkkwpyq; docs/design/agents-and-inbox.md, rule 5 of the routing rules).
-        if hooked.is_some() {
-            let active = match app.acting {
-                Some(me) => !ops::retired(&app.graph().get::<RoleView>(me).await?)?,
-                None => false,
-            };
-            if !active {
-                return Ok(());
+        let rest = async {
+            let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
+            app.moving = placed.moving.take();
+            app.moved_first = moved_first;
+            if let Whose::Other(there) = &placed.project {
+                app.place_in(&placed.because, &there.name);
             }
-        }
-        let words = command_words(&matches).0;
-        let writes = joining || WRITES_TOO.contains(&words.as_str());
-        let stamping = stamps(joining, &words);
-        refuse_by_identity(&app, &cli.command, writes).await?;
-        // The watch takes the connection for itself, to open it again when the daemon restarts; it
-        // writes nothing, so it makes no one belong.
-        if let Command::Watch { for_handle, timeout, count } = cli.command {
-            let who = principal_for(&app, for_handle.as_deref()).await?;
-            if let Some(guidance) = lead_guidance(app.graph(), who, app.scope).await? {
-                eprintln!("{guidance}");
+            // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
+            // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
+            // after it, as a question a retired triage agent never heard of reaches the next one (task
+            // Wbkkwpyq; docs/design/agents-and-inbox.md, rule 5 of the routing rules).
+            if hooked.is_some() {
+                let active = match app.acting {
+                    Some(me) => !ops::retired(&app.graph().get::<RoleView>(me).await?)?,
+                    None => false,
+                };
+                if !active {
+                    return Ok(());
+                }
             }
-            say_unbound(&app).await?;
-            // The watch ends the process itself, after its last line or an error (`watch::run`).
-            match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
+            let words = command_words(&matches).0;
+            let writes = joining || WRITES_TOO.contains(&words.as_str());
+            let stamping = stamps(joining, &words);
+            refuse_by_identity(&app, &cli.command, writes).await?;
+            // The watch takes the connection for itself, to open it again when the daemon restarts; it
+            // writes nothing, so it makes no one belong.
+            if let Command::Watch { for_handle, timeout, count } = cli.command {
+                let who = principal_for(&app, for_handle.as_deref()).await?;
+                if let Some(guidance) = lead_guidance(app.graph(), who, app.scope).await? {
+                    eprintln!("{guidance}");
+                }
+                say_unbound(&app).await?;
+                // The watch ends the process itself, after its last line or an error (`watch::run`).
+                match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
+            }
+            if let (Format::Pane, Command::Reply { id, text }) = (app.format, &cli.command) {
+                return pressed(&app, id, text.clone(), joining, stamping).await;
+            }
+            let command = cli.command;
+            let body = run_as_caller(&app, command, joining, stamping);
+            // A command whose daemon goes away while it runs ends within a bound and says so, rather than
+            // with Ankurah's words for a read that found no daemon (`Client::while_connected`). One that
+            // writes also ends so whenever its socket closed while it ran, even when it succeeded, since
+            // a commit its node made meanwhile reached no daemon (`Client::while_writing`). `inbox pop`
+            // writes, marking what it prints as read, but runs as a read: a mark that reached no daemon
+            // only brings the same notifications back at the next pop, while Claude Code drops what a
+            // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
+            // would reach no one.
+            // A move run again finishes what it began, so its loss says to run it again.
+            let client = app.client.as_ref().expect("the CLI connected through its client");
+            let stamped = if words == "task move" {
+                client.while_finishing(body).await
+            } else if writes && words != "inbox pop" {
+                client.while_writing(body).await
+            } else {
+                client.while_connected(body).await
+            }?;
+            // A stamp the daemon never got ended the command above as a lost write does. One that failed
+            // with the socket open failed after the command's work was made, and a bare error would invite
+            // running the command again, which would make the work twice: the error says that the work
+            // is recorded.
+            stamped.context(STAMP_FAILED)
         }
-        if let (Format::Pane, Command::Reply { id, text }) = (app.format, &cli.command) {
-            return pressed(&app, id, text.clone(), joining, stamping).await;
+        .await;
+        // The principals' parts of `fwd admin migrate` wrote what they did before the command found
+        // whom it acts as, so a command refused after them says what that was.
+        if let (Err(_), Some(said)) = (&rest, said_first) {
+            eprintln!("fwd: before what ended it below, `fwd admin migrate` did this:\\n{said}");
         }
-        let command = cli.command;
-        let body = run_as_caller(&app, command, joining, stamping);
-        // A command whose daemon goes away while it runs ends within a bound and says so, rather than
-        // with Ankurah's words for a read that found no daemon (`Client::while_connected`). One that
-        // writes also ends so whenever its socket closed while it ran, even when it succeeded, since
-        // a commit its node made meanwhile reached no daemon (`Client::while_writing`). `inbox pop`
-        // writes, marking what it prints as read, but runs as a read: a mark that reached no daemon
-        // only brings the same notifications back at the next pop, while Claude Code drops what a
-        // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
-        // would reach no one.
-        // A move run again finishes what it began, so its loss says to run it again.
-        let client = app.client.as_ref().expect("the CLI connected through its client");
-        let stamped = if words == "task move" {
-            client.while_finishing(body).await
-        } else if writes && words != "inbox pop" {
-            client.while_writing(body).await
-        } else {
-            client.while_connected(body).await
-        }?;
-        // A stamp the daemon never got ended the command above as a lost write does. One that failed
-        // with the socket open failed after the command's work was made, and a bare error would invite
-        // running the command again, which would make the work twice: the error says that the work
-        // is recorded.
-        stamped.context(STAMP_FAILED)
+        rest
     }
     .await;
     ran.map_err(|error| ran_in.failure(error))
@@ -4763,27 +4819,7 @@ fn migration_text(v: &Value) -> String {
         lines.extend(assignments_text(&assigned, &renamed));
     }
     lines.extend(roles_text(v));
-    let moved: Vec<String> = list("principals_moved")
-        .iter()
-        .map(|p| {
-            let bindings = p["bindings"].as_array().map_or(0, Vec::len);
-            let retired = if p["retired"].as_bool() == Some(true) { ", retired" } else { "" };
-            let bound = match bindings {
-                0 => String::new(),
-                1 => ", 1 subject bound".to_string(),
-                n => format!(", {n} subjects bound"),
-            };
-            format!(
-                "{} @{}{retired}{bound}",
-                short_id(p["id"].as_str().unwrap_or("")),
-                p["handle"].as_str().unwrap_or("")
-            )
-        })
-        .collect();
-    lines.push(format!(
-        "principals moved onto the Commons' identity.Principal, each keeping its id: {}",
-        if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
-    ));
+    lines.push(principals_text(v));
     let cleared: Vec<String> = v["scopes_cleared"]
         .as_array()
         .into_iter()
@@ -4833,6 +4869,34 @@ fn migration_text(v: &Value) -> String {
         if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
     ));
     lines.join("\n")
+}
+
+/// What the principals' move of `fwd admin migrate` did, for people ([`migration_text`]): each
+/// principal moved, keeping its id, whether it was retired, and how many subjects it binds.
+fn principals_text(v: &Value) -> String {
+    let moved: Vec<String> = v["principals_moved"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| {
+            let bindings = p["bindings"].as_array().map_or(0, Vec::len);
+            let retired = if p["retired"].as_bool() == Some(true) { ", retired" } else { "" };
+            let bound = match bindings {
+                0 => String::new(),
+                1 => ", 1 subject bound".to_string(),
+                n => format!(", {n} subjects bound"),
+            };
+            format!(
+                "{} @{}{retired}{bound}",
+                short_id(p["id"].as_str().unwrap_or("")),
+                p["handle"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    format!(
+        "principals moved onto the Commons' identity.Principal, each keeping its id: {}",
+        if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
+    )
 }
 
 /// What the role part of `fwd admin migrate` did, for people ([`migration_text`]): the principal
@@ -5139,9 +5203,11 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     .map(|(role, _)| role.id())
                     .collect();
                 let loaded = if shared.is_empty() { None } else { Some(naming::Loaded::of(graph, &shared).await?) };
+                // The sessions bound to the project's principals, read once for the list.
+                let sessions = subject::sessions_bound(graph).await?;
                 let mut list: Vec<Value> = Vec::with_capacity(found.len());
                 for p in &found {
-                    let mut v = principal_json(graph, p).await?;
+                    let mut v = principal_json(graph, p, sessions.get(&p.0.id()).map(String::as_str)).await?;
                     v["dormant"] = json!(dormancy::is_dormant(p, now));
                     if let Some(successor) = p.0.succeeded_by().ok().flatten().map(EntityId::from) {
                         v["succeeded_by_handle"] =
@@ -5182,7 +5248,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         let id =
                             ops::add_principal(graph, &handle, role, serves, display_name, app.acting, subject).await?;
                         roles_changed(app, id, before).await?;
-                        let principal = principal_json(graph, &graph.principal(id).await?).await?;
+                        let principal = principal_json_of(graph, id).await?;
                         app.print_made(made_json(principal), principal_line)
                     }
                 }
@@ -5240,7 +5306,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
             }
             PrincipalCommand::Retire { handle } => {
                 let before = standing_of(graph, &handle).await;
-                let id = ops::retire_principal(graph, &handle, app.me).await?;
+                // Whoever the command acts as retires it: a typed `--as` names that principal.
+                let id = ops::retire_principal(graph, &handle, app.acting.unwrap_or(app.me)).await?;
                 roles_changed(app, id, before).await?;
                 print_principal(app, id).await
             }
@@ -5277,7 +5344,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
             // refuses its reads of its own inbox and tasks: the rest of what it prints is about the
             // machine and the graph.
             let principal = match app.acting {
-                Some(_) => principal_json(graph, &graph.principal(app.me).await?).await?,
+                Some(_) => principal_json_of(graph, app.me).await?,
                 None => {
                     if app.subject.is_none() {
                         if let Some((session, bound)) = bound_session(graph).await? {
@@ -5557,32 +5624,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 }));
             }
             let ids = |list: &[EntityId]| list.iter().map(|id| json!(id.to_base64())).collect::<Vec<_>>();
-            let Some(MovedFirst { roles, principals: moved }) = &app.moved_first else {
+            // Set by `run_cli` as the command starts, which every run of this command goes through.
+            let Some(MovedFirst(first)) = &app.moved_first else {
                 bail!("`fwd admin migrate` moves the principals before it finds whom it acts as, and this run did not")
-            };
-            // A principal by its id, with its handle to read it by.
-            let named = |id: EntityId| async move {
-                anyhow::Ok(json!({"id": id.to_base64(), "handle": ops::handle_of(graph, id).await?}))
-            };
-            let mut principals = serde_json::Map::new();
-            for (key, list) in
-                [("roles_cleared", &roles.roles_cleared), ("members", &roles.members), ("readers", &roles.readers)]
-            {
-                let mut out = Vec::new();
-                for id in list {
-                    out.push(named(*id).await?);
-                }
-                principals.insert(key.to_string(), Value::Array(out));
-            }
-            let mut visitors = Vec::new();
-            for (id, written) in &roles.visitors {
-                let mut v = named(*id).await?;
-                v["messages"] = json!(written);
-                visitors.push(v);
-            }
-            let triage = match roles.triage {
-                Some(id) => named(id).await?,
-                None => Value::Null,
             };
             let scopes = ops::migrate_scopes(graph).await?;
             let mut cleared = Vec::new();
@@ -5616,31 +5660,16 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 .into_iter()
                 .map(|c| json!({"id": c.repository.to_base64(), "name": c.name}))
                 .collect();
-            let moved: Vec<Value> = moved
-                .iter()
-                .map(|c| {
-                    json!({
-                        "id": c.principal.to_base64(),
-                        "handle": c.handle,
-                        "retired": c.retired,
-                        "bindings": ids(&c.bindings),
-                    })
-                })
-                .collect();
             let mut v = json!({
                 "assigned": assigned,
                 "renamed": ids(&done.renamed),
-                "triage": triage,
-                "readdressed": ids(&roles.readdressed),
-                "visitors": visitors,
-                "principals_moved": moved,
                 "scopes_cleared": cleared,
                 "placed_in_recorded_scope": placed,
                 "intentions_moved": intentions,
                 "repositories_moved": repositories,
             });
-            for (key, list) in principals {
-                v[key] = list;
+            for (key, list) in first {
+                v[key] = list.clone();
             }
             match app.format {
                 Format::Text => {
@@ -6554,6 +6583,20 @@ mod tests {
         hyphen_arguments(&Cli::command(), "", &mut declared);
         let missing: Vec<&String> = declared.iter().filter(|d| !covered.contains(*d)).collect();
         assert!(missing.is_empty(), "arguments that take a value starting with `-` but have no row: {missing:?}");
+    }
+
+    /// A new name after `--`, and an addressee given as `--to=<it>`, may start with `-`, as an id may
+    /// (one in 64 does), which an agent renamed to its own id has for its name.
+    #[test]
+    fn a_name_and_an_addressee_starting_with_a_hyphen_are_read_after_two_hyphens_and_an_equals_sign() {
+        let id = "-NJmzn4PB1-7rFgbUsRnzj_YiAKsrWieEsFk3wUyeSI";
+        let renamed = Cli::try_parse_from(["fwd", "principal", "rename", "--", id]).expect("parsed");
+        let named =
+            matches!(renamed.command, Command::Principal { command: PrincipalCommand::Rename { name } } if name == id);
+        assert!(named, "the new name");
+        let to = format!("--to={id}");
+        let asked = Cli::try_parse_from(["fwd", "ask", &to, "does the retry hold?"]).expect("parsed");
+        assert!(matches!(asked.command, Command::Ask { to: Some(to), .. } if to == id), "the addressee");
     }
 
     /// The `--priority` a command line gives, or what refuses the command line.

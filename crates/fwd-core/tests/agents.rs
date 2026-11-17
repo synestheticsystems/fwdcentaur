@@ -83,7 +83,7 @@ async fn an_agent_that_names_itself_is_bound_and_acts_as_itself_from_then_on() -
     assert_eq!(subject_of(&graph, alice).await?, Some(a1.clone()));
     assert_eq!(subject::caller(&graph, &a1, None).await?, Some(alice));
     assert_eq!(
-        ops::json_of_principal(&graph, &graph.principal(alice).await?).await?["subject"],
+        ops::json_of_principal(&graph.principal(alice).await?, subject_of(&graph, alice).await?.as_deref())?["subject"],
         a1.as_str(),
         "the JSON says so"
     );
@@ -816,9 +816,69 @@ async fn a_binding_undone_binds_its_subject_to_no_one() -> Result<()> {
     trx.commit().await?;
     assert_eq!(subject::caller(&graph, &a1, None).await?, None, "its subject acts as no one");
     assert_eq!(subject_of(&graph, tide).await?, None, "and the principal is bound to no session");
+    assert!(subject::sessions_bound(&graph).await?.is_empty(), "nor in a list's read");
     assert!(subject::bindings_of(&graph, &a1).await?.is_empty());
     let reef =
         ops::add_principal(&graph, "impl-reef", Some(AgentRole::Implementer), None, None, None, Some(&a1)).await?;
     assert_eq!(subject::caller(&graph, &a1, None).await?, Some(reef), "bound anew");
+    Ok(())
+}
+
+/// A principal bound to the agents of two sessions, which two binds of it at once can leave, acts
+/// for neither: each session's command is refused, naming both subjects, never guessed; a person's
+/// account bound beside a session is no second session.
+#[tokio::test]
+async fn a_principal_bound_to_two_sessions_acts_for_neither() -> Result<()> {
+    let graph = project().await?;
+    let (a1, other) = (agent("a1"), "claude-code:s2/main".to_string());
+    let tide =
+        ops::add_principal(&graph, "impl-tide", Some(AgentRole::Implementer), None, None, None, Some(&a1)).await?;
+    let trx = graph.begin();
+    subject::bind(&trx, tide, &other, tide, None).await?;
+    trx.commit().await?;
+    for (subject, beside) in [(&a1, &other), (&other, &a1)] {
+        let refused = refusal(subject::caller(&graph, subject, None).await);
+        assert!(refused.contains(subject.as_str()) && refused.contains(beside.as_str()), "{refused}");
+        assert!(refused.contains("a principal acts for one session"), "{refused}");
+    }
+
+    let person = ops::ensure_principal(&graph, "ines", "Ines", PrincipalKind::Human, None).await?;
+    let lead =
+        ops::add_principal(&graph, "lead-ines", Some(AgentRole::Lead), None, None, None, Some(&agent("main"))).await?;
+    let trx = graph.begin();
+    subject::bind(&trx, person, "github:4401", person, None).await?;
+    subject::bind(&trx, lead, "github:4402", person, None).await?;
+    trx.commit().await?;
+    assert_eq!(subject::caller(&graph, &agent("main"), None).await?, Some(lead), "an account is no session");
+    Ok(())
+}
+
+/// Succeeding a principal retired before keeps when and by whom it was retired, and the job and
+/// the unread notifications pass to the successor all the same.
+#[tokio::test]
+async fn a_succession_keeps_an_earlier_retirement() -> Result<()> {
+    let graph = project().await?;
+    let person = ops::ensure_principal(&graph, "ines", "Ines", PrincipalKind::Human, None).await?;
+    let old = ops::add_principal(&graph, "impl-a", Some(AgentRole::Implementer), None, None, None, None).await?;
+    let to_old = MessageContext { to: Some(old.to_base64()), ..Default::default() };
+    let question = ops::post_message(&graph, person, "is the retry capped?", Priority::Next, to_old).await?;
+    for p in routing::plan_for_message(&graph, &graph.get::<MessageView>(question).await?).await? {
+        routing::apply(&graph, &[p]).await?;
+    }
+    ops::retire_principal(&graph, "impl-a", person).await?;
+    let closing = |graph: ProjectGraph| async move {
+        let role: RoleView = graph.get(old).await?;
+        let closed: ankurah_commons::records::ClosedView = graph.component_of(&role).await?.expect("closed");
+        anyhow::Ok((closed.closed()?.map(|t| t.unix_millis()), closed.by()?.map(|by| *by)))
+    };
+    let retired = closing(graph.clone()).await?;
+    assert_eq!(retired.1, Some(person));
+
+    let done = ops::add_successor(&graph, "impl-b", None, None, None, None, None, "impl-a").await?;
+    assert_eq!(closing(graph.clone()).await?, retired, "its retirement as it was");
+    let old_role: RoleView = graph.get(old).await?;
+    assert_eq!(old_role.succeeded_by()?.map(|s| *s), Some(done.successor));
+    assert_eq!(done.moved, 1, "its unread notification moved");
+    assert_eq!(ops::inbox(&graph, done.successor, true).await?.len(), 1);
     Ok(())
 }

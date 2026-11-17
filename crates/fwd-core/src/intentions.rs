@@ -23,7 +23,6 @@ use ankurah::model::{ComponentViews, Mutable};
 use ankurah::property::{PropertyError, Ref};
 use ankurah::EntityId;
 use ankurah_commons::cognition::{Intention, IntentionView};
-use ankurah_commons::identity::Principal as CommonsPrincipal;
 use ankurah_commons::property::Timestamp;
 use ankurah_commons::records::{Closed, ClosedView, Created, CreatedView, Edited, EditedView};
 use anyhow::{bail, Result};
@@ -60,12 +59,6 @@ pub fn outcome(closed: Option<&ClosedView>) -> Result<Option<Outcome>, PropertyE
 /// Where an intention stands, as fwd prints it: `open`, else how it ended.
 pub fn status(outcome: Option<Outcome>) -> &'static str {
     outcome.map_or("open", Into::into)
-}
-
-/// The principal `id` as a Commons model refers to one (`Created.by`, `Edited.by`, `Closed.by`,
-/// `Attribution.speaker`).
-pub(crate) fn principal_ref(id: EntityId) -> Ref<CommonsPrincipal> {
-    Ref::new(id)
 }
 
 /// `millis` since the Unix epoch, as the Commons' models hold a moment.
@@ -105,7 +98,7 @@ pub async fn create(
     let trx = graph.begin();
     let made = trx.create_placed(&Intention { title, description: words.clone() }).await?;
     let record = Mutable::entity(&*made);
-    trx.add(record, &Created { created: at(now), by: principal_ref(by) }).await?;
+    trx.add(record, &Created { created: at(now), by: Ref::new(by) }).await?;
     // Read through the transaction, the views follow the record once it is committed.
     let views = <(PlacementView, Parts)>::views_of(record.read())?;
     quotation::quote_given(&trx, record.id(), words, speaker, by, now).await?;
@@ -194,7 +187,7 @@ pub async fn close(
     in_speakers_words(graph, placement, by, said_by).await?;
     let trx = graph.begin();
     let closed =
-        Closed { closed: Some(at(now_ms())), by: Some(principal_ref(by)), outcome: Some(ending.to_string()), reason };
+        Closed { closed: Some(at(now_ms())), by: Some(Ref::new(by)), outcome: Some(ending.to_string()), reason };
     match carried {
         Some(_) => {
             let m = trx.edit_placed::<Closed>(placement)?;
@@ -221,7 +214,7 @@ async fn record_edit(
     by: EntityId,
     now: i64,
 ) -> Result<()> {
-    let edit = Edited { edited: at(now), by: Some(principal_ref(by)) };
+    let edit = Edited { edited: at(now), by: Some(Ref::new(by)) };
     match graph.component_of::<EditedView>(placement).await? {
         Some(_) => {
             let m = trx.edit_placed::<Edited>(placement)?;

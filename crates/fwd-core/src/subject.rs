@@ -14,7 +14,7 @@
 //! security boundary.
 
 use crate::model::*;
-use crate::project_graph::{closed, ProjectGraph, ProjectTransaction};
+use crate::project_graph::{ProjectGraph, ProjectTransaction};
 use crate::query::{with_id, with_string, with_strings};
 use crate::{naming, ops};
 use ankurah::ankql::ast::{Parsed, Selection};
@@ -25,6 +25,7 @@ use ankurah_commons::identity::{IdentityBinding, IdentityBindingView};
 use ankurah_commons::property::Timestamp;
 use ankurah_commons::records::{Closed, Created};
 use anyhow::{bail, Result};
+use std::collections::BTreeMap;
 
 /// The variable a stamped command carries the Claude Code session's id in.
 pub const SESSION_VAR: &str = "FWD_CLAUDE_SESSION";
@@ -149,7 +150,7 @@ pub fn is_main_thread(subject: &str) -> bool {
 async fn holding(graph: &ProjectGraph, args: Selection<Parsed>) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
     let mut held = Vec::new();
     for (placement, binding) in graph.fetch_placed::<IdentityBindingView>(args).await? {
-        if !closed(&binding)? {
+        if !graph.is_closed(&binding).await? {
             held.push((placement, binding));
         }
     }
@@ -213,10 +214,36 @@ pub async fn session_bound_to(graph: &ProjectGraph, principal: EntityId) -> Resu
     Ok(sessions.into_iter().min())
 }
 
-/// The project's bindings of Codex threads that hold: every subject from `codex:` up to, not
-/// including, `codex;`, `;` being the character after `:`.
+/// The agent's session or thread bound to each of the project's principals that one is bound to,
+/// read at once for a list of them, as [`session_bound_to`] reads one principal's.
+pub async fn sessions_bound(graph: &ProjectGraph) -> Result<BTreeMap<EntityId, String>> {
+    let mut sessions: BTreeMap<EntityId, String> = BTreeMap::new();
+    for prefix in [CLAUDE_CODE, CODEX] {
+        for (_, binding) in harness_bindings(graph, prefix).await? {
+            let subject = binding.subject()?;
+            let principal = EntityId::from(binding.principal()?);
+            match sessions.get(&principal) {
+                Some(first) if *first <= subject => {}
+                _ => {
+                    sessions.insert(principal, subject);
+                }
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+/// The project's bindings that hold of the harness whose subjects start with `prefix` (`codex:`,
+/// `claude-code:`): every subject from the prefix up to, not including, the prefix with its last
+/// character, `:`, made `;`, the character after it.
+async fn harness_bindings(graph: &ProjectGraph, prefix: &str) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
+    let before = format!("{};", prefix.trim_end_matches(':'));
+    holding(graph, with_strings("subject >= ? AND subject < ?", &[prefix, &before])?).await
+}
+
+/// The project's bindings of Codex threads that hold.
 pub async fn codex_bindings(graph: &ProjectGraph) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
-    holding(graph, with_strings("subject >= ? AND subject < ?", &[CODEX, "codex;"])?).await
+    harness_bindings(graph, CODEX).await
 }
 
 /// The bindings of the project that hold `subject`, which a binding of it to another principal
@@ -265,7 +292,9 @@ pub async fn unbind(
 /// The principal of the project bound to `subject`, as whom a command that carries the subject
 /// acts: none while the agent has not named itself. Should two be bound to it (two `fwd principal
 /// add`s of one agent at once), the one that is not retired; two that are not are refused, listed
-/// by id, for the agent to retire the one it does not mean.
+/// by id, for the agent to retire the one it does not mean. A principal acts for one session, as
+/// the one field that held its session before the Commons did held one: one bound to another
+/// session's agent as well (two binds of one principal at once) is refused, naming both.
 pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<(RoleView, PrincipalView)>> {
     let mut bound = Vec::new();
     for id in principals_bound(graph, with_string("subject = ?", subject)?).await? {
@@ -291,6 +320,22 @@ pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<
             )
         }
     };
+    let (role, principal) = one;
+    let elsewhere = holding(graph, with_id("principal = ?", role.id())?).await?;
+    let other = elsewhere
+        .iter()
+        .filter_map(|(_, b)| b.subject().ok())
+        .filter(|s| s != subject && session_of(s).is_some())
+        .min();
+    if let Some(other) = other {
+        bail!(
+            "@{} is bound to {} and to {}, and a principal acts for one session, so neither acts as it: retire it (`fwd principal retire {}`), and the agent of each session names itself anew",
+            principal.handle()?,
+            words(subject),
+            words(&other),
+            role.id().to_base64()
+        );
+    }
     Ok(Some(one.clone()))
 }
 

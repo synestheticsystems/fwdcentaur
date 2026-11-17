@@ -666,8 +666,9 @@ fn a_question_found_two_ways_is_listed_once() -> Result<()> {
     let s = Scratch::new()?;
     s.json(&s.alpha, Some("main"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
     let id = s.json(&s.alpha, Some("main"), &["whoami"])?["principal"]["id"].as_str().unwrap_or_default().to_string();
-    s.json(&s.alpha, Some("main"), &["principal", "rename", &id])?;
-    let question = s.made(&s.alpha, None, &["ask", "--to", &id, "does the retry hold?"])?;
+    // An id may start with `-`, which only these forms give as a value.
+    s.json(&s.alpha, Some("main"), &["principal", "rename", "--", &id])?;
+    let question = s.made(&s.alpha, None, &["ask", &format!("--to={id}"), "does the retry hold?"])?;
     let json = s.json(&s.alpha, Some("main"), &["prime"])?;
     let principal = &json["principals"][0];
     assert_eq!(ids(principal, "asked_of_you"), [question], "{json}");

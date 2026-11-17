@@ -175,7 +175,7 @@ impl Operations {
         let (project, graph) = self.project(project)?;
         v["project"] = json!({"id": project.id.to_string(), "name": project.name});
         match subject::principal_of(&graph, &caller.subject).await? {
-            Some(p) => v["principal"] = crate::principal_json(&graph, &p).await?,
+            Some((role, _)) => v["principal"] = crate::principal_json_of(&graph, role.id()).await?,
             None => {
                 v["first_write_makes"] = json!({"handle": self.free_handle(&graph, caller).await?, "role": caller.default_role().to_string()});
                 v["bind_instead"] = json!(format!(

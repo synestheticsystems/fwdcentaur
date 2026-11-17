@@ -229,6 +229,9 @@ pub struct Held {
     /// Those of the session's own thread first, then its subagents'
     /// ([`working_set::read_session`]).
     pub holdings: Vec<Holding>,
+    /// Every principal the session's agents are bound to, retired ones included, which the view
+    /// listens to: one brought back changes nothing else the view listens to.
+    pub bound: Vec<EntityId>,
     pub person: Person,
     /// Every project of the node.
     pub projects: Vec<ProjectRecord>,
@@ -265,7 +268,7 @@ fn extent() -> Extent {
 pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Result<Held> {
     let known = Known::read(graph).await?;
     let mut person = Person::resolve(&known, reader);
-    let holdings = working_set::read_session(graph, &known, session, &extent()).await?;
+    let (holdings, bound) = working_set::read_session(graph, &known, session, &extent()).await?;
     let waiting: Vec<EntityId> =
         holdings.iter().flat_map(Holding::asked_by).filter(|(r, to)| person.asked(r, to)).map(|(r, _)| r.id).collect();
     for question in waiting {
@@ -313,6 +316,7 @@ pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Re
     Ok(Held {
         session: session.to_string(),
         holdings,
+        bound,
         person,
         projects,
         names,
@@ -388,10 +392,10 @@ enum Asked<'a> {
 
 impl Held {
     /// The live queries whose changes can change the view: the projects, each project's bindings
-    /// of the session's agents, each principal bound and its working set, the threads of the questions asked of
-    /// the person, the intentions assigned to the principals of the session's own thread, each of
-    /// those intentions with the relations that join its quotations to it, and each record they
-    /// join.
+    /// of the session's agents, each principal bound, retired or not, each working set, the
+    /// threads of the questions asked of the person, the intentions assigned to the principals of
+    /// the session's own thread, each of those intentions with the relations that join its
+    /// quotations to it, and each record they join.
     pub fn live_reads(&self) -> BTreeSet<LiveRead> {
         let mut reads = BTreeSet::from([LiveRead::Projects]);
         let session = |project: &ProjectRecord| LiveRead::SessionBindings {
@@ -399,8 +403,8 @@ impl Held {
             session: self.session.clone(),
         };
         reads.extend(self.projects.iter().map(session));
+        reads.extend(self.bound.iter().map(|id| LiveRead::Principal(*id)));
         for h in &self.holdings {
-            reads.insert(LiveRead::Principal(h.principal));
             reads.extend(h.live_reads());
             reads.extend(
                 h.asked_by().filter(|(r, to)| self.person.asked(r, to)).map(|(r, _)| LiveRead::AnswersTo(r.id)),
