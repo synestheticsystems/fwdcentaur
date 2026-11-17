@@ -3825,7 +3825,11 @@ async fn act_as(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
     let name = naming::bare(name);
     match naming::principal_named(graph, name, None).await? {
         Some((role, _)) => Ok(role.id()),
-        None => bail!(no_principal_named(name)),
+        None => {
+            // In a project not moved yet, the name may be one the move has still to make findable.
+            fwd_core::conversion::principals::refuse_unmoved_lookup(graph).await?;
+            bail!(no_principal_named(name))
+        }
     }
 }
 

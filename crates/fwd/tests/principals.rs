@@ -313,6 +313,32 @@ async fn a_migration_refused_after_it_moved_the_principals_says_what_it_moved() 
     Ok(())
 }
 
+/// A name `--as` types that no principal has, in a project whose principals have not moved yet,
+/// may be one of theirs, so the refusal names the migration; in a project made since, it names the
+/// commands that make a principal, as it always did. Once moved, the name is found.
+#[tokio::test]
+async fn a_name_no_principal_has_names_the_migration_only_where_principals_have_not_moved() -> Result<()> {
+    let (d, unmoved) = Daemon::unmoved().await?;
+    let said = |checkout: &Path| -> Result<String> {
+        let out = d.run(checkout, None, &["--as", "impl-old", "whoami"])?;
+        assert!(!out.status.success());
+        Ok(String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let not_moved = said(&d.beta)?;
+    assert!(
+        not_moved.contains("the project beta holds principals that `fwd admin migrate` has not moved"),
+        "{not_moved}"
+    );
+    let made_since = said(&d.alpha)?;
+    assert!(made_since.contains("no principal of this project is named `impl-old`"), "{made_since}");
+    assert!(!made_since.contains("fwd admin migrate"), "{made_since}");
+
+    d.json(&d.beta, None, &["admin", "migrate"])?;
+    let found = d.json(&d.beta, None, &["--as", "impl-old", "whoami"])?;
+    assert_eq!(found["principal"]["id"], unmoved.agent.as_str());
+    Ok(())
+}
+
 /// Whoever a command acts as retires a principal: one a typed `--as` names, by its name, its id or
 /// the start of its id, and an agent that retires itself.
 #[tokio::test]

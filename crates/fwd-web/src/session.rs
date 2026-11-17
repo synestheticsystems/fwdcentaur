@@ -27,6 +27,7 @@ use ankurah::{policy::DEFAULT_CONTEXT, EntityId, Node, PermissiveAgent};
 use ankurah_signals::{CurrentObserver, ReactiveGraphObserver};
 use ankurah_storage_indexeddb_wasm::IndexedDBStorageEngine;
 use ankurah_websocket_client_wasm::WebsocketClient;
+use fwd_core::conversion::principals::refuse_unmoved_lookup;
 use fwd_core::daemon_socket;
 use fwd_core::model::{PrincipalView, RoleView};
 use fwd_core::naming;
@@ -717,13 +718,15 @@ fn query_param(name: &str) -> Option<String> {
 /// the active people.
 async fn choose_principal() -> Result<PrincipalView, String> {
     let graph = graph();
+    // In a project not moved yet no principal is found, so a miss names the migration.
+    let unmoved = || async { refuse_unmoved_lookup(&graph).await.map_err(|e| format!("{e}.")) };
     if let Some(named) = query_param("as") {
         let none = if named.parse::<EntityId>().is_ok() { "id" } else { "handle" };
-        return naming::principal_named(&graph, &named, None)
-            .await
-            .map_err(|e| format!("{e}."))?
-            .map(|(_, principal)| principal)
-            .ok_or_else(|| format!("No principal has the {none} `{named}`."));
+        let found = naming::principal_named(&graph, &named, None).await.map_err(|e| format!("{e}."))?;
+        if found.is_none() {
+            unmoved().await?;
+        }
+        return found.map(|(_, principal)| principal).ok_or_else(|| format!("No principal has the {none} `{named}`."));
     }
     // Whether one is retired is read off its role: a retired principal carries `Closed`.
     let mut humans: Vec<(RoleView, PrincipalView)> = graph
@@ -734,11 +737,13 @@ async fn choose_principal() -> Result<PrincipalView, String> {
         .filter(|(role, _)| !ops::retired(role).unwrap_or(true))
         .collect();
     humans.sort_by_key(|(role, principal)| (!ops::belongs(role), principal.handle().unwrap_or_default()));
-    humans
-        .into_iter()
-        .next()
-        .map(|(_, principal)| principal)
-        .ok_or_else(|| "This project has no person yet: run `fwd init` in the repository first.".to_string())
+    match humans.into_iter().next() {
+        Some((_, principal)) => Ok(principal),
+        None => {
+            unmoved().await?;
+            Err("This project has no person yet: run `fwd init` in the repository first.".to_string())
+        }
+    }
 }
 
 #[cfg(test)]

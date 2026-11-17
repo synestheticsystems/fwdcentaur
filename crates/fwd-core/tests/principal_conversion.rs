@@ -444,6 +444,22 @@ async fn nothing_makes_a_principal_or_a_binding_beside_one_not_moved_yet() -> Re
     Ok(())
 }
 
+/// A lookup that finds no one refuses naming the migration in a project that holds a principal not
+/// moved yet, and lets the caller say what it says of a miss in a project made since, or moved.
+#[tokio::test]
+async fn a_miss_names_the_migration_only_in_a_project_not_moved_yet() -> Result<()> {
+    let (_store, ctx, alpha) = Store::new().await?;
+    let made_since = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
+    written(&alpha, principal(&alpha, PrincipalKind::Human, "ines")).await?;
+    let refused = format!("{:#}", principals::refuse_unmoved_lookup(&alpha).await.expect_err("refused"));
+    assert!(refused.contains("the project alpha holds principals that `fwd admin migrate` has not moved"), "{refused}");
+    assert!(refused.contains("Run `fwd admin migrate --project \"alpha\"`"), "{refused}");
+    principals::refuse_unmoved_lookup(&made_since).await?;
+    principals::convert(&alpha).await?;
+    principals::refuse_unmoved_lookup(&alpha).await?;
+    Ok(())
+}
+
 /// One agent session with a principal in each of two projects, as the build before the move wrote
 /// them: the move in one project binds that project's principal alone, and leaves the other
 /// project's as it was, until the move runs there too; then the session acts as each project's own.

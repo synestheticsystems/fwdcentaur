@@ -91,14 +91,34 @@ struct Additions {
 /// would stay a second one for good once the move keeps both (a person's command finds or makes the
 /// person on every start). It runs only where a command is about to make a principal or a binding.
 pub async fn refuse_unmoved(graph: &ProjectGraph) -> Result<()> {
-    if !unmoved(graph).await?.is_empty() {
-        let project = graph.projects().await?.into_iter().find(|p| p.record == graph.record());
-        let name = project.map_or_else(|| graph.record().to_base64(), |p| p.name);
+    if let Some(name) = awaiting_the_move(graph).await? {
         bail!(
             "the project {name} holds principals that `fwd admin migrate` has not moved onto the Commons' models yet, and makes no principal and binds no session until it has: one made now could be a second record of one it holds already. Run `fwd admin migrate --project \"{name}\"`, then this again"
         );
     }
     Ok(())
+}
+
+/// Refuses a lookup that found no principal by a name, or no person, in a project that holds a
+/// principal [`convert`] has not moved yet, naming the migration, since no lookup finds one until
+/// it has: the name may be that principal's, and the person is not missing. In a project whose
+/// principals have all moved, as in one made since, the caller says what it says of a miss.
+pub async fn refuse_unmoved_lookup(graph: &ProjectGraph) -> Result<()> {
+    if let Some(name) = awaiting_the_move(graph).await? {
+        bail!(
+            "the project {name} holds principals that `fwd admin migrate` has not moved onto the Commons' models yet, and no command finds one of them until it has. Run `fwd admin migrate --project \"{name}\"`, then this again"
+        );
+    }
+    Ok(())
+}
+
+/// The name of the project `graph` reads, while it holds a principal [`convert`] has not moved yet.
+async fn awaiting_the_move(graph: &ProjectGraph) -> Result<Option<String>> {
+    if unmoved(graph).await?.is_empty() {
+        return Ok(None);
+    }
+    let project = graph.projects().await?.into_iter().find(|p| p.record == graph.record());
+    Ok(Some(project.map_or_else(|| graph.record().to_base64(), |p| p.name)))
 }
 
 /// The project's principals of fwd's own model that carry no Commons principal yet, selected by
