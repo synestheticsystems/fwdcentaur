@@ -300,8 +300,12 @@ pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<
     for id in principals_bound(graph, with_string("subject = ?", subject)?).await? {
         bound.push(graph.principal(id).await?);
     }
-    let at_work: Vec<&(RoleView, PrincipalView)> =
-        bound.iter().filter(|(role, _)| !ops::retired(role).unwrap_or(true)).collect();
+    let mut at_work = Vec::new();
+    for p in &bound {
+        if !ops::retired(&p.0)? {
+            at_work.push(p);
+        }
+    }
     let one = match (bound.as_slice(), at_work.as_slice()) {
         ([], _) => return Ok(None),
         ([one], _) => one,
@@ -321,13 +325,14 @@ pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<
         }
     };
     let (role, principal) = one;
-    let elsewhere = holding(graph, with_id("principal = ?", role.id())?).await?;
-    let other = elsewhere
-        .iter()
-        .filter_map(|(_, b)| b.subject().ok())
-        .filter(|s| s != subject && session_of(s).is_some())
-        .min();
-    if let Some(other) = other {
+    let mut others = Vec::new();
+    for (_, binding) in holding(graph, with_id("principal = ?", role.id())?).await? {
+        let bound_to = binding.subject()?;
+        if bound_to != subject && session_of(&bound_to).is_some() {
+            others.push(bound_to);
+        }
+    }
+    if let Some(other) = others.into_iter().min() {
         bail!(
             "@{} is bound to {} and to {}, and a principal acts for one session, so neither acts as it: retire it (`fwd principal retire {}`), and the agent of each session names itself anew",
             principal.handle()?,
