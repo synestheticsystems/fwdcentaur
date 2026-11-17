@@ -36,6 +36,14 @@ impl Daemon {
     /// The daemon's folders in a scratch folder, and a checkout of each of two projects that
     /// `tester` made.
     fn new() -> Result<Daemon> {
+        let daemon = Daemon::folders()?;
+        daemon.json(&daemon.alpha, None, &["init", "--name", "alpha", "--handle", "tester"])?;
+        daemon.json(&daemon.beta, None, &["init", "--name", "beta", "--handle", "tester"])?;
+        Ok(daemon)
+    }
+
+    /// The daemon's folders in a scratch folder, and the two checkouts, of no project yet.
+    fn folders() -> Result<Daemon> {
         let scratch = Scratch::new()?;
         let paths = scratch.paths("run", "data");
         let checkout = |name: &str| -> Result<PathBuf> {
@@ -46,10 +54,7 @@ impl Daemon {
             Ok(root)
         };
         let (alpha, beta) = (checkout("alpha")?, checkout("beta")?);
-        let daemon = Daemon { paths, alpha, beta, _scratch: scratch };
-        daemon.json(&daemon.alpha, None, &["init", "--name", "alpha", "--handle", "tester"])?;
-        daemon.json(&daemon.beta, None, &["init", "--name", "beta", "--handle", "tester"])?;
-        Ok(daemon)
+        Ok(Daemon { paths, alpha, beta, _scratch: scratch })
     }
 
     /// `fwd <args>` in `checkout`, reaching this daemon only, with none of the caller's settings
@@ -170,17 +175,7 @@ impl Daemon {
     /// daemon hosts does when this build is first installed: beta is made with no principal, and
     /// its principals are written as that build wrote them.
     async fn unmoved() -> Result<(Daemon, Unmoved)> {
-        let scratch = Scratch::new()?;
-        let paths = scratch.paths("run", "data");
-        let checkout = |name: &str| -> Result<PathBuf> {
-            let root = scratch.path().join(name);
-            std::fs::create_dir_all(&root)?;
-            fwd_core::anchoring::git(&root, &["init", "-q", "-b", "main"])?;
-            fwd_core::anchoring::git(&root, &["remote", "add", "origin", &format!("git@example.com:acme/{name}.git")])?;
-            Ok(root)
-        };
-        let (alpha, beta) = (checkout("alpha")?, checkout("beta")?);
-        let daemon = Daemon { paths, alpha, beta, _scratch: scratch };
+        let daemon = Daemon::folders()?;
         daemon.json(&daemon.alpha, None, &["init", "--name", "alpha", "--handle", "tester"])?;
         let options = project::InitOptions { name: Some("beta"), ..Default::default() };
         let beta = project::init(&daemon.paths, &daemon.beta, options)?.0.project;
@@ -306,9 +301,10 @@ async fn a_migration_refused_after_it_moved_the_principals_says_what_it_moved() 
     let out = d.run(&d.beta, Some("a2"), &["admin", "migrate"])?;
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && said.contains("which has not named itself in this project"), "{said}");
-    assert!(said.contains("principals moved onto the Commons' identity.Principal"), "{said}");
+    let line = said.lines().find(|l| l.starts_with("principals moved onto the Commons' identity.Principal"));
+    let line = line.ok_or_else(|| anyhow!("no line of the principals moved: {said}"))?;
     for (id, handle) in [(&unmoved.person, "@tester"), (&unmoved.agent, "@impl-old")] {
-        assert!(said.contains(&format!("{} {handle}", &id[..8])), "{said}");
+        assert!(line.contains(&format!("{} {handle}", &id[..8])), "{said}");
     }
     assert_eq!(moved(&d.json(&d.beta, None, &["admin", "migrate"])?), Vec::<String>::new());
     d.each_acts_as_itself(&unmoved)?;

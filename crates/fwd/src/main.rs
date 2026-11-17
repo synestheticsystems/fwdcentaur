@@ -2946,7 +2946,7 @@ async fn run_cli() -> Result<()> {
         // The principals' parts of `fwd admin migrate` wrote what they did before the command found
         // whom it acts as, so a command refused after them says what that was.
         if let (Err(_), Some(said)) = (&rest, said_first) {
-            eprintln!("fwd: before what ended it below, `fwd admin migrate` did this:\\n{said}");
+            eprintln!("fwd: `fwd admin migrate` did this before the error below ended it:\n{said}");
         }
         rest
     }
@@ -6346,6 +6346,10 @@ mod tests {
             ),
             ("principal role".into(), vec![A, "lead"], vec![("handle", id(A))]),
             ("principal retire".into(), vec![A], vec![("handle", id(A))]),
+            // An agent renamed to its own id has a name that may start with `-`: a new name takes
+            // it after `--`, and `ask` as `--to=<it>`.
+            ("principal rename".into(), vec!["--", A], vec![("name", id(A))]),
+            ("ask".into(), vec!["--to=-5Yk2Qd7wXcL9mPz0RtVbA", "why?"], vec![("to", some(A))]),
             ("principal bind".into(), vec![A, "--as", A], vec![("handle", id(A)), ("act_as", some(A))]),
             ("principal succeed".into(), vec![A], vec![("handle", id(A))]),
             ("admin bind".into(), vec![A, "--subject", "codex:s/t"], vec![("handle", id(A))]),
@@ -6583,20 +6587,6 @@ mod tests {
         hyphen_arguments(&Cli::command(), "", &mut declared);
         let missing: Vec<&String> = declared.iter().filter(|d| !covered.contains(*d)).collect();
         assert!(missing.is_empty(), "arguments that take a value starting with `-` but have no row: {missing:?}");
-    }
-
-    /// A new name after `--`, and an addressee given as `--to=<it>`, may start with `-`, as an id may
-    /// (one in 64 does), which an agent renamed to its own id has for its name.
-    #[test]
-    fn a_name_and_an_addressee_starting_with_a_hyphen_are_read_after_two_hyphens_and_an_equals_sign() {
-        let id = "-NJmzn4PB1-7rFgbUsRnzj_YiAKsrWieEsFk3wUyeSI";
-        let renamed = Cli::try_parse_from(["fwd", "principal", "rename", "--", id]).expect("parsed");
-        let named =
-            matches!(renamed.command, Command::Principal { command: PrincipalCommand::Rename { name } } if name == id);
-        assert!(named, "the new name");
-        let to = format!("--to={id}");
-        let asked = Cli::try_parse_from(["fwd", "ask", &to, "does the retry hold?"]).expect("parsed");
-        assert!(matches!(asked.command, Command::Ask { to: Some(to), .. } if to == id), "the addressee");
     }
 
     /// The `--priority` a command line gives, or what refuses the command line.
