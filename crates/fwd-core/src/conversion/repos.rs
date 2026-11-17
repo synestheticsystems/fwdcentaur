@@ -5,7 +5,7 @@ use super::moves;
 use crate::model::{Placement, PlacementView};
 use crate::project_graph::ProjectGraph;
 use ankurah::model::Mutable;
-use ankurah::EntityId;
+use ankurah::{EntityId, Model};
 use ankurah_commons::git::{Repository, RepositoryView};
 use anyhow::Result;
 
@@ -49,10 +49,7 @@ pub struct Converted {
 /// `Repository` has moved.
 pub async fn convert(graph: &ProjectGraph) -> Result<Vec<Converted>> {
     let mut checked = Vec::new();
-    for old in graph.all::<before_d261::RepoView>().await? {
-        if graph.component_of::<RepositoryView>(&old).await?.is_some() {
-            continue;
-        }
+    for old in unmoved(graph).await? {
         let gets = match graph.component_of::<PlacementView>(&old).await? {
             Some(_) => Err("it carries `placement` already, which the move would write over".to_string()),
             None => Ok(Repository {
@@ -74,4 +71,26 @@ pub async fn convert(graph: &ProjectGraph) -> Result<Vec<Converted>> {
         converted.push(Converted { repository: old.id(), name: repository.name });
     }
     Ok(converted)
+}
+
+/// Whether the project holds a repository [`convert`] has not moved yet. No read finds one until it
+/// has, so registering a checkout of its upstream then would make a second record for it, which the
+/// move would keep beside the first.
+pub async fn any_unmoved(graph: &ProjectGraph) -> Result<bool> {
+    Ok(!unmoved(graph).await?.is_empty())
+}
+
+/// The project's repositories of fwd's own model that carry no `Repository` yet. A node that never
+/// defined that model holds none, and is not made to define it by reading them.
+async fn unmoved(graph: &ProjectGraph) -> Result<Vec<before_d261::RepoView>> {
+    if graph.models_labelled(before_d261::Repo::descriptor().label).await?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut unmoved = Vec::new();
+    for old in graph.all::<before_d261::RepoView>().await? {
+        if graph.component_of::<RepositoryView>(&old).await?.is_none() {
+            unmoved.push(old);
+        }
+    }
+    Ok(unmoved)
 }

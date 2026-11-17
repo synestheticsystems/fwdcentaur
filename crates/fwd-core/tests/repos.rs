@@ -51,6 +51,7 @@ async fn clones_and_worktrees_of_one_upstream_share_one_repo() -> Result<()> {
     let repos = graph.all_placed::<RepositoryView>().await?;
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0].1.name()?, "simulator", "named after the directory that registered it");
+    assert!(graph.models_labelled("repo").await?.is_empty(), "and no model of before the move is defined");
 
     // No remote, no identity: refused, never keyed by a directory name.
     let local = dir.path().join("local-only");

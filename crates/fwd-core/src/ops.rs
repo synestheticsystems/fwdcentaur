@@ -5203,7 +5203,9 @@ pub fn may_start_an_id(s: &str) -> bool {
 /// project: keyed by the upstream remote (`origin`), so every clone and every worktree of one
 /// repository share one record (Daniel, 2026-09-25: repositories are identified by their upstream,
 /// never by a worktree or a directory). A repository with no remote has no identity yet and is
-/// refused. Created on first use; the name is the directory that first registered it.
+/// refused. Created on first use; the name is the directory that first registered it. A project
+/// holding a repository `fwd admin migrate` has not moved registers none that is not found: no read
+/// finds the old one, and a record made beside it would stay a second one for its upstream.
 #[cfg(feature = "native")]
 pub async fn ensure_repo(graph: &ProjectGraph, root: &std::path::Path) -> Result<EntityId> {
     let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or("repo".into());
@@ -5224,6 +5226,13 @@ pub async fn ensure_repo(graph: &ProjectGraph, root: &std::path::Path) -> Result
         if repo_upstreams(&r)?.contains(&key) {
             return Ok(placement.id());
         }
+    }
+    if crate::conversion::repos::any_unmoved(graph).await? {
+        let project = graph.projects().await?.into_iter().find(|p| p.record == graph.record());
+        let name = project.map_or_else(|| graph.record().to_base64(), |p| p.name);
+        bail!(
+            "the project {name} holds repositories that `fwd admin migrate` has not moved onto the Commons' models yet, and registers none until it has: a repository registered now would be a second record of one it holds already. Run `fwd admin migrate --project \"{name}\"`, then this again"
+        );
     }
     let default_branch = crate::anchoring::git(root, &["symbolic-ref", "--short", "HEAD"])
         .ok()

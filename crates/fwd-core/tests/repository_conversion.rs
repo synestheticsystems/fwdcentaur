@@ -139,6 +139,44 @@ async fn each_repository_moves_whole_and_a_checkout_of_its_upstream_still_finds_
     Ok(())
 }
 
+/// Until the move, a project holding a repository of fwd's own model registers none, of its upstream
+/// or of another, and makes no record: no read finds the old one, and a record made then would stay
+/// a second one for its upstream. A project beside it holding none registers as before. After the
+/// move, a checkout of the upstream gets the original, the project's one repository for it.
+#[tokio::test]
+async fn a_project_registers_no_repository_until_its_repositories_have_moved() -> Result<()> {
+    let (store, before) = Store::new().await?;
+    let upstream = "git@example.com:acme/simulator.git";
+    let original = written(&before, "simulator", json!([upstream]), "main").await?;
+    drop(before);
+    let node = durable::open(SqliteStorageEngine::open(&store.path).await?).await?;
+    let ctx = node.context_async(DEFAULT_CONTEXT).await?;
+    let alpha = ProjectGraph::open(ctx.clone(), store.project).await?;
+    let beta = ProjectGraph::ensure(ctx, uuid::Uuid::new_v4(), "beta").await?;
+    let dir = tempfile::tempdir()?;
+    let (simulator, other) = (dir.path().join("simulator"), dir.path().join("other"));
+    checkout(&simulator, "https://example.com/acme/simulator")?;
+    checkout(&other, "git@example.com:acme/other.git")?;
+
+    for root in [&simulator, &other] {
+        let refused = format!("{:#}", ops::ensure_repo(&alpha, root).await.expect_err("refused"));
+        assert!(refused.contains("fwd admin migrate --project \"alpha\""), "{refused}");
+    }
+    assert!(repositories(&alpha).await?.is_empty(), "no record made");
+    let theirs = ops::ensure_repo(&beta, &other).await?;
+    assert_eq!(repositories(&beta).await?.iter().map(|r| r.0).collect::<Vec<_>>(), vec![theirs]);
+
+    repos::convert(&alpha).await?;
+    assert_eq!(ops::ensure_repo(&alpha, &simulator).await?, original);
+    let key = ops::repo_key(upstream);
+    let mut answering = 0;
+    for (_, r) in alpha.all_placed::<RepositoryView>().await? {
+        answering += usize::from(ops::repo_upstreams(&r)?.contains(&key));
+    }
+    assert_eq!(answering, 1, "one repository for the upstream");
+    Ok(())
+}
+
 /// A repository whose entity carries a `Placement` already would have its project written over,
 /// so the run stops naming it, and the other, which would move whole, does not move either.
 #[tokio::test]
