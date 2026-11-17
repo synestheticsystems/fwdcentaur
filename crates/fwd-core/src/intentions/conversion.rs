@@ -4,6 +4,7 @@
 
 use super::quotation::quote;
 use super::{at, principal_ref, Outcome};
+use crate::conversion;
 use crate::model::{Placement, PlacementView};
 use crate::project_graph::ProjectGraph;
 use ankurah::model::Mutable;
@@ -12,7 +13,6 @@ use ankurah_commons::cognition::{Intention, IntentionView};
 use ankurah_commons::records::{Attribution, Closed, ClosedView, Created, CreatedView, Edited, EditedView};
 use ankurah_commons::text::Quotation;
 use anyhow::{bail, Result};
-use serde_json::json;
 
 /// The Commons' models of an intention as fwd's node minted them from ankurah/commons 84ea084,
 /// before an intention became a description that belongs to no one (D229) and before the Commons
@@ -72,8 +72,8 @@ pub mod before_d229 {
     }
 }
 
-/// What a quotation the conversion made says it came from, in its relation's `via`: the words an
-/// intention held itself until D229.
+/// What a quotation the conversion made says it came from, in its `Migrated` and its relation's
+/// `via`: the words an intention held itself until D229.
 const MIGRATED_FROM: &str = "intention_words";
 
 /// One intention [`convert`] moved: its id, its title, the labels of the components it gave it,
@@ -105,32 +105,21 @@ struct Additions {
 /// `Intention`, its title and its words as the description; `Created`; `Edited` when it was
 /// reworded; `Closed` with its outcome and reason when it was fulfilled or withdrawn; and a
 /// quotation of its words as last written down, by whom and when, naming their speaker when that
-/// was someone else ([`super::quotation`]). Its assignments are relations to its id, so they hold
-/// as they were. Every intention is checked before anything is written: one that cannot move
-/// without losing something refuses the run, naming each. Then one transaction each, so a run that
-/// stops halfway leaves each intention whole, and an intention that carries the new `Intention`
-/// has moved, so a second run changes nothing.
+/// was someone else ([`super::quotation`]), marked as the conversion's. Its assignments are
+/// relations to its id, so they hold as they were. Each intention moves as
+/// [`crate::conversion`] says: one that cannot move without losing something refuses the run, and
+/// one that carries the new `Intention` has moved.
 pub async fn convert(graph: &ProjectGraph, by: EntityId) -> Result<Vec<Converted>> {
     let speakers = old_speakers(graph).await?;
-    let mut moves = Vec::new();
-    let mut refused = Vec::new();
+    let mut checked = Vec::new();
     for (placement, old) in graph.all_placed::<before_d229::IntentionView>().await? {
         if graph.component_of::<IntentionView>(&placement).await?.is_some() {
             continue;
         }
-        match additions(graph, placement, &old, &speakers).await? {
-            Ok(additions) => moves.push(additions),
-            Err((id, why)) => refused.push(format!("{} ({why})", id.to_base64())),
-        }
+        checked.push((placement.id(), additions(graph, placement, &old, &speakers).await?));
     }
-    if !refused.is_empty() {
-        bail!(
-            "no intention was moved onto the Commons' new models, since moving these would lose part of what they hold: {}",
-            refused.join("; ")
-        );
-    }
-    let mut converted = Vec::with_capacity(moves.len());
-    for m in moves {
+    let mut converted = Vec::with_capacity(checked.len());
+    for m in conversion::moves("intention", checked)? {
         let intention = m.placement.id();
         let trx = graph.begin();
         let placed = trx.edit_placed::<Placement>(&m.placement)?;
@@ -146,8 +135,7 @@ pub async fn convert(graph: &ProjectGraph, by: EntityId) -> Result<Vec<Converted
             trx.add(record, closed).await?;
             added.push(Closed::descriptor().label);
         }
-        let via = json!({"actor_id": by.to_base64(), "migrated": MIGRATED_FROM});
-        let quotation = quote(&trx, intention, &m.quotation, &m.recorded, m.speaker, by, via).await?;
+        let quotation = quote(&trx, intention, &m.quotation, &m.recorded, m.speaker, by, Some(MIGRATED_FROM)).await?;
         trx.commit().await?;
         converted.push(Converted { intention, title: m.intention.title, added, quotation });
     }
@@ -197,16 +185,15 @@ fn old_speaker(
 }
 
 /// What the intention `placement` is on gets ([`convert`]), read from `old` and the components
-/// of 84ea084 beside it, its speaker by `speakers` ([`old_speakers`]); or its id and why it cannot
-/// move without losing part of what it holds.
+/// of 84ea084 beside it, its speaker by `speakers` ([`old_speakers`]); or why it cannot move
+/// without losing part of what it holds.
 async fn additions(
     graph: &ProjectGraph,
     placement: PlacementView,
     old: &before_d229::IntentionView,
     speakers: &[(ModelId, PropertyId)],
-) -> Result<Result<Additions, (EntityId, String)>> {
-    let id = placement.id();
-    let refuse = |why: &str| -> Result<Result<Additions, (EntityId, String)>> { Ok(Err((id, why.to_string()))) };
+) -> Result<Result<Additions, String>> {
+    let refuse = |why: &str| -> Result<Result<Additions, String>> { Ok(Err(why.to_string())) };
     let Some(creation) = graph.component_of::<before_d229::CreationView>(&placement).await? else {
         return refuse("no record of who wrote it down, or when");
     };

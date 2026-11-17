@@ -7,7 +7,7 @@
 //! the quotations of its words before, and its latest says whose words it holds now.
 
 use super::{at, principal_ref};
-use crate::model::{PlacementView, RelationKind, RelationStatus};
+use crate::model::{Migrated, PlacementView, RelationKind, RelationStatus};
 use crate::ops;
 use crate::project_graph::{Followed, ProjectGraph, ProjectTransaction};
 use crate::rules;
@@ -17,7 +17,7 @@ use ankurah::EntityId;
 use ankurah_commons::records::{Attribution, AttributionView, Created, CreatedView};
 use ankurah_commons::text::{Quotation, QuotationView};
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::json;
 
 /// The components every quotation carries, which a read takes it by.
 pub type Quoted = (QuotationView, CreatedView);
@@ -36,13 +36,14 @@ pub(super) async fn quote_given(
     let said = (speaker == by).then(|| at(now));
     let quotation = Quotation { text: words, said, source: None };
     let created = Created { created: at(now), by: principal_ref(by) };
-    quote(trx, intention, &quotation, &created, Some(speaker), by, json!({"actor_id": by.to_base64()})).await
+    quote(trx, intention, &quotation, &created, Some(speaker), by, None).await
 }
 
 /// Places `quotation` in `trx`'s project, recorded as `created` says, with an `Attribution` naming
 /// `speaker` when the words are not those of whoever recorded them (`None` for a speaker no one
 /// knows), and joins it to the intention `intention` by an accepted `relates_to` relation that
-/// `by` makes, `via` saying what caused it. The quotation's id.
+/// `by` makes. A part of `fwd admin migrate` that makes it names itself in `migration`, which marks
+/// the quotation (`Migrated`) and says in the relation's `via` what caused it. The quotation's id.
 pub(super) async fn quote(
     trx: &ProjectTransaction,
     intention: EntityId,
@@ -50,13 +51,18 @@ pub(super) async fn quote(
     created: &Created,
     speaker: Option<EntityId>,
     by: EntityId,
-    via: Value,
+    migration: Option<&str>,
 ) -> Result<EntityId> {
     let made = trx.create_placed(quotation).await?;
     let record = Mutable::entity(&*made);
     trx.add(record, created).await?;
     if speaker != Some(*created.by) {
         trx.add(record, &Attribution { speaker: speaker.map(principal_ref) }).await?;
+    }
+    let mut via = json!({"actor_id": by.to_base64()});
+    if let Some(migration) = migration {
+        trx.add(record, &Migrated { migration: migration.into() }).await?;
+        via["migrated"] = json!(migration);
     }
     let quoted = record.id();
     let ends = (quoted, intention);

@@ -73,9 +73,10 @@ async fn an_intentions_words_are_quoted_as_its_speakers_and_an_agent_is_never_na
     let (_, (made, created)) = &theirs;
     assert_eq!(made.title()?, "Readers keep their place", "the views of the record made");
     assert_eq!((*created.by()?, speaker(&w, &theirs).await?), (w.tide, Some(w.ines)), "written down for Ines");
-    let [(text, (_, (quotation, recorded)))] = &quoted(&w, &theirs).await?[..] else { panic!("one quotation") };
+    let [(text, (quoted_at, (quotation, recorded)))] = &quoted(&w, &theirs).await?[..] else { panic!("one quotation") };
     assert_eq!((text.as_str(), *recorded.by()?), ("Readers keep their place, in the speaker's words", w.tide));
     assert_eq!(quotation.said()?, None, "when Ines said them is not known");
+    assert!(w.alpha.component_of::<MigratedView>(quoted_at).await?.is_none(), "no migration made it");
 
     let own = intention(&w, w.tide, "Builds stay under a minute", None).await?;
     assert_eq!(speaker(&w, &own).await?, Some(w.tide), "in its writer's words");

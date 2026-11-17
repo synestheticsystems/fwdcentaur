@@ -312,7 +312,19 @@ pub struct Task {
 #[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
 #[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::Display,
+    strum::EnumString,
+    strum::EnumIter,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum RelationKind {
@@ -933,6 +945,21 @@ pub struct Decision {
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
 pub struct Placement {
     pub project: Ref<Project>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Migrated
+
+/// The part of `fwd admin migrate` that made the record, as a component on the record's own entity.
+/// What a move onto the Commons' models makes, such as a quotation of an intention's words, states
+/// what the move read in records people wrote, and the mark tells it from a record someone made. A
+/// migration is no record of its own, so it is named by text.
+#[derive(Model, Debug, Clone, Serialize, Deserialize)]
+#[model(no_ffi)]
+pub struct Migrated {
+    /// The move's name, such as `intention_words`.
+    #[active_type(LWW)]
+    pub migration: String,
 }
 
 // ---------------------------------------------------------------------------------------------

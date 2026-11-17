@@ -242,6 +242,8 @@ async fn each_intention_moves_whole(side: Side) -> Result<()> {
     assert_eq!(quotation.text()?, "Readers keep their place, in the speaker's words");
     assert_eq!((*recorded.by()?, recorded.created()?.unix_millis(), quotation.said()?), (tide, WRITTEN, None));
     assert!(quoted.entity().has_membership(&ModelId::EntityId(minted(Attribution::descriptor()))));
+    let mark = alpha.component_of::<MigratedView>(quoted).await?.expect("marked as the conversion's");
+    assert_eq!(mark.migration()?, "intention_words");
     let speaker = intentions::whose_words(&alpha, for_ines).await?.and_then(|(speaker, _)| speaker);
     assert_eq!(speaker, Some(ines), "her words, as the node's own attribution said");
 
