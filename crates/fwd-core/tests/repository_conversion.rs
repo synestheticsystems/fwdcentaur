@@ -140,9 +140,11 @@ async fn each_repository_moves_whole_and_a_checkout_of_its_upstream_still_finds_
 }
 
 /// Until the move, a project holding a repository of fwd's own model registers none, of its upstream
-/// or of another, and makes no record: no read finds the old one, and a record made then would stay
-/// a second one for its upstream. A project beside it holding none registers as before. After the
-/// move, a checkout of the upstream gets the original, the project's one repository for it.
+/// or of another, and makes no record of either shape: no read finds the old one, and a record made
+/// then would stay a second one for its upstream. A project beside it holding none registers as
+/// before. After the move, a checkout of the upstream gets the original, the project's one
+/// repository for it, and a checkout of a new upstream registers one, since a repository moved is
+/// none still to move.
 #[tokio::test]
 async fn a_project_registers_no_repository_until_its_repositories_have_moved() -> Result<()> {
     let (store, before) = Store::new().await?;
@@ -163,6 +165,8 @@ async fn a_project_registers_no_repository_until_its_repositories_have_moved() -
         assert!(refused.contains("fwd admin migrate --project \"alpha\""), "{refused}");
     }
     assert!(repositories(&alpha).await?.is_empty(), "no record made");
+    let old: Vec<before_d261::RepoView> = alpha.all().await?;
+    assert_eq!(old.iter().map(|r| r.id()).collect::<Vec<_>>(), vec![original], "of either shape");
     let theirs = ops::ensure_repo(&beta, &other).await?;
     assert_eq!(repositories(&beta).await?.iter().map(|r| r.0).collect::<Vec<_>>(), vec![theirs]);
 
@@ -174,6 +178,9 @@ async fn a_project_registers_no_repository_until_its_repositories_have_moved() -
         answering += usize::from(ops::repo_upstreams(&r)?.contains(&key));
     }
     assert_eq!(answering, 1, "one repository for the upstream");
+    let new = ops::ensure_repo(&alpha, &other).await?;
+    assert_ne!(new, original);
+    assert_eq!(repositories(&alpha).await?.len(), 2, "the original and the new upstream's");
     Ok(())
 }
 
