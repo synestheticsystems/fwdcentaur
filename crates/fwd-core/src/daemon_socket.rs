@@ -20,7 +20,12 @@
 /// for itself can share its label with one of the mint's. A client of an earlier build binds the
 /// Commons' models by their labels, so there it reaches the mint's definition, reads by it what an
 /// older record holds in the node's own, and registers its own declaration over the mint's.
-pub const GENERATION: u32 = 2;
+///
+/// Generation 3: a repository is the Commons' `git.Repository`, placed in its project (D261). A
+/// client of an earlier build reads repositories by fwd's own model, which a moved repository keeps
+/// beside the new one but this build no longer writes, so it misses every repository registered
+/// since and registers each again in the old shape, which this build does not read.
+pub const GENERATION: u32 = 3;
 
 /// The base path a client hands Ankurah's WebSocket connector for `project`'s socket into the
 /// daemon's one store; the connector appends `/ws` to it.
