@@ -185,8 +185,11 @@ async fn records(graph: &ProjectGraph) -> Result<BTreeMap<EntityId, Value>> {
     for p in graph.all::<PrincipalView>().await? {
         all.insert(p.id(), ops::json_of_principal(&p)?);
     }
-    for r in graph.all::<RepoView>().await? {
-        all.insert(r.id(), serde_json::json!({"name": r.name()?, "remote_urls": Value::from(r.remote_urls()?)}));
+    for (placement, r) in graph.all_placed::<ankurah_commons::git::RepositoryView>().await? {
+        all.insert(
+            placement.id(),
+            serde_json::json!({"name": r.name()?, "remote_urls": Value::from(r.remote_urls()?)}),
+        );
     }
     for t in graph.all::<TaskView>().await? {
         all.insert(t.id(), ops::json_of_task(&t, None)?);

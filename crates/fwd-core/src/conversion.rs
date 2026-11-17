@@ -5,6 +5,8 @@
 //! halfway leaves each record whole. A record that carries the kind's Commons component has moved
 //! already and is not checked again, so a second run changes nothing.
 
+pub mod repos;
+
 use ankurah::EntityId;
 use anyhow::{bail, Result};
 

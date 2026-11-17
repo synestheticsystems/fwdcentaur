@@ -2,6 +2,7 @@
 //! the proof-of-concept subset.
 
 use ankurah::EntityId;
+use ankurah_commons::git::RepositoryView;
 use anyhow::{anyhow, bail, Context as _, Result};
 use clap::parser::ValueSource;
 use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -494,8 +495,9 @@ enum AdminCommand {
     /// Carry the project's graph over to this build: from assignment as a relation to the assignee
     /// field (2026-09-28); from the supervisor role to the fixed roles, with who belongs to the
     /// project recorded, and to scopes without an owner or a heartbeat (2026-09-29); to tasks
-    /// placed in a scope by their `worked_in` alone (2026-10-03); and to intentions on the Commons'
-    /// kept mint (2026-11-16). Prints what it changed; a second run changes nothing.
+    /// placed in a scope by their `worked_in` alone (2026-10-03); to intentions on the Commons' kept
+    /// mint (2026-11-16); and to repositories on the Commons' `git.Repository` (2026-11-17). Prints
+    /// what it changed; a second run changes nothing.
     ///
     /// Each task with an accepted `assigned_to` to a scope and no assignee gets whoever made that
     /// scope (its owner, until scopes lost their owner), and every `assigned_to` from a task to a
@@ -512,9 +514,11 @@ enum AdminCommand {
     /// and the triage agent belong, and an agent does when it did work here; an agent that only
     /// wrote messages here is listed as having acted here without belonging, for a person to
     /// retire. Then each scope's owner and heartbeat are cleared, and nothing else about it
-    /// changes. Last, each intention gets the Commons' new components beside its old ones, keeping
+    /// changes. Then each intention gets the Commons' new components beside its old ones, keeping
     /// its id, and a quotation of its words naming their speaker; one that would lose part of what
-    /// it holds stops this part before it writes anything, naming each.
+    /// it holds stops this part before it writes anything, naming each. Last, each repository gets
+    /// the Commons' `git.Repository` and a `Placement` beside fwd's old model, keeping its id; one
+    /// placed already stops this part before it writes anything, naming each.
     Migrate,
     /// Bind the lead from before automatic attachment, which worked by `--as` and is bound to no
     /// thread, to the Codex thread that now does its job, so that the thread's calls to the daemon's
@@ -3467,7 +3471,7 @@ async fn resolve_here(
 ) -> Result<Resolution> {
     let view: CodeAnchorView = graph.get(anchor).await?;
     let spec = ops::spec_of(&view)?;
-    let repo: RepoView = graph.get(EntityId::from(view.repo()?)).await?;
+    let (_, repo): (PlacementView, RepositoryView) = graph.get_placed(view.repo()?).await?;
     let upstreams = ops::repo_upstreams(&repo)?;
     let basis = spec.basis_blob.as_deref().or(spec.legacy_blob.as_deref());
     match checkout_for(app, &upstreams, basis, against).await? {
@@ -4771,6 +4775,14 @@ fn migration_text(v: &Value) -> String {
         "intentions moved onto the Commons' kept mint, each keeping its id: {}",
         if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
     ));
+    let moved: Vec<String> = list("repositories_moved")
+        .iter()
+        .map(|r| format!("{} {}", short_id(r["id"].as_str().unwrap_or("")), r["name"].as_str().unwrap_or("")))
+        .collect();
+    lines.push(format!(
+        "repositories moved onto the Commons' git.Repository, each keeping its id: {}",
+        if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
+    ));
     lines.join("\n")
 }
 
@@ -5546,6 +5558,11 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     })
                 })
                 .collect();
+            let repositories: Vec<Value> = fwd_core::conversion::repos::convert(graph)
+                .await?
+                .into_iter()
+                .map(|c| json!({"id": c.repository.to_base64(), "name": c.name}))
+                .collect();
             let mut v = json!({
                 "assigned": assigned,
                 "renamed": ids(&done.renamed),
@@ -5555,6 +5572,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 "scopes_cleared": cleared,
                 "placed_in_recorded_scope": placed,
                 "intentions_moved": intentions,
+                "repositories_moved": repositories,
             });
             for (key, list) in principals {
                 v[key] = list;
@@ -6629,7 +6647,8 @@ mod tests {
     /// `fwd admin migrate --format text` says which principal holds triage now, and lists those
     /// whose old role it cleared and who acted in the project without belonging, for a person to
     /// retire, then the scopes whose owner and heartbeat it cleared, then the tasks it placed in the
-    /// scope only their record named, then the intentions it moved onto the Commons' new models.
+    /// scope only their record named, then the intentions and the repositories it moved onto the
+    /// Commons' new models.
     #[test]
     fn the_migration_says_who_holds_triage_and_who_to_retire() {
         let who = |handle: &str| json!({"id": "x", "handle": handle});
@@ -6649,6 +6668,7 @@ mod tests {
             "intentions_moved": [
                 {"id": "q9TrWl2xabc", "title": "Readers keep their place", "added": ["cognition.intention"], "quotation": "Zk3vQe7Labc"},
             ],
+            "repositories_moved": [{"id": "Rp4mWq8Kabc", "name": "simulator"}],
         });
         assert_eq!(
             migration_text(&v).lines().collect::<Vec<_>>(),
@@ -6663,6 +6683,7 @@ mod tests {
                 "scopes whose owner and heartbeat were cleared, a scope having neither since 2026-09-29: Initial implementation (x_M0XLwr)",
                 "tasks made in a scope that only their record named, now worked in it: LM-OrKvY Guard the manifest in UI enhancements; hGcyWpR0 Keep the badges in gone1234",
                 "intentions moved onto the Commons' kept mint, each keeping its id: q9TrWl2x Readers keep their place, its words quoted as Zk3vQe7L",
+                "repositories moved onto the Commons' git.Repository, each keeping its id: Rp4mWq8K simulator",
             ]
         );
     }

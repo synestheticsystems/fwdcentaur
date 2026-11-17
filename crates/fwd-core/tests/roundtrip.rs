@@ -3,11 +3,14 @@
 //! typed reverse queries and a JSON-path query. Every record names its project, and a former id
 //! names the record it was renumbered to.
 
+use ankurah::model::Mutable;
+use ankurah::Model;
 use ankurah::{
     policy::DEFAULT_CONTEXT,
     property::{Json, Ref},
     EntityId, Node, PermissiveAgent,
 };
+use ankurah_commons::git::{Repository, RepositoryView};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::durable;
@@ -56,15 +59,18 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
         .await?
         .id();
 
+    // A repository is the Commons' model, which names no project, placed in one by `Placement`.
     let repo = trx
-        .create(&Repo {
-            project: Ref::new(project),
+        .create(&Repository {
             name: "fwdcentaur".into(),
             remote_urls: Json::new(serde_json::json!(["git@github.com:synestheticsystems/fwdcentaur.git"])),
             default_branch: "main".into(),
         })
-        .await?
-        .id();
+        .await?;
+    let placement = ctx.resolve_model_id::<Placement>().await?;
+    let record = Mutable::entity(&*repo);
+    Placement { project: Ref::new(project) }.initialize_new_entity(record, placement, record.system_epoch())?;
+    let repo = repo.id();
 
     let scope = trx
         .create(&Scope {
@@ -126,7 +132,7 @@ async fn populate(node: &Node<SqliteStorageEngine, PermissiveAgent>) -> Result<I
     let anchor = trx
         .create(&CodeAnchor {
             project: Ref::new(project),
-            repo: Ref::new(repo),
+            repo,
             path: "src/net/ws.rs".into(),
             anchor_key: Some("fwd-anchor:1:00".into()),
             span_key: Some("fwd-span:1:00".into()),
@@ -295,7 +301,7 @@ async fn models_round_trip_through_sqlite() -> Result<()> {
     assert!(tasks.iter().all(|t| t.project().map(EntityId::from).ok() == Some(ids.project)));
     for named in [
         ctx.fetch::<PrincipalView>(in_project("handle = 'dnorman'")?).await?.len(),
-        ctx.fetch::<RepoView>(in_project("default_branch = 'main'")?).await?.len(),
+        ctx.fetch::<(PlacementView, RepositoryView)>(in_project("default_branch = 'main'")?).await?.len(),
         ctx.fetch::<ScopeView>(in_project("created > 0")?).await?.len(),
         ctx.fetch::<RelationView>(in_project("created > 0")?).await?.len(),
         ctx.fetch::<CodeAnchorView>(in_project("created > 0")?).await?.len(),

@@ -419,8 +419,7 @@ async fn a_scope_of_another_project_is_named_by_its_id_and_a_title_names_this_pr
 async fn whole_file(graph: &ProjectGraph, by: EntityId) -> Result<EntityId> {
     let trx = graph.begin();
     let repo = trx
-        .create(&Repo {
-            project: graph.project(),
+        .create_placed(&ankurah_commons::git::Repository {
             name: "fwdcentaur".into(),
             remote_urls: ankurah::property::Json::new(json!(["git@github.com:synestheticsystems/fwdcentaur.git"])),
             default_branch: "main".into(),
@@ -430,7 +429,7 @@ async fn whole_file(graph: &ProjectGraph, by: EntityId) -> Result<EntityId> {
     let anchor = trx
         .create(&CodeAnchor {
             project: graph.project(),
-            repo: ankurah::property::Ref::new(repo),
+            repo,
             path: "src/net/ws.rs".into(),
             anchor_key: Some("fwd-anchor:1:00".into()),
             span_key: None,

@@ -1,12 +1,12 @@
 //! Repositories are identified by their upstream remote, never by a worktree or a directory
-//! (Daniel, 2026-09-25): clones and worktrees of one upstream share one `Repo` entity.
+//! (Daniel, 2026-09-25): clones and worktrees of one upstream share one repository record.
 
 use ankurah::policy::DEFAULT_CONTEXT;
+use ankurah_commons::git::RepositoryView;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::anchoring::git;
 use fwd_core::durable;
-use fwd_core::model::RepoView;
 use fwd_core::ops::{self, repo_key};
 use fwd_core::project_graph::ProjectGraph;
 use std::path::Path;
@@ -48,9 +48,9 @@ async fn clones_and_worktrees_of_one_upstream_share_one_repo() -> Result<()> {
     let from_clone = ops::ensure_repo(&graph, &clone).await?;
     assert_eq!(from_main, from_worktree, "a worktree is the same repository");
     assert_eq!(from_main, from_clone, "another clone spelling the same upstream differently is the same repository");
-    let repos: Vec<RepoView> = graph.fetch("default_branch != ''").await?;
+    let repos = graph.all_placed::<RepositoryView>().await?;
     assert_eq!(repos.len(), 1);
-    assert_eq!(repos[0].name()?, "simulator", "named after the directory that registered it");
+    assert_eq!(repos[0].1.name()?, "simulator", "named after the directory that registered it");
 
     // No remote, no identity: refused, never keyed by a directory name.
     let local = dir.path().join("local-only");

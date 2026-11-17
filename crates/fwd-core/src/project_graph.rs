@@ -117,7 +117,7 @@ macro_rules! in_project {
 
 in_project!(
     Principal => PrincipalView,
-    Repo => RepoView,
+    crate::conversion::repos::before_d261::Repo => crate::conversion::repos::before_d261::RepoView,
     Task => TaskView,
     Relation => RelationView,
     CodeAnchor => CodeAnchorView,

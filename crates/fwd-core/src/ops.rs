@@ -16,6 +16,9 @@ use crate::subject;
 use ankurah::property::{Json, Ref};
 use ankurah::EntityId;
 use ankurah_commons::cognition::IntentionView;
+#[cfg(feature = "native")]
+use ankurah_commons::git::Repository;
+use ankurah_commons::git::RepositoryView;
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde_json::{json, Value};
 
@@ -5196,11 +5199,11 @@ pub fn may_start_an_id(s: &str) -> bool {
 // ---------------------------------------------------------------------------------------------
 // Repos and anchors
 
-/// The Repo entity for a repository root: keyed by the upstream remote (`origin`), so every clone
-/// and every worktree of one repository share one entity (Daniel, 2026-09-25: repositories are
-/// identified by their upstream, never by a worktree or a directory). A repository with no
-/// remote has no identity yet and is refused. Created on first use; the name is the directory
-/// that first registered it.
+/// The repository record for a repository root, the Commons' `git.Repository` placed in the
+/// project: keyed by the upstream remote (`origin`), so every clone and every worktree of one
+/// repository share one record (Daniel, 2026-09-25: repositories are identified by their upstream,
+/// never by a worktree or a directory). A repository with no remote has no identity yet and is
+/// refused. Created on first use; the name is the directory that first registered it.
 #[cfg(feature = "native")]
 pub async fn ensure_repo(graph: &ProjectGraph, root: &std::path::Path) -> Result<EntityId> {
     let name = root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or("repo".into());
@@ -5217,11 +5220,9 @@ pub async fn ensure_repo(graph: &ProjectGraph, root: &std::path::Path) -> Result
     let key = repo_key(&remote);
     // Every repository of the project: a handful of entities, matched in Rust because the
     // remote URLs live in a Json list.
-    let repos: Vec<RepoView> = graph.fetch("default_branch != ''").await?;
-    for r in &repos {
-        let urls: Value = r.remote_urls()?.into();
-        if urls.as_array().into_iter().flatten().filter_map(Value::as_str).any(|u| repo_key(u) == key) {
-            return Ok(r.id());
+    for (placement, r) in graph.all_placed::<RepositoryView>().await? {
+        if repo_upstreams(&r)?.contains(&key) {
+            return Ok(placement.id());
         }
     }
     let default_branch = crate::anchoring::git(root, &["symbolic-ref", "--short", "HEAD"])
@@ -5229,16 +5230,14 @@ pub async fn ensure_repo(graph: &ProjectGraph, root: &std::path::Path) -> Result
         .map(|s| s.trim().to_string())
         .unwrap_or("main".into());
     let trx = graph.begin();
-    let id = trx
-        .create(&Repo { project: graph.project(), name, remote_urls: Json::new(json!([remote])), default_branch })
-        .await?
-        .id();
+    let id =
+        trx.create_placed(&Repository { name, remote_urls: Json::new(json!([remote])), default_branch }).await?.id();
     trx.commit().await?;
     Ok(id)
 }
 
-/// The upstream keys a Repo entity answers to (its remote URLs, normalized).
-pub fn repo_upstreams(repo: &RepoView) -> Result<Vec<String>> {
+/// The upstream keys a repository answers to (its remote URLs, normalized).
+pub fn repo_upstreams(repo: &RepositoryView) -> Result<Vec<String>> {
     let urls: Value = repo.remote_urls()?.into();
     Ok(urls.as_array().into_iter().flatten().filter_map(Value::as_str).map(repo_key).collect())
 }
@@ -5299,7 +5298,7 @@ pub async fn highlight(
     let (start_line, end_line) = spec.lines.unwrap_or((0, 0));
     Ok(Highlight::New(Box::new(CodeAnchor {
         project: graph.project(),
-        repo: Ref::new(repo),
+        repo,
         path: spec.path.clone(),
         anchor_key: Some(key),
         span_key: spec.lines.map(|_| crate::anchoring::span_key(&spec.anchored_text)),
@@ -5557,7 +5556,7 @@ async fn backfill_anchor(
     let Some(fill) = crate::anchoring::backfill(repo_root, spec, against, located, resolution)? else {
         return Ok(());
     };
-    let repo = EntityId::from(view.repo()?);
+    let repo = view.repo()?;
     let key = crate::anchoring::anchor_key(&repo.to_base64(), &spec.path, &fill.basis_blob, spec.lines);
     let trx = graph.begin();
     let edit = trx.edit(view)?;
@@ -5603,7 +5602,7 @@ pub fn json_of_anchor(a: &CodeAnchorView) -> Result<Value> {
         .collect();
     Ok(json!({
         "id": a.id().to_base64(),
-        "repo": EntityId::from(a.repo()?).to_base64(),
+        "repo": a.repo()?.to_base64(),
         "path": a.path()?,
         "whole_file": a.whole_file()?.unwrap_or(false),
         "start_line": a.start_line()?,

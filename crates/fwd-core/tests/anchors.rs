@@ -142,7 +142,7 @@ async fn first_cut(graph: &ProjectGraph, me: EntityId, repo: EntityId, old: Firs
     let id = trx
         .create(&CodeAnchor {
             project: graph.project(),
-            repo: Ref::new(repo),
+            repo,
             path: "ws.rs".into(),
             anchor_key: None,
             span_key: None,

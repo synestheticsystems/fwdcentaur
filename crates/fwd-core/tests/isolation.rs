@@ -101,8 +101,7 @@ async fn populate(graph: &ProjectGraph) -> Result<Held> {
 async fn anchor_in(graph: &ProjectGraph, by: EntityId) -> Result<EntityId> {
     let trx = graph.begin();
     let repo = trx
-        .create(&Repo {
-            project: graph.project(),
+        .create_placed(&ankurah_commons::git::Repository {
             name: "fwdcentaur".into(),
             remote_urls: Json::new(json!(["git@github.com:synestheticsystems/fwdcentaur.git"])),
             default_branch: "main".into(),
@@ -112,7 +111,7 @@ async fn anchor_in(graph: &ProjectGraph, by: EntityId) -> Result<EntityId> {
     let anchor = trx
         .create(&CodeAnchor {
             project: graph.project(),
-            repo: Ref::new(repo),
+            repo,
             path: "src/net/ws.rs".into(),
             anchor_key: Some("fwd-anchor:1:00".into()),
             span_key: None,
@@ -148,7 +147,8 @@ async fn every_id(graph: &ProjectGraph) -> Result<BTreeSet<EntityId>> {
     }
     let mut all = BTreeSet::new();
     all.extend(ids(graph.all::<PrincipalView>().await?));
-    all.extend(ids(graph.all::<RepoView>().await?));
+    let repositories = graph.all_placed::<ankurah_commons::git::RepositoryView>().await?;
+    all.extend(repositories.iter().map(|(placement, _)| placement.id()));
     all.extend(ids(graph.all::<TaskView>().await?));
     all.extend(ids(graph.all::<RelationView>().await?));
     all.extend(ids(graph.all::<CodeAnchorView>().await?));
