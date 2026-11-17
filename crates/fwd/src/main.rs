@@ -496,25 +496,32 @@ enum AdminCommand {
     /// field (2026-09-28); from the supervisor role to the fixed roles, with who belongs to the
     /// project recorded, and to scopes without an owner or a heartbeat (2026-09-29); to tasks
     /// placed in a scope by their `worked_in` alone (2026-10-03); to intentions on the Commons' kept
-    /// mint (2026-11-16); and to repositories on the Commons' `git.Repository` (2026-11-17). Prints
-    /// what it changed; a second run changes nothing.
+    /// mint (2026-11-16); and to repositories and principals on the Commons' `git.Repository` and
+    /// `identity.Principal` (2026-11-17). Prints what it changed; a second run changes nothing.
     ///
-    /// Each task with an accepted `assigned_to` to a scope and no assignee gets whoever made that
+    /// The principals' parts run first, before the command finds whom it acts as, since every
+    /// command finds its caller among the principals moved onto the Commons. Of the principals
+    /// that held the role word `supervisor`, the one that wrote most recently holds triage, under
+    /// its own handle, serving no scope until its lead binds it to one or endorses it for the whole
+    /// project (`fwd principal scope`); the others hold no role and are named for a person to retire
+    /// (where an agent holds triage already, none is given it). `implementer` stays as it is, and no
+    /// other role is given: an agent without one selects its own. Every question to the role is
+    /// asked of the project instead. Then each principal is recorded as belonging or not: people
+    /// and the triage agent belong, and an agent does when it did work here; an agent that only
+    /// wrote messages here is listed as having acted here without belonging, for a person to
+    /// retire. Then each principal gets the Commons' `identity.Principal` and fwd's `Role` beside
+    /// its old model, keeping its id, each subject that acts as it an `IdentityBinding`, and, when
+    /// retired, `Closed`; one whose fields cannot all be read stops the command before this part
+    /// writes anything, naming each, and the parts after it run once that is resolved.
+    ///
+    /// Then each task with an accepted `assigned_to` to a scope and no assignee gets whoever made that
     /// scope (its owner, until scopes lost their owner), and every `assigned_to` from a task to a
     /// scope is renamed `worked_in`, all kept, a task being worked in any number of scopes; an
     /// intention's `assigned_to` is left as it is. Each task whose record names the scope it
     /// was made in (`scope_id`, written until 2026-10-03) and which has no `worked_in` at all comes
-    /// to be worked in that scope; one whose `worked_in` was taken off stays in none. Of
-    /// the principals that held the role word `supervisor`, the one that wrote most recently holds
-    /// triage, under its own handle, serving no scope until its lead binds it to one or endorses it
-    /// for the whole project (`fwd principal scope`); the others hold no role and are named for a
-    /// person to retire (where an agent holds triage already, none is given it). `implementer` stays as it is, and
-    /// no other role is given: an agent without one selects its own. Every question to the role is
-    /// asked of the project instead. Then each principal is recorded as belonging or not: people
-    /// and the triage agent belong, and an agent does when it did work here; an agent that only
-    /// wrote messages here is listed as having acted here without belonging, for a person to
-    /// retire. Then each scope's owner and heartbeat are cleared, and nothing else about it
-    /// changes. Then each intention gets the Commons' new components beside its old ones, keeping
+    /// to be worked in that scope; one whose `worked_in` was taken off stays in none. Then each
+    /// scope's owner and heartbeat are cleared, and nothing else about it changes. Then each
+    /// intention gets the Commons' new components beside its old ones, keeping
     /// its id, and a quotation of its words naming their speaker. Last, each repository gets the
     /// Commons' `git.Repository` and a `Placement` beside fwd's old model, keeping its id. An
     /// intention that would lose part of what it holds, or a repository placed already, stops the
@@ -1696,6 +1703,66 @@ struct App {
     /// For `task move`, the move as placing the command read it, holding the node's move lock
     /// until the command ends, which `task move` then makes ([`runs_in::RunsIn::moving`]).
     moving: Option<task_move::Move>,
+    /// For `fwd admin migrate`, what its parts that run before it finds its caller did.
+    moved_first: Option<MovedFirst>,
+}
+
+/// What `fwd admin migrate` does before it finds whom it acts as: it carries the principals over
+/// from the supervisor role to the fixed roles (`ops::migrate_roles`), then moves them onto the
+/// Commons (`fwd_core::conversion::principals`), which copies what the first recorded. Every
+/// command finds its caller among the principals moved and their bindings, and in a project not
+/// yet moved it would find none. It holds what it did as the command prints it: `triage`,
+/// `roles_cleared`, `readdressed`, `members`, `visitors`, `readers` and `principals_moved`.
+struct MovedFirst(serde_json::Map<String, Value>);
+
+impl MovedFirst {
+    async fn run(graph: &ProjectGraph) -> Result<MovedFirst> {
+        let roles = ops::migrate_roles(graph).await?;
+        let moved = fwd_core::conversion::principals::convert(graph).await?;
+        let ids = |list: &[EntityId]| list.iter().map(|id| json!(id.to_base64())).collect::<Vec<_>>();
+        // A principal by its id, with its handle to read it by.
+        let named = |id: EntityId| async move {
+            anyhow::Ok(json!({"id": id.to_base64(), "handle": ops::handle_of(graph, id).await?}))
+        };
+        let mut done = serde_json::Map::new();
+        for (key, list) in
+            [("roles_cleared", &roles.roles_cleared), ("members", &roles.members), ("readers", &roles.readers)]
+        {
+            let mut out = Vec::new();
+            for id in list {
+                out.push(named(*id).await?);
+            }
+            done.insert(key.to_string(), Value::Array(out));
+        }
+        let mut visitors = Vec::new();
+        for (id, written) in &roles.visitors {
+            let mut v = named(*id).await?;
+            v["messages"] = json!(written);
+            visitors.push(v);
+        }
+        done.insert("visitors".into(), Value::Array(visitors));
+        let triage = match roles.triage {
+            Some(id) => named(id).await?,
+            None => Value::Null,
+        };
+        done.insert("triage".into(), triage);
+        done.insert("readdressed".into(), json!(ids(&roles.readdressed)));
+        let moved = moved.iter().map(|c| {
+            json!({"id": c.principal.to_base64(), "handle": c.handle, "retired": c.retired, "bindings": ids(&c.bindings)})
+        });
+        done.insert("principals_moved".into(), Value::Array(moved.collect()));
+        Ok(MovedFirst(done))
+    }
+
+    /// What it did, for people, when it did anything: the lines `fwd admin migrate --format text`
+    /// prints for it, which a command refused after it says on standard error, since what it did
+    /// is written.
+    fn said(&self) -> Option<String> {
+        let v = Value::Object(self.0.clone());
+        let did = self.0.iter().any(|(_, list)| list.as_array().is_some_and(|l| !l.is_empty()))
+            || !self.0["triage"].is_null();
+        did.then(|| [roles_text(&v), vec![principals_text(&v)]].concat().join("\n"))
+    }
 }
 
 impl App {
@@ -1968,10 +2035,11 @@ fn render_object(map: &serde_json::Map<String, Value>, indent: usize) -> String 
 /// answers first for the scope the command works in.
 async fn roles_changed(app: &App, principal: EntityId, before: Option<ops::Serving>) -> Result<()> {
     let graph = app.graph();
-    let p: PrincipalView = graph.get(principal).await?;
-    let handle = p.handle()?;
-    let after = ops::triage_standing(&p).unwrap_or_default();
-    let unread = if p.active()? { String::new() } else { format!(", those @{handle} left unread among them") };
+    let (role, identity) = graph.principal(principal).await?;
+    let handle = identity.handle()?;
+    let after = ops::triage_standing(&role).unwrap_or_default();
+    let unread =
+        if !ops::retired(&role)? { String::new() } else { format!(", those @{handle} left unread among them") };
     if let Some(before) = before {
         let principals = ops::principals(graph).await?;
         for &scope in before.scopes.iter().filter(|s| !after.serves_scope(**s)) {
@@ -1992,7 +2060,7 @@ async fn roles_changed(app: &App, principal: EntityId, before: Option<ops::Servi
             ));
         }
     }
-    if principal != app.me && ops::serves_nothing_yet(&p) {
+    if principal != app.me && ops::serves_nothing_yet(&role) {
         app.note(format!("fwd: {}", fwd_core::guidance::unbound(&handle)));
     }
     if let Some(guidance) = lead_guidance(graph, principal, app.scope).await? {
@@ -2004,16 +2072,16 @@ async fn roles_changed(app: &App, principal: EntityId, before: Option<ops::Servi
 /// What the principal `name` names serves as a triage agent now (`ops::triage_standing`), for
 /// [`roles_changed`] to compare once a command has changed it; none for a name no principal has.
 async fn standing_of(graph: &ProjectGraph, name: &str) -> Option<ops::Serving> {
-    let p = naming::principal_named(graph, naming::bare(name), None).await.ok().flatten()?;
-    ops::triage_standing(&p)
+    let (role, _) = naming::principal_named(graph, naming::bare(name), None).await.ok().flatten()?;
+    ops::triage_standing(&role)
 }
 
 /// A principal as every command prints it (`ops::json_of_principal`), with each scope a triage
 /// agent serves named, `serves.scopes` holding `{"id", "title"}` for each, so that a reader of `fwd
 /// principal list` or `fwd whoami` sees what each triage agent answers first for without looking
 /// the scopes up.
-async fn principal_json(graph: &ProjectGraph, p: &PrincipalView) -> Result<Value> {
-    let mut v = ops::json_of_principal(p)?;
+async fn principal_json(graph: &ProjectGraph, p: &(RoleView, PrincipalView), session: Option<&str>) -> Result<Value> {
+    let mut v = ops::json_of_principal(p, session)?;
     if let Some(scopes) = v["serves"]["scopes"].as_array().cloned() {
         let mut named = Vec::with_capacity(scopes.len());
         for id in scopes.iter().filter_map(Value::as_str) {
@@ -2028,10 +2096,16 @@ async fn principal_json(graph: &ProjectGraph, p: &PrincipalView) -> Result<Value
     Ok(v)
 }
 
+/// The principal `id` as every command prints it ([`principal_json`]), with the session bound to it.
+async fn principal_json_of(graph: &ProjectGraph, id: EntityId) -> Result<Value> {
+    let session = subject::session_bound_to(graph, id).await?;
+    principal_json(graph, &graph.principal(id).await?, session.as_deref()).await
+}
+
 /// Prints the principal `id` as `fwd principal add`, `role` and `retire` do: its JSON, or for people its
 /// line in `fwd principal list --format text` ([`principal_line`]).
 async fn print_principal(app: &App, id: EntityId) -> Result<()> {
-    let v = principal_json(app.graph(), &app.graph().get::<PrincipalView>(id).await?).await?;
+    let v = principal_json_of(app.graph(), id).await?;
     match app.format {
         Format::Text => {
             println!("{}", principal_line(&v));
@@ -2047,10 +2121,10 @@ async fn print_principal(app: &App, id: EntityId) -> Result<()> {
 /// to it) beside it, or with `--format text` its line and a sentence saying so.
 async fn print_succession(app: &App, done: &ops::Succession, made: bool) -> Result<()> {
     let graph = app.graph();
-    let successor = principal_json(graph, &graph.get::<PrincipalView>(done.successor).await?).await?;
+    let successor = principal_json_of(graph, done.successor).await?;
     let line = principal_line(&successor);
     let mut v = if made { made_json(successor) } else { successor };
-    v["succeeded"] = principal_json(graph, &graph.get::<PrincipalView>(done.old).await?).await?;
+    v["succeeded"] = principal_json_of(graph, done.old).await?;
     v["moved"] = json!(done.moved);
     match app.format {
         Format::Text => {
@@ -2067,8 +2141,8 @@ async fn print_succession(app: &App, done: &ops::Succession, made: bool) -> Resu
 
 /// Where a principal comes in `fwd principal list`: people, then the leads, the triage agents,
 /// implementers and reviewers, then agents with no role, as the page's pickers group them.
-fn listing_rank(p: &PrincipalView) -> u8 {
-    match (p.kind().ok(), ops::role_of(p)) {
+fn listing_rank((role, principal): &(RoleView, PrincipalView)) -> u8 {
+    match (principal.kind().ok(), ops::role_of(role)) {
         (Some(PrincipalKind::Human), _) => 0,
         (_, Some(AgentRole::Lead)) => 1,
         (_, Some(AgentRole::Triage)) => 2,
@@ -2796,67 +2870,86 @@ async fn run_cli() -> Result<()> {
             }
             Whose::This => (resolved, client),
         };
+        // Every command finds whom it acts as among the principals moved onto the Commons and
+        // their bindings, so `fwd admin migrate` moves them before it finds its own caller.
+        let moved_first = match &cli.command {
+            Command::Admin { command: AdminCommand::Migrate } => {
+                Some(client.while_writing(MovedFirst::run(&client.graph)).await?)
+            }
+            _ => None,
+        };
+        let said_first = moved_first.as_ref().and_then(MovedFirst::said);
         let calling = Calling { subject, typed_as, thread_hook, scope_typed };
-        let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
-        app.moving = placed.moving.take();
-        if let Whose::Other(there) = &placed.project {
-            app.place_in(&placed.because, &there.name);
-        }
-        // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
-        // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
-        // after it, as a question a retired triage agent never heard of reaches the next one (task
-        // Wbkkwpyq; docs/design/agents-and-inbox.md, rule 5 of the routing rules).
-        if hooked.is_some() {
-            let active = match app.acting {
-                Some(me) => app.graph().get::<PrincipalView>(me).await?.active()?,
-                None => false,
-            };
-            if !active {
-                return Ok(());
+        let rest = async {
+            let mut app = connect(&cli, paths, resolved, client, format, calling, placed.typed).await?;
+            app.moving = placed.moving.take();
+            app.moved_first = moved_first;
+            if let Whose::Other(there) = &placed.project {
+                app.place_in(&placed.because, &there.name);
             }
-        }
-        let words = command_words(&matches).0;
-        let writes = joining || WRITES_TOO.contains(&words.as_str());
-        let stamping = stamps(joining, &words);
-        refuse_by_identity(&app, &cli.command, writes).await?;
-        // The watch takes the connection for itself, to open it again when the daemon restarts; it
-        // writes nothing, so it makes no one belong.
-        if let Command::Watch { for_handle, timeout, count } = cli.command {
-            let who = principal_for(&app, for_handle.as_deref()).await?;
-            if let Some(guidance) = lead_guidance(app.graph(), who, app.scope).await? {
-                eprintln!("{guidance}");
+            // A hook that acts for no one prints nothing, and so does the hook of a retired principal, which
+            // marks nothing read either, so that what a retired agent left unread still reaches whoever comes
+            // after it, as a question a retired triage agent never heard of reaches the next one (task
+            // Wbkkwpyq; docs/design/agents-and-inbox.md, rule 5 of the routing rules).
+            if hooked.is_some() {
+                let active = match app.acting {
+                    Some(me) => !ops::retired(&app.graph().get::<RoleView>(me).await?)?,
+                    None => false,
+                };
+                if !active {
+                    return Ok(());
+                }
             }
-            say_unbound(&app).await?;
-            // The watch ends the process itself, after its last line or an error (`watch::run`).
-            match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
+            let words = command_words(&matches).0;
+            let writes = joining || WRITES_TOO.contains(&words.as_str());
+            let stamping = stamps(joining, &words);
+            refuse_by_identity(&app, &cli.command, writes).await?;
+            // The watch takes the connection for itself, to open it again when the daemon restarts; it
+            // writes nothing, so it makes no one belong.
+            if let Command::Watch { for_handle, timeout, count } = cli.command {
+                let who = principal_for(&app, for_handle.as_deref()).await?;
+                if let Some(guidance) = lead_guidance(app.graph(), who, app.scope).await? {
+                    eprintln!("{guidance}");
+                }
+                say_unbound(&app).await?;
+                // The watch ends the process itself, after its last line or an error (`watch::run`).
+                match watch::run(app, who, timeout.map(Duration::from_secs), count).await {}
+            }
+            if let (Format::Pane, Command::Reply { id, text }) = (app.format, &cli.command) {
+                return pressed(&app, id, text.clone(), joining, stamping).await;
+            }
+            let command = cli.command;
+            let body = run_as_caller(&app, command, joining, stamping);
+            // A command whose daemon goes away while it runs ends within a bound and says so, rather than
+            // with Ankurah's words for a read that found no daemon (`Client::while_connected`). One that
+            // writes also ends so whenever its socket closed while it ran, even when it succeeded, since
+            // a commit its node made meanwhile reached no daemon (`Client::while_writing`). `inbox pop`
+            // writes, marking what it prints as read, but runs as a read: a mark that reached no daemon
+            // only brings the same notifications back at the next pop, while Claude Code drops what a
+            // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
+            // would reach no one.
+            // A move run again finishes what it began, so its loss says to run it again.
+            let client = app.client.as_ref().expect("the CLI connected through its client");
+            let stamped = if words == "task move" {
+                client.while_finishing(body).await
+            } else if writes && words != "inbox pop" {
+                client.while_writing(body).await
+            } else {
+                client.while_connected(body).await
+            }?;
+            // A stamp the daemon never got ended the command above as a lost write does. One that failed
+            // with the socket open failed after the command's work was made, and a bare error would invite
+            // running the command again, which would make the work twice: the error says that the work
+            // is recorded.
+            stamped.context(STAMP_FAILED)
         }
-        if let (Format::Pane, Command::Reply { id, text }) = (app.format, &cli.command) {
-            return pressed(&app, id, text.clone(), joining, stamping).await;
+        .await;
+        // The principals' parts of `fwd admin migrate` wrote what they did before the command found
+        // whom it acts as, so a command refused after them says what that was.
+        if let (Err(_), Some(said)) = (&rest, said_first) {
+            eprintln!("fwd: `fwd admin migrate` did this before the error below ended it:\n{said}");
         }
-        let command = cli.command;
-        let body = run_as_caller(&app, command, joining, stamping);
-        // A command whose daemon goes away while it runs ends within a bound and says so, rather than
-        // with Ankurah's words for a read that found no daemon (`Client::while_connected`). One that
-        // writes also ends so whenever its socket closed while it ran, even when it succeeded, since
-        // a commit its node made meanwhile reached no daemon (`Client::while_writing`). `inbox pop`
-        // writes, marking what it prints as read, but runs as a read: a mark that reached no daemon
-        // only brings the same notifications back at the next pop, while Claude Code drops what a
-        // hook printed when the hook exits 7, and the notifications whose mark did reach the daemon
-        // would reach no one.
-        // A move run again finishes what it began, so its loss says to run it again.
-        let client = app.client.as_ref().expect("the CLI connected through its client");
-        let stamped = if words == "task move" {
-            client.while_finishing(body).await
-        } else if writes && words != "inbox pop" {
-            client.while_writing(body).await
-        } else {
-            client.while_connected(body).await
-        }?;
-        // A stamp the daemon never got ended the command above as a lost write does. One that failed
-        // with the socket open failed after the command's work was made, and a bare error would invite
-        // running the command again, which would make the work twice: the error says that the work
-        // is recorded.
-        stamped.context(STAMP_FAILED)
+        rest
     }
     .await;
     ran.map_err(|error| ran_in.failure(error))
@@ -3045,6 +3138,7 @@ async fn connect(
         placed_in: None,
         typed,
         moving: None,
+        moved_first: None,
     })
 }
 
@@ -3088,7 +3182,7 @@ async fn caller(
         Some(subject) => {
             let binds = matches!(cli.command, Command::Principal { command: PrincipalCommand::Bind { .. } });
             let bound = if binds {
-                subject::principal_of(graph, subject).await?.map(|p| p.id())
+                subject::principal_of(graph, subject).await?.map(|(role, _)| role.id())
             } else if let Some(stand_in) = thread_hook_stand_in(cli, graph, subject, thread_hook).await? {
                 stand_in
             } else {
@@ -3127,7 +3221,7 @@ async fn caller(
                 None if no_one => None,
                 None => Some(me),
                 Some(name) => match naming::principal_named(graph, name, None).await {
-                    Ok(p) => p.map(|p| p.id()),
+                    Ok(named) => named.map(|(role, _)| role.id()),
                     // A name several principals share names none of them as the caller.
                     Err(e) if e.downcast_ref::<naming::Refused>().is_some() => None,
                     Err(e) => return Err(e),
@@ -3289,9 +3383,8 @@ async fn bound_session(graph: &ProjectGraph) -> Result<Option<(String, String)>>
     let Some(session) = std::env::var(subject::CLAUDE_CODE_SESSION_VAR).ok().filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    let principals = ops::principals(graph).await?;
-    match subject::of_session(&principals, &session).first() {
-        Some(bound) => Ok(Some((session, bound.handle()?))),
+    match subject::of_session(graph, &session).await?.first() {
+        Some(&bound) => Ok(Some((session.clone(), graph.principal(bound).await?.1.handle()?))),
         None => Ok(None),
     }
 }
@@ -3591,7 +3684,7 @@ async fn message_behind(app: &App, id: &str, settles: bool) -> Result<(EntityId,
                     listed.len(),
                     ids.join(", ")
                 );
-                if settles && EntityId::from(n.recipient()?) == caller {
+                if settles && n.recipient()? == caller {
                     refused.push_str(&format!(
                         ", then fwd dismiss {}, since given a message's id the command settles nothing",
                         short_id(&id.to_base64())
@@ -3731,30 +3824,26 @@ fn no_principal_named(handle: &str) -> String {
 async fn act_as(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
     let name = naming::bare(name);
     match naming::principal_named(graph, name, None).await? {
-        Some(p) => Ok(p.id()),
-        None => bail!(no_principal_named(name)),
+        Some((role, _)) => Ok(role.id()),
+        None => {
+            // In a project not moved yet, the name may be one the move has still to make findable.
+            fwd_core::conversion::principals::refuse_unmoved_lookup(graph).await?;
+            bail!(no_principal_named(name))
+        }
     }
 }
 
 /// Refuses a command that writes work into the project when `principal` is an agent that holds no
 /// role, which reads as before and writes nothing until it selects one (docs/design/cli.md, "Global
-/// flags"): the sentence names the command that selects one, and for a principal whose stored role
-/// is the old word `supervisor`, the migration too.
+/// flags"): the sentence names the command that selects one.
 async fn refuse_without_role(graph: &ProjectGraph, principal: EntityId) -> Result<()> {
-    let p: PrincipalView = graph.get(principal).await?;
+    let p = graph.principal(principal).await?;
     if !ops::lacks_role(&p)? {
         return Ok(());
     }
-    let handle = p.handle()?;
-    let before = if p.agent_role().is_err() {
-        " (this project's graph is from before the fixed roles of 2026-09-29: `fwd admin migrate`, after `fwd admin backup`, carries it over)"
-    } else {
-        ""
-    };
-    bail!(
-        "`@{handle}` holds no role, and an agent selects one before it writes{before}: {}",
-        ops::select_role_command(&handle)
-    )
+    let (_, identity) = &p;
+    let handle = identity.handle()?;
+    bail!("`@{handle}` holds no role, and an agent selects one before it writes: {}", ops::select_role_command(&handle))
 }
 
 /// Refuses a write by `principal` while it is retired (task Wbkkwpyq): a principal retires when its
@@ -3766,18 +3855,18 @@ async fn refuse_without_role(graph: &ProjectGraph, principal: EntityId) -> Resul
 /// the role the principal holds, and for one succeeded, which holds none since its role moved, with
 /// the roles to choose from and the name of its successor, which carries on its job.
 async fn refuse_retired(graph: &ProjectGraph, principal: EntityId, typed_as: bool) -> Result<()> {
-    let p: PrincipalView = graph.get(principal).await?;
-    if p.active()? {
+    let (role, identity) = graph.principal(principal).await?;
+    if !ops::retired(&role)? {
         return Ok(());
     }
-    let handle = p.handle()?;
-    let role = match p.kind()? {
+    let handle = identity.handle()?;
+    let role_words = match identity.kind()? {
         PrincipalKind::Human => String::new(),
         PrincipalKind::Agent => {
-            format!(" --role {}", ops::role_of(&p).map_or_else(|| ops::ROLE_WORDS.to_string(), |r| r.to_string()))
+            format!(" --role {}", ops::role_of(&role).map_or_else(|| ops::ROLE_WORDS.to_string(), |r| r.to_string()))
         }
     };
-    let succeeded = match p.succeeded_by()?.map(EntityId::from) {
+    let succeeded = match role.succeeded_by()?.map(EntityId::from) {
         Some(successor) => {
             format!(", succeeded by @{}, which carries on its job", ops::handle_of(graph, successor).await?)
         }
@@ -3785,7 +3874,7 @@ async fn refuse_retired(graph: &ProjectGraph, principal: EntityId, typed_as: boo
     };
     let as_it = if typed_as { format!("--as {handle} ") } else { String::new() };
     bail!(
-        "`@{handle}` is retired{succeeded}, and a retired principal writes nothing, since no picker offers it: to write again, bring it back first with `fwd {as_it}principal add {handle}{role}`, run as it"
+        "`@{handle}` is retired{succeeded}, and a retired principal writes nothing, since no picker offers it: to write again, bring it back first with `fwd {as_it}principal add {handle}{role_words}`, run as it"
     )
 }
 
@@ -3796,7 +3885,7 @@ async fn refuse_retired(graph: &ProjectGraph, principal: EntityId, typed_as: boo
 /// (docs/DECISIONS.md, D122; a lead per session that coordinates the project's work, D119); another
 /// lead's triage agent for the same scope is refused, naming the one that serves it.
 async fn lead_guidance(graph: &ProjectGraph, principal: EntityId, scope: Option<EntityId>) -> Result<Option<String>> {
-    if !ops::holds(&graph.get::<PrincipalView>(principal).await?, AgentRole::Lead) {
+    if !ops::holds(&graph.get::<RoleView>(principal).await?, AgentRole::Lead) {
         return Ok(None);
     }
     triage_guidance(graph, scope).await
@@ -3923,8 +4012,8 @@ async fn say_unbound(app: &App) -> Result<()> {
 
 /// The notice for `principal`, when it holds triage and serves nothing.
 async fn unbound_notice(graph: &ProjectGraph, principal: EntityId) -> Result<Option<String>> {
-    let p: PrincipalView = graph.get(principal).await?;
-    Ok(ops::serves_nothing_yet(&p).then(|| fwd_core::guidance::unbound(&p.handle().unwrap_or_default())))
+    let (role, identity) = graph.principal(principal).await?;
+    Ok(ops::serves_nothing_yet(&role).then(|| fwd_core::guidance::unbound(&identity.handle().unwrap_or_default())))
 }
 
 /// The principal a handle names on the command line (`--to`, `--for`, `task assign`,
@@ -3991,10 +4080,10 @@ async fn show_message(app: &App, id: EntityId) -> Result<()> {
     let v = message_json(graph, &m).await?;
     match app.format {
         Format::Text => {
-            let author_id: EntityId = m.author()?.into();
+            let author_id: EntityId = m.author()?;
             let author = ops::handle_of(graph, author_id).await?;
             let status = v["status"].as_str().unwrap_or("");
-            let by = match m.edited_by()?.map(EntityId::from).filter(|by| *by != author_id) {
+            let by = match m.edited_by()?.filter(|by| *by != author_id) {
                 Some(by) => format!(" by @{}", ops::handle_of(graph, by).await?),
                 None => String::new(),
             };
@@ -4147,7 +4236,7 @@ async fn end_json(graph: &ProjectGraph, relation: &RelationView, other: EntityId
         } else if let Followed::Held { project, found: t, .. } = graph.follow::<TaskView>(other).await? {
             ("task", Some((t.title()?, project)), Some(t.status()?.to_string()))
         } else if let Followed::Held { project, found: m, .. } = graph.follow::<MessageView>(other).await? {
-            let author = ops::handle_of(graph, m.author()?.into()).await?;
+            let author = ops::handle_of(graph, m.author()?).await?;
             let words = format!("{author}: {}", snippet(&ops::text(m.content())?, 80));
             ("message", Some((words, project)), Some(m.status()?.to_string()))
         } else {
@@ -4390,7 +4479,7 @@ async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Resul
     let step: EntityId = edge.from_id()?;
     let checked = edge.status()? == RelationStatus::Resolved;
     let what = ops::reference_json(graph, step).await?;
-    let checked_by = edge.closed_by()?.map(EntityId::from).filter(|_| checked);
+    let checked_by = edge.closed_by()?.filter(|_| checked);
     let mut v = json!({
         "n": n,
         "edge": edge.id().to_base64(),
@@ -4401,7 +4490,7 @@ async fn step_json(graph: &ProjectGraph, edge: &RelationView, n: usize) -> Resul
         "checked_by": checked_by.map(|p| p.to_base64()),
         "checked_at": edge.closed()?.filter(|_| checked),
         "position": edge.position()?,
-        "created_by": EntityId::from(edge.created_by()?).to_base64(),
+        "created_by": edge.created_by()?.to_base64(),
         "created": edge.created()?,
     });
     if let Some(project) = what.get("project") {
@@ -4736,6 +4825,7 @@ fn migration_text(v: &Value) -> String {
         lines.extend(assignments_text(&assigned, &renamed));
     }
     lines.extend(roles_text(v));
+    lines.push(principals_text(v));
     let cleared: Vec<String> = v["scopes_cleared"]
         .as_array()
         .into_iter()
@@ -4785,6 +4875,34 @@ fn migration_text(v: &Value) -> String {
         if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
     ));
     lines.join("\n")
+}
+
+/// What the principals' move of `fwd admin migrate` did, for people ([`migration_text`]): each
+/// principal moved, keeping its id, whether it was retired, and how many subjects it binds.
+fn principals_text(v: &Value) -> String {
+    let moved: Vec<String> = v["principals_moved"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| {
+            let bindings = p["bindings"].as_array().map_or(0, Vec::len);
+            let retired = if p["retired"].as_bool() == Some(true) { ", retired" } else { "" };
+            let bound = match bindings {
+                0 => String::new(),
+                1 => ", 1 subject bound".to_string(),
+                n => format!(", {n} subjects bound"),
+            };
+            format!(
+                "{} @{}{retired}{bound}",
+                short_id(p["id"].as_str().unwrap_or("")),
+                p["handle"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    format!(
+        "principals moved onto the Commons' identity.Principal, each keeping its id: {}",
+        if moved.is_empty() { "none".to_string() } else { moved.join("; ") }
+    )
 }
 
 /// What the role part of `fwd admin migrate` did, for people ([`migration_text`]): the principal
@@ -5076,31 +5194,36 @@ async fn run(app: &App, command: Command) -> Result<()> {
         Command::Principal { command } => match command {
             PrincipalCommand::List { all } => {
                 let every = ops::principals(graph).await?;
-                let mut found: Vec<&PrincipalView> = every.iter().filter(|p| all || ops::belongs(p)).collect();
+                let mut found: Vec<&(RoleView, PrincipalView)> =
+                    every.iter().filter(|(role, _)| all || ops::belongs(role)).collect();
                 // The dormant agents last, as the pickers list them below the others, and each
                 // group in the pickers' order (docs/DECISIONS.md, D123).
                 let now = fwd_core::now_ms();
-                found.sort_by_key(|p| (dormancy::is_dormant(p, now), listing_rank(p), p.handle().unwrap_or_default()));
+                found
+                    .sort_by_key(|p| (dormancy::is_dormant(p, now), listing_rank(p), p.1.handle().unwrap_or_default()));
                 // Beside a name two or more principals of the project share, the scopes each one's
                 // work is in, as the pickers show them; `null` beside any other.
                 let shared: Vec<EntityId> = found
                     .iter()
-                    .filter(|p| naming::shows_scopes(&every, &p.handle().unwrap_or_default()))
-                    .map(|p| p.id())
+                    .filter(|(_, principal)| naming::shows_scopes(&every, &principal.handle().unwrap_or_default()))
+                    .map(|(role, _)| role.id())
                     .collect();
                 let loaded = if shared.is_empty() { None } else { Some(naming::Loaded::of(graph, &shared).await?) };
+                // The sessions bound to the project's principals, read once for the list.
+                let sessions = subject::sessions_bound(graph).await?;
                 let mut list: Vec<Value> = Vec::with_capacity(found.len());
                 for p in &found {
-                    let mut v = principal_json(graph, p).await?;
+                    let (role, _) = p;
+                    let mut v = principal_json(graph, p, sessions.get(&role.id()).map(String::as_str)).await?;
                     v["dormant"] = json!(dormancy::is_dormant(p, now));
-                    if let Some(successor) = p.succeeded_by().ok().flatten().map(EntityId::from) {
-                        v["succeeded_by_handle"] =
-                            json!(every.iter().find(|q| q.id() == successor).and_then(|q| q.handle().ok()));
+                    if let Some(successor) = role.succeeded_by().ok().flatten().map(EntityId::from) {
+                        let heir = every.iter().find(|(role, _)| role.id() == successor);
+                        v["succeeded_by_handle"] = json!(heir.and_then(|(_, principal)| principal.handle().ok()));
                     }
-                    v["scopes"] = match loaded.as_ref().filter(|_| shared.contains(&p.id())) {
+                    v["scopes"] = match loaded.as_ref().filter(|_| shared.contains(&role.id())) {
                         Some(loaded) => {
                             let work = loaded.work();
-                            json!(naming::scope_titles(&naming::scopes_of(p.id(), &work), work.scopes))
+                            json!(naming::scope_titles(&naming::scopes_of(role.id(), &work), work.scopes))
                         }
                         None => Value::Null,
                     };
@@ -5132,7 +5255,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         let id =
                             ops::add_principal(graph, &handle, role, serves, display_name, app.acting, subject).await?;
                         roles_changed(app, id, before).await?;
-                        let principal = principal_json(graph, &graph.get::<PrincipalView>(id).await?).await?;
+                        let principal = principal_json_of(graph, id).await?;
                         app.print_made(made_json(principal), principal_line)
                     }
                 }
@@ -5190,7 +5313,8 @@ async fn run(app: &App, command: Command) -> Result<()> {
             }
             PrincipalCommand::Retire { handle } => {
                 let before = standing_of(graph, &handle).await;
-                let id = ops::retire_principal(graph, &handle).await?;
+                // Whoever the command acts as retires it: a typed `--as` names that principal.
+                let id = ops::retire_principal(graph, &handle, app.acting.unwrap_or(app.me)).await?;
                 roles_changed(app, id, before).await?;
                 print_principal(app, id).await
             }
@@ -5202,7 +5326,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 };
                 // The principal the typed `--as` names, which must be the one bound: it is said twice.
                 let named_by_as = match app.typed_as.as_deref() {
-                    Some(name) => naming::principal_named(graph, naming::bare(name), None).await?.map(|p| p.id()),
+                    Some(name) => {
+                        naming::principal_named(graph, naming::bare(name), None).await?.map(|(role, _)| role.id())
+                    }
                     None => None,
                 };
                 let id = ops::bind_principal(graph, &handle, subject, named_by_as).await?;
@@ -5214,7 +5340,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                         "a successor is a principal already, and this command acts as none: name yourself first, `fwd principal add <name> --role <role>`"
                     );
                 };
-                let before = ops::triage_standing(&graph.get::<PrincipalView>(caller).await?);
+                let before = ops::triage_standing(&graph.get::<RoleView>(caller).await?);
                 let done = ops::succeed_principal(graph, &handle, caller).await?;
                 roles_changed(app, done.successor, before).await?;
                 print_succession(app, &done, false).await
@@ -5227,7 +5353,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
             // refuses its reads of its own inbox and tasks: the rest of what it prints is about the
             // machine and the graph.
             let principal = match app.acting {
-                Some(_) => principal_json(graph, &graph.get::<PrincipalView>(app.me).await?).await?,
+                Some(_) => principal_json_of(graph, app.me).await?,
                 None => {
                     if app.subject.is_none() {
                         if let Some((session, bound)) = bound_session(graph).await? {
@@ -5490,7 +5616,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                     subject::words(agent)
                 );
             }
-            let id = ops::admin_bind(graph, &handle, &subject).await?;
+            let id = ops::admin_bind(graph, &handle, &subject, app.me).await?;
             print_principal(app, id).await
         }
         Command::Admin { command: AdminCommand::Migrate } => {
@@ -5507,30 +5633,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 }));
             }
             let ids = |list: &[EntityId]| list.iter().map(|id| json!(id.to_base64())).collect::<Vec<_>>();
-            let roles = ops::migrate_roles(graph).await?;
-            // A principal by its id, with its handle to read it by.
-            let named = |id: EntityId| async move {
-                anyhow::Ok(json!({"id": id.to_base64(), "handle": ops::handle_of(graph, id).await?}))
-            };
-            let mut principals = serde_json::Map::new();
-            for (key, list) in
-                [("roles_cleared", &roles.roles_cleared), ("members", &roles.members), ("readers", &roles.readers)]
-            {
-                let mut out = Vec::new();
-                for id in list {
-                    out.push(named(*id).await?);
-                }
-                principals.insert(key.to_string(), Value::Array(out));
-            }
-            let mut visitors = Vec::new();
-            for (id, written) in &roles.visitors {
-                let mut v = named(*id).await?;
-                v["messages"] = json!(written);
-                visitors.push(v);
-            }
-            let triage = match roles.triage {
-                Some(id) => named(id).await?,
-                None => Value::Null,
+            // Set by `run_cli` as the command starts, which every run of this command goes through.
+            let Some(MovedFirst(first)) = &app.moved_first else {
+                bail!("`fwd admin migrate` moves the principals before it finds whom it acts as, and this run did not")
             };
             let scopes = ops::migrate_scopes(graph).await?;
             let mut cleared = Vec::new();
@@ -5567,16 +5672,13 @@ async fn run(app: &App, command: Command) -> Result<()> {
             let mut v = json!({
                 "assigned": assigned,
                 "renamed": ids(&done.renamed),
-                "triage": triage,
-                "readdressed": ids(&roles.readdressed),
-                "visitors": visitors,
                 "scopes_cleared": cleared,
                 "placed_in_recorded_scope": placed,
                 "intentions_moved": intentions,
                 "repositories_moved": repositories,
             });
-            for (key, list) in principals {
-                v[key] = list;
+            for (key, list) in first {
+                v[key] = list.clone();
             }
             match app.format {
                 Format::Text => {
@@ -6253,6 +6355,10 @@ mod tests {
             ),
             ("principal role".into(), vec![A, "lead"], vec![("handle", id(A))]),
             ("principal retire".into(), vec![A], vec![("handle", id(A))]),
+            // An agent renamed to its own id has a name that may start with `-`: a new name takes
+            // it after `--`, and `ask` as `--to=<it>`.
+            ("principal rename".into(), vec!["--", A], vec![("name", id(A))]),
+            ("ask".into(), vec!["--to=-5Yk2Qd7wXcL9mPz0RtVbA", "why?"], vec![("to", some(A))]),
             ("principal bind".into(), vec![A, "--as", A], vec![("handle", id(A)), ("act_as", some(A))]),
             ("principal succeed".into(), vec![A], vec![("handle", id(A))]),
             ("admin bind".into(), vec![A, "--subject", "codex:s/t"], vec![("handle", id(A))]),
@@ -6647,9 +6753,9 @@ mod tests {
 
     /// `fwd admin migrate --format text` says which principal holds triage now, and lists those
     /// whose old role it cleared and who acted in the project without belonging, for a person to
-    /// retire, then the scopes whose owner and heartbeat it cleared, then the tasks it placed in the
-    /// scope only their record named, then the intentions and the repositories it moved onto the
-    /// Commons' new models.
+    /// retire, then the principals it moved onto the Commons' new models, then the scopes whose
+    /// owner and heartbeat it cleared, then the tasks it placed in the scope only their record
+    /// named, then the intentions and the repositories it moved onto the Commons' new models.
     #[test]
     fn the_migration_says_who_holds_triage_and_who_to_retire() {
         let who = |handle: &str| json!({"id": "x", "handle": handle});
@@ -6661,6 +6767,10 @@ mod tests {
             "members": [who("dnorman"), who("claude")],
             "visitors": [{"id": "x", "handle": "impl-xms", "messages": 6}, {"id": "y", "handle": "impl-once", "messages": 1}],
             "readers": [],
+            "principals_moved": [
+                {"id": "Pq2wEr4Tabc", "handle": "impl-old", "retired": true, "bindings": ["Bn5mKl7Jabc"]},
+                {"id": "Pr3xFs5Uabc", "handle": "reviewer-two", "retired": false, "bindings": []},
+            ],
             "scopes_cleared": [{"id": "x_M0XLwro97Jr1o60r5imJKZZVTUyq7uvUwkLvv3plY", "title": "Initial implementation"}],
             "placed_in_recorded_scope": [
                 {"task": "LM-OrKvYabc", "title": "Guard the manifest", "scope": "c2F-rHGyxyz", "scope_title": "UI enhancements"},
@@ -6681,6 +6791,7 @@ mod tests {
                 "recorded as belonging: @dnorman, @claude",
                 "acted here without belonging, only writing messages, for a person to retire (fwd principal retire <handle>) or add (fwd --as <handle> principal add <handle>): @impl-xms (6 messages), @impl-once (1 message)",
                 "only read here, not belonging: none",
+                "principals moved onto the Commons' identity.Principal, each keeping its id: Pq2wEr4T @impl-old, retired, 1 subject bound; Pr3xFs5U @reviewer-two",
                 "scopes whose owner and heartbeat were cleared, a scope having neither since 2026-09-29: Initial implementation (x_M0XLwr)",
                 "tasks made in a scope that only their record named, now worked in it: LM-OrKvY Guard the manifest in UI enhancements; hGcyWpR0 Keep the badges in gone1234",
                 "intentions moved onto the Commons' kept mint, each keeping its id: q9TrWl2x Readers keep their place, its words quoted as Zk3vQe7L",

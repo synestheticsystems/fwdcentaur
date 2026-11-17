@@ -1016,8 +1016,9 @@ fn name_view(target: Target) -> AnyView {
         Target::Principal(id) => {
             let principal = Memo::new(move |_| {
                 store::principal(id).map(|p| {
-                    let agent = p.kind().ok() == Some(PrincipalKind::Agent);
-                    (store::named(p.handle().unwrap_or_default(), &p), agent.then(|| person::role(&p)))
+                    let (role, principal) = &p;
+                    let agent = principal.kind().ok() == Some(PrincipalKind::Agent);
+                    (store::named(principal.handle().unwrap_or_default(), role), agent.then(|| person::role(&p)))
                 })
             });
             view! {
@@ -1041,8 +1042,7 @@ fn name_view(target: Target) -> AnyView {
         Target::Message(id) => {
             let message = Memo::new(move |_| {
                 store::message(id).map(|m| {
-                    let author =
-                        m.author().ok().map(|a| store::handle_beside(EntityId::from(a), &m)).unwrap_or_default();
+                    let author = m.author().ok().map(|a| store::handle_beside(a, &m)).unwrap_or_default();
                     let words = first_words(&references::plain(&ops::text(m.content()).unwrap_or_default()));
                     (author, store::named(format!("“{words}”"), &m))
                 })
@@ -1427,7 +1427,7 @@ fn message_preview(id: EntityId) -> AnyView {
         let Some(m) = store::message(id) else {
             return view! { <p class="muted">{empty::absent(id, Some(Model::Message))}</p> }.into_any();
         };
-        let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+        let author = m.author().ok().map(store::handle_of).unwrap_or_default();
         let to = message_row::addressee(&m);
         view! {
             <div class="loz-preview-head">
@@ -1514,10 +1514,11 @@ fn person_preview(id: EntityId) -> AnyView {
         let Some(p) = store::principal(id) else {
             return view! { <p class="muted">{empty::absent(id, Some(Model::Principal))}</p> }.into_any();
         };
-        let inactive = !p.active().unwrap_or(false);
+        let (role, principal) = &p;
+        let inactive = ops::retired(role).unwrap_or(true);
         view! {
             <div class="loz-preview-head">
-                <strong>{p.display_name().unwrap_or_default()}</strong>" "<span class="muted">{store::named(p.handle().unwrap_or_default(), &p)}</span>
+                <strong>{principal.display_name().unwrap_or_default()}</strong>" "<span class="muted">{store::named(principal.handle().unwrap_or_default(), role)}</span>
             </div>
             <div class="pills">
                 <span class="pill">{person::role(&p)}</span>

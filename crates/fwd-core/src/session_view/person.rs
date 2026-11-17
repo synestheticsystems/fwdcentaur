@@ -5,7 +5,7 @@
 //! than taking either.
 
 use super::text::{plain, LINE_LIMIT};
-use crate::model::{PrincipalKind, PrincipalView};
+use crate::model::{PrincipalKind, PrincipalView, RoleView};
 use crate::naming;
 use crate::ops;
 use crate::project_graph::ProjectRecord;
@@ -53,20 +53,20 @@ impl Person {
             Reader::Identity(name) => (naming::bare(name).to_string(), None),
             Reader::Named(typed) => {
                 let typed = naming::bare(typed);
-                let by_id: Vec<(&ProjectRecord, &PrincipalView)> = if ops::may_start_an_id(typed) {
+                let by_id: Vec<(&ProjectRecord, &(RoleView, PrincipalView))> = if ops::may_start_an_id(typed) {
                     known
                         .projects
                         .iter()
                         .flat_map(|(project, all)| all.iter().map(move |p| (project, p)))
-                        .filter(|(_, p)| p.id().to_base64().starts_with(typed))
+                        .filter(|(_, (role, _))| role.id().to_base64().starts_with(typed))
                         .collect()
                 } else {
                     Vec::new()
                 };
                 match by_id.as_slice() {
                     [] => (typed.to_string(), None),
-                    [(project, p)] if p.kind().ok() == Some(PrincipalKind::Human) => match p.handle() {
-                        Ok(handle) => (handle, Some((project.record, p.id()))),
+                    [(project, (role, p))] if p.kind().ok() == Some(PrincipalKind::Human) => match p.handle() {
+                        Ok(handle) => (handle, Some((project.record, role.id()))),
                         Err(_) => return person.saying("the person `--as` names has a name fwd cannot read"),
                     },
                     [_] => return person.saying("`--as` names an agent, and the view is a person's"),
@@ -81,8 +81,8 @@ impl Person {
             }
             match naming::by_name(all, &handle, Some(PrincipalKind::Human)).as_slice() {
                 [] => {}
-                [one] => {
-                    person.principals.insert(project.record, one.id());
+                [(role, _)] => {
+                    person.principals.insert(project.record, role.id());
                 }
                 _ => person.shared.push(project.clone()),
             }

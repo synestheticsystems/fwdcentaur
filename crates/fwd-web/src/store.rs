@@ -34,7 +34,7 @@ use fwd_core::former_ids::FormerIds;
 use fwd_core::model::*;
 use fwd_core::naming::{self, Named, Work};
 use fwd_core::ops;
-use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, ProjectRecord, Whose};
+use fwd_core::project_graph::{principal_parts, Followed, InProjectView, ProjectGraph, ProjectRecord, Whose};
 use fwd_core::rules::{self, Readiness, TaskSnapshot};
 use leptos::prelude::{untrack, ArcRwSignal, ArcTrigger, Get, Notify, Set, Track};
 use send_wrapper::SendWrapper;
@@ -75,7 +75,8 @@ struct Store {
     /// The collections the page reads beside its tasks and their relations, each opened only when
     /// the page names it.
     scopes: Option<Records<ScopeView>>,
-    principals: Option<Records<PrincipalView>>,
+    /// The project's principals, by their roles, each read whole through [`with_identity`].
+    principals: Option<Records<RoleView>>,
     messages: Option<Records<MessageView>>,
     anchors: Option<Records<CodeAnchorView>>,
     decisions: Option<Records<DecisionView>>,
@@ -211,7 +212,7 @@ pub fn open_with(tasks: Tasks, reads: &[Collection]) -> Result<(), String> {
         .then(|| records(&graph, graph.query_all::<ScopeView>()).map_err(refused("scopes")))
         .transpose()?;
     let principals = named(Collection::Principals)
-        .then(|| records(&graph, graph.query_all::<PrincipalView>()).map_err(refused("principals")))
+        .then(|| records(&graph, graph.query_all::<RoleView>()).map_err(refused("principals")))
         .transpose()?;
     let messages = named(Collection::Messages)
         .then(|| records(&graph, graph.query_all::<MessageView>()).map_err(refused("messages")))
@@ -291,7 +292,7 @@ fn relation_records(store: &Store) -> &Records<RelationView> {
 fn scope_records(store: &Store) -> &Records<ScopeView> {
     opened(&store.scopes, Collection::Scopes)
 }
-fn principal_records(store: &Store) -> &Records<PrincipalView> {
+fn principal_records(store: &Store) -> &Records<RoleView> {
     opened(&store.principals, Collection::Principals)
 }
 fn message_records(store: &Store) -> &Records<MessageView> {
@@ -313,8 +314,16 @@ pub fn relations() -> Vec<RelationView> {
 pub fn scopes() -> Vec<ScopeView> {
     scope_records(store()).listed.get()
 }
-pub fn principals() -> Vec<PrincipalView> {
-    principal_records(store()).listed.get()
+pub fn principals() -> Vec<(RoleView, PrincipalView)> {
+    principal_records(store()).listed.get().into_iter().filter_map(with_identity).collect()
+}
+
+/// The principal `role` is the role of, the Commons' principal read off its entity
+/// (`fwd_core::project_graph::principal_parts`). A role whose principal cannot be read, which only a
+/// fault could leave, is left out of what the page shows, and the console says so.
+fn with_identity(role: RoleView) -> Option<(RoleView, PrincipalView)> {
+    let id = role.id();
+    principal_parts(role).map_err(|e| tracing::warn!("the principal {} cannot be read: {e}", id.to_base64())).ok()
 }
 pub fn messages() -> Vec<MessageView> {
     message_records(store()).listed.get()
@@ -625,8 +634,8 @@ pub fn anchor(id: EntityId) -> Option<CodeAnchorView> {
 pub fn decision(id: EntityId) -> Option<DecisionView> {
     look_up(decision_records, id)
 }
-pub fn principal(id: EntityId) -> Option<PrincipalView> {
-    look_up(principal_records, id)
+pub fn principal(id: EntityId) -> Option<(RoleView, PrincipalView)> {
+    look_up(principal_records, id).and_then(with_identity)
 }
 
 /// The kinds of record the page reads, in the order an id of a kind it does not know is looked up.
@@ -813,7 +822,7 @@ fn held_relations(id: EntityId) -> Vec<RelationView> {
 /// is (`fwd_core::naming::resolve`: its name, or its id): none while no principal has it, and a
 /// sentence listing them when two or more share it, each with the scopes its work is in
 /// (docs/design/agents-and-inbox.md, "A principal's name").
-pub fn principal_named(name: &str) -> Result<Option<PrincipalView>, String> {
+pub fn principal_named(name: &str) -> Result<Option<(RoleView, PrincipalView)>, String> {
     let principals = principals();
     match naming::resolve(&principals, name, None, &former_ids()) {
         Named::One(p) => Ok(Some(p.clone())),
@@ -834,7 +843,7 @@ pub fn principal_named(name: &str) -> Result<Option<PrincipalView>, String> {
 /// page does not hold.
 pub fn unique_handle(id: EntityId) -> Option<String> {
     let principals = principals();
-    let handle = principals.iter().find(|p| p.id() == id)?.handle().ok()?;
+    let handle = principals.iter().find(|(role, _)| role.id() == id)?.1.handle().ok()?;
     (naming::by_name(&principals, &handle, None).len() == 1).then_some(handle)
 }
 
@@ -889,8 +898,8 @@ const DORMANT: &str = "dormant";
 
 /// The heading of a principal's role. An agent's role is a default, not a rule
 /// (docs/design/data-model.md, "Rights"), so this sorts the pickers and decides nothing else.
-fn role_heading(p: &PrincipalView) -> &'static str {
-    match (p.kind().ok(), fwd_core::ops::role_of(p)) {
+fn role_heading((role, principal): &(RoleView, PrincipalView)) -> &'static str {
+    match (principal.kind().ok(), fwd_core::ops::role_of(role)) {
         (Some(PrincipalKind::Human), _) => "people",
         (_, Some(AgentRole::Lead)) => "leads",
         (_, Some(AgentRole::Triage)) => "triage",
@@ -956,12 +965,13 @@ fn with_words(text: String, role: Option<String>, serving: Option<String>) -> St
 /// beside its name (docs/DECISIONS.md, D123).
 pub fn principal_groups(keep: Option<EntityId>) -> Vec<Group> {
     let all = principals();
-    let listed: Vec<&PrincipalView> =
-        all.iter().filter(|p| fwd_core::ops::belongs(p) || Some(p.id()) == keep).collect();
-    let shown: Vec<(&PrincipalView, String, bool)> = listed
+    let listed: Vec<&(RoleView, PrincipalView)> =
+        all.iter().filter(|(role, _)| fwd_core::ops::belongs(role) || Some(role.id()) == keep).collect();
+    let shown: Vec<(&(RoleView, PrincipalView), String, bool)> = listed
         .iter()
         .map(|p| {
-            let handle = p.handle().unwrap_or_default();
+            let (_, principal) = p;
+            let handle = principal.handle().unwrap_or_default();
             let shows = naming::shows_scopes(&all, &handle);
             (*p, handle, shows)
         })
@@ -970,9 +980,9 @@ pub fn principal_groups(keep: Option<EntityId>) -> Vec<Group> {
     let held = shown.iter().any(|(_, _, shows)| *shows).then(Held::now);
     let offered: Vec<naming::Offered> = shown
         .into_iter()
-        .map(|(p, handle, shows)| {
-            let scopes = held.as_ref().filter(|_| shows).map(|held| held.scope_titles_of(p.id()));
-            (p.id(), handle, scopes)
+        .map(|((role, _), handle, shows)| {
+            let scopes = held.as_ref().filter(|_| shows).map(|held| held.scope_titles_of(role.id()));
+            (role.id(), handle, scopes)
         })
         .collect();
     let texts = naming::option_texts(&offered);
@@ -982,13 +992,14 @@ pub fn principal_groups(keep: Option<EntityId>) -> Vec<Group> {
         .zip(&listed)
         .zip(offered)
         .map(|((text, p), (id, handle, _))| {
-            let role = role_heading(p);
+            let (role, _) = p;
+            let heading = role_heading(p);
             let dormant = dormancy::is_dormant(p, now);
             // A dormant agent's option names its role, which no heading says, and a triage agent's
             // says what it serves, so that whoever asks one by name, or reads its questions, sees
             // which scopes it answers first for (docs/DECISIONS.md, D122).
-            let text = with_words(text, dormant.then(|| naming::what(p)), serving_words(p));
-            Listed { id, heading: if dormant { DORMANT } else { role }, role: rank(role), handle, text }
+            let text = with_words(text, dormant.then(|| naming::what(p)), serving_words(role));
+            Listed { id, heading: if dormant { DORMANT } else { heading }, role: rank(heading), handle, text }
         })
         .collect();
     grouped(entries)
@@ -997,11 +1008,11 @@ pub fn principal_groups(keep: Option<EntityId>) -> Vec<Group> {
 /// What a triage agent's option in a picker says it serves, as `fwd principal list` says it:
 /// "serving Replication", "serving Replication and the whole project", "serving nothing"; none for
 /// any other principal.
-fn serving_words(p: &PrincipalView) -> Option<String> {
-    if fwd_core::ops::role_of(p) != Some(AgentRole::Triage) {
+fn serving_words(role: &RoleView) -> Option<String> {
+    if fwd_core::ops::role_of(role) != Some(AgentRole::Triage) {
         return None;
     }
-    let serving = fwd_core::ops::Serving::of(p);
+    let serving = fwd_core::ops::Serving::of(role);
     let mut served: Vec<String> = serving.scopes.iter().map(|s| scope_label(*s)).collect();
     if serving.project_wide {
         served.push("the whole project".to_string());
@@ -1026,7 +1037,7 @@ pub fn front_line(scope: Option<EntityId>) -> Option<EntityId> {
 /// followed here once the daemon has answered that the node holds no such principal.
 pub fn handle_of(id: EntityId) -> String {
     match principal(id) {
-        Some(p) => named(p.handle().unwrap_or_default(), &p),
+        Some((role, principal)) => named(principal.handle().unwrap_or_default(), &role),
         None => unheld(id, Some(Model::Principal)),
     }
 }
@@ -1037,8 +1048,10 @@ pub fn handle_of(id: EntityId) -> String {
 /// "alice in beta “ship it” in beta"); otherwise as [`handle_of`] names a principal.
 pub fn handle_beside<V: InProjectView>(author: EntityId, record: &V) -> String {
     match principal(author) {
-        Some(p) if p.project_id().is_ok_and(|theirs| record.project_id().is_ok_and(|its| its == theirs)) => {
-            p.handle().unwrap_or_default()
+        Some((role, principal))
+            if role.project_id().is_ok_and(|theirs| record.project_id().is_ok_and(|its| its == theirs)) =>
+        {
+            principal.handle().unwrap_or_default()
         }
         _ => handle_of(author),
     }

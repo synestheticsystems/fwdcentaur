@@ -101,7 +101,7 @@ async fn a_text_names_a_record_by_a_former_id_whether_written_before_the_renumbe
     let old = trx
         .create(&Message {
             project: graph.project(),
-            author: ankurah::Ref::new(daniel),
+            author: daniel,
             created: 1,
             content: before.clone(),
             priority: Priority::Next,
@@ -149,7 +149,7 @@ async fn a_principal_is_named_by_a_former_id_after_its_handle_and_a_shared_start
     renumbered(&graph, &cited, alice).await?;
     let named = |name: String| {
         let graph = graph.clone();
-        async move { anyhow::Ok(naming::principal_named(&graph, &name, None).await?.map(|p| p.id())) }
+        async move { anyhow::Ok(naming::principal_named(&graph, &name, None).await?.map(|(role, _)| role.id())) }
     };
     assert_eq!(named(cited.clone()).await?, Some(alice), "whole");
     assert_eq!(named(cited[..8].to_string()).await?, Some(alice), "its start");

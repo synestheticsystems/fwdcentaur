@@ -317,7 +317,7 @@ pub fn Steps(task: EntityId) -> impl IntoView {
     let may_remove = Memo::new(move |_| {
         let me = session::acting().get().map(|p| p.id());
         store::task(task)
-            .and_then(|t| Some(offers_remove(t.created_by().ok()?.into(), ops::assignee_of(&t).ok().flatten(), me)))
+            .and_then(|t| Some(offers_remove(t.created_by().ok()?, ops::assignee_of(&t).ok().flatten(), me)))
             .unwrap_or(false)
     });
     // The step whose removal is open beneath its line, the reason written for it, whether to retire

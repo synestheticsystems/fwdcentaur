@@ -280,7 +280,7 @@ async fn assigned_at(w: &World, intention: EntityId, principal: EntityId, create
         from_id: intention,
         to_id: principal,
         status: RelationStatus::Accepted,
-        created_by: ankurah::property::Ref::new(principal),
+        created_by: principal,
         created,
         via: ankurah::property::Json::new(serde_json::json!({})),
         note: None,

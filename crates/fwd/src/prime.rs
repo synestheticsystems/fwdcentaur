@@ -17,6 +17,7 @@ use clap::Parser;
 use fwd_core::daemon;
 use fwd_core::intentions::{self, Parts};
 use fwd_core::model::*;
+use fwd_core::ops;
 use fwd_core::project::{self, NamedProject, Paths};
 use fwd_core::project_graph::{Followed, InProjectView, ProjectGraph, Whose};
 use fwd_core::route::page_path;
@@ -84,7 +85,7 @@ pub(crate) async fn for_agent(
         if let (true, Some(_)) = (holdings.is_empty(), here) {
             if let Some(Some(stand_in)) = thread_hook_stand_in(cli, graph, agent, thread_hook).await? {
                 // A retired principal acts for no one, as every hook of it does.
-                if graph.get::<PrincipalView>(stand_in).await?.active()? {
+                if !ops::retired(&graph.get::<RoleView>(stand_in).await?)? {
                     holdings = working_set::read(graph, Holder::Principal(stand_in), &extent).await?;
                 }
             }

@@ -237,10 +237,12 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> 
         Holder::Agent(agent) => {
             for project in &projects {
                 let there = graph.graph_of_project(project);
-                let principals = ops::principals(&there).await?;
                 // A retired principal acts for no agent, so what it holds is no agent's to take up.
-                match subject::principal_among(&principals, agent)? {
-                    Some(p) if p.active()? => held.push(read.holding(&there, project, &p, &principals).await?),
+                match subject::principal_of(&there, agent).await? {
+                    Some((role, principal)) if !ops::retired(&role)? => {
+                        let principals = ops::principals(&there).await?;
+                        held.push(read.holding(&there, project, &(role, principal), &principals).await?)
+                    }
                     _ => {}
                 }
             }
@@ -250,7 +252,7 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> 
                 .iter()
                 .find(|p| p.record == graph.record())
                 .ok_or_else(|| anyhow!("the node holds no record of this graph's project"))?;
-            let p: PrincipalView = graph.get(id).await?;
+            let p = graph.principal(id).await?;
             held.push(read.holding(graph, project, &p, &ops::principals(graph).await?).await?);
         }
     }
@@ -261,7 +263,7 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> 
 /// reader that needs them for more than one working set.
 #[derive(Debug, Clone)]
 pub struct Known {
-    pub projects: Vec<(ProjectRecord, Vec<PrincipalView>)>,
+    pub projects: Vec<(ProjectRecord, Vec<(RoleView, PrincipalView)>)>,
 }
 
 impl Known {
@@ -280,17 +282,27 @@ impl Known {
 /// The working set of every active principal bound to an agent of the Claude Code session
 /// `session`, in the projects `known` holds: those of its own thread first, then its subagents',
 /// each in `known`'s order of projects, then by name, then by id. What the person's view of a
-/// session shows (`session_view`).
-pub async fn read_session(graph: &ProjectGraph, known: &Known, session: &str, extent: &Extent) -> Result<Vec<Holding>> {
+/// session shows (`session_view`). Beside them, every principal the session's agents are bound
+/// to, retired or not, whose return the view listens for.
+pub async fn read_session(
+    graph: &ProjectGraph,
+    known: &Known,
+    session: &str,
+    extent: &Extent,
+) -> Result<(Vec<Holding>, Vec<EntityId>)> {
     let projects: Vec<ProjectRecord> = known.projects.iter().map(|(project, _)| project.clone()).collect();
     let mut read = Read { projects: &projects, extent, handles: HashMap::new() };
-    let (mut own, mut subagents) = (Vec::new(), Vec::new());
+    let (mut own, mut subagents, mut every) = (Vec::new(), Vec::new(), Vec::new());
     for (project, principals) in &known.projects {
         let there = graph.graph_of_project(project);
-        let mut bound: Vec<&PrincipalView> = subject::of_session(principals, session);
-        bound.sort_by_key(|p| (p.handle().ok(), p.id()));
+        let of_session = subject::of_session(&there, session).await?;
+        let mut bound: Vec<&(RoleView, PrincipalView)> =
+            principals.iter().filter(|(role, _)| of_session.contains(&role.id())).collect();
+        bound.sort_by_key(|(role, principal)| (principal.handle().ok(), role.id()));
         for p in bound {
-            if !p.active()? {
+            let (role, _) = p;
+            every.push(role.id());
+            if ops::retired(role)? {
                 continue;
             }
             let holding = read.holding(&there, project, p, principals).await?;
@@ -302,7 +314,7 @@ pub async fn read_session(graph: &ProjectGraph, known: &Known, session: &str, ex
         }
     }
     own.extend(subagents);
-    Ok(own)
+    Ok((own, every))
 }
 
 /// One read of a working set: what it reads, and what it has read once and names records by.
@@ -326,10 +338,11 @@ impl Read<'_> {
         &mut self,
         graph: &ProjectGraph,
         project: &ProjectRecord,
-        p: &PrincipalView,
-        principals: &[PrincipalView],
+        p: &(RoleView, PrincipalView),
+        principals: &[(RoleView, PrincipalView)],
     ) -> Result<Holding> {
-        let me = p.id();
+        let (role, principal) = p;
+        let me = role.id();
         let wanted = self.extent.sections.clone();
         let (mut asked_of_you, mut you_asked) =
             if wanted.contains(&SectionKind::AskedOfYou) || wanted.contains(&SectionKind::YouAsked) {
@@ -356,11 +369,11 @@ impl Read<'_> {
         Ok(Holding {
             project: project.clone(),
             principal: me,
-            handle: p.handle()?,
-            kind: p.kind()?,
-            role: ops::role_of(p),
+            handle: principal.handle()?,
+            kind: principal.kind()?,
+            role: ops::role_of(role),
             // Only the view tells a session's own thread from its subagents by it.
-            subject: p.subject().ok().flatten(),
+            subject: subject::session_bound_to(graph, me).await?,
             sections,
         })
     }
@@ -375,13 +388,13 @@ impl Read<'_> {
     async fn questions(
         &mut self,
         graph: &ProjectGraph,
-        p: &PrincipalView,
-        principals: &[PrincipalView],
+        (role, principal): &(RoleView, PrincipalView),
+        principals: &[(RoleView, PrincipalView)],
     ) -> Result<(Listed, Listed)> {
-        let me = p.id();
+        let me = role.id();
         let mut asked: Vec<MessageView> = graph.open_questions_to(me).await?;
         let mut candidates: Vec<MessageView> =
-            graph.fetch(questions_by_name(&p.handle()?, ops::holds(p, AgentRole::Triage))?).await?;
+            graph.fetch(questions_by_name(&principal.handle()?, ops::holds(role, AgentRole::Triage))?).await?;
         candidates.retain(|m| asked.iter().all(|a| a.id() != m.id()));
         let mut asked_of_you = Listed::default();
         for m in candidates {
@@ -580,7 +593,7 @@ struct QuestionFacts {
 fn question_facts(m: &MessageView) -> Result<QuestionFacts> {
     let context = MessageContext::from_view(m)?;
     Ok(QuestionFacts {
-        author: m.author()?.into(),
+        author: m.author()?,
         to: context.to,
         priority: m.priority()?,
         created: m.created()?,

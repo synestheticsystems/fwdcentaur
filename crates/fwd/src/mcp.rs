@@ -175,7 +175,7 @@ impl Operations {
         let (project, graph) = self.project(project)?;
         v["project"] = json!({"id": project.id.to_string(), "name": project.name});
         match subject::principal_of(&graph, &caller.subject).await? {
-            Some(p) => v["principal"] = crate::principal_json(&graph, &p).await?,
+            Some((role, _)) => v["principal"] = crate::principal_json_of(&graph, role.id()).await?,
             None => {
                 v["first_write_makes"] = json!({"handle": self.free_handle(&graph, caller).await?, "role": caller.default_role().to_string()});
                 v["bind_instead"] = json!(format!(
@@ -304,9 +304,9 @@ impl Operations {
                 _ => None,
             };
             let acting = match bound {
-                Some(p) => Some(p.id()),
+                Some((role, _)) => Some(role.id()),
                 None if needs_actor => Some(self.attach(&graph, caller).await?),
-                None => subject::principal_of(&graph, &caller.subject).await?.map(|p| p.id()),
+                None => subject::principal_of(&graph, &caller.subject).await?.map(|(role, _)| role.id()),
             };
             let me_handle = match acting {
                 Some(p) => ops::handle_of(&graph, p).await?,
@@ -338,6 +338,7 @@ impl Operations {
                 placed_in: None,
                 typed: placed.typed,
                 moving: placed.moving.take(),
+                moved_first: None,
             };
             if waited {
                 app.note(crate::MOVE_WAITS);
@@ -354,7 +355,7 @@ impl Operations {
             // The principal the command acted as, or the one it named.
             if let Some(principal) = match acting {
                 Some(p) => Some(p),
-                None => subject::principal_of(&graph, &caller.subject).await.ok().flatten().map(|p| p.id()),
+                None => subject::principal_of(&graph, &caller.subject).await.ok().flatten().map(|(role, _)| role.id()),
             } {
                 self.seen.seen(project.id, principal, caller);
             }
@@ -371,8 +372,8 @@ impl Operations {
     /// calls arriving together make one principal.
     async fn attach(&self, graph: &ProjectGraph, caller: &Caller) -> Result<EntityId> {
         let _attaching = self.attaching.lock().await;
-        if let Some(p) = subject::principal_of(graph, &caller.subject).await? {
-            return Ok(p.id());
+        if let Some((role, _)) = subject::principal_of(graph, &caller.subject).await? {
+            return Ok(role.id());
         }
         let handle = self.free_handle(graph, caller).await?;
         let id =
@@ -414,23 +415,25 @@ const CALLER_READS: &[&str] = &["inbox", "inbox pop", "prime", "task next", "tas
 /// session.
 async fn refuse_split(graph: &ProjectGraph, caller: &Caller) -> Result<()> {
     let thread = |s: &str| s.strip_prefix("codex:").and_then(|rest| rest.rsplit_once('/')).map(|(_, t)| t.to_string());
-    for p in ops::principals(graph).await? {
-        // A retired principal does not split the thread: the person retired it.
-        if !p.active().unwrap_or(false) {
+    for (_, binding) in subject::codex_bindings(graph).await? {
+        let bound = binding.subject()?;
+        if bound == caller.subject || thread(&bound).as_deref() != Some(caller.thread.as_str()) {
             continue;
         }
-        let Some(bound) = p.subject().ok().flatten() else { continue };
-        if bound != caller.subject && thread(&bound).as_deref() == Some(caller.thread.as_str()) {
-            bail!(
-                "this thread, {}, is bound to @{} as {bound}, under another session than this call's ({}): fwd refuses rather than make the thread a second principal. No command moves a principal to another session; a person can retire @{} in a terminal (`fwd principal retire {}`), and the thread's next call that needs one then makes it anew under this session, its earlier work staying with @{}",
-                caller.thread,
-                p.handle()?,
-                caller.session,
-                p.handle()?,
-                p.id().to_base64(),
-                p.handle()?
-            );
+        let (role, principal) = graph.principal(EntityId::from(binding.principal()?)).await?;
+        // A retired principal does not split the thread: the person retired it.
+        if ops::retired(&role)? {
+            continue;
         }
+        bail!(
+            "this thread, {}, is bound to @{} as {bound}, under another session than this call's ({}): fwd refuses rather than make the thread a second principal. No command moves a principal to another session; a person can retire @{} in a terminal (`fwd principal retire {}`), and the thread's next call that needs one then makes it anew under this session, its earlier work staying with @{}",
+            caller.thread,
+            principal.handle()?,
+            caller.session,
+            principal.handle()?,
+            role.id().to_base64(),
+            principal.handle()?
+        );
     }
     Ok(())
 }

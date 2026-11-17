@@ -96,7 +96,7 @@ async fn a_dependency_on_another_projects_task_gates_readiness_in_each_state_and
         from_id: third,
         to_id: gone,
         status: RelationStatus::Accepted,
-        created_by: ankurah::property::Ref::new(t.daniel),
+        created_by: t.daniel,
         created: fwd_core::now_ms(),
         via: ankurah::property::Json::new(json!({})),
         note: None,
@@ -138,7 +138,7 @@ async fn a_far_author_assignee_and_scope_are_named_with_their_project() -> Resul
     // implementer, as a task moved from beta keeps them.
     let mc = MessageContext::default();
     let said = ops::post_message(&t.alpha, t.their_daniel, "from beta", Priority::Next, mc).await?;
-    let author: EntityId = t.alpha.get::<MessageView>(said).await?.author()?.into();
+    let author: EntityId = t.alpha.get::<MessageView>(said).await?.author()?;
     assert_eq!(ops::handle_of(&t.alpha, author).await?, "dnorman in beta");
     assert_eq!(ops::handle_of(&t.alpha, t.daniel).await?, "dnorman", "alpha's own principal by its handle alone");
     assert_eq!(
@@ -149,9 +149,7 @@ async fn a_far_author_assignee_and_scope_are_named_with_their_project() -> Resul
     let held = task(&t.alpha, t.daniel, "Held in beta").await?;
     ops::assign(&t.alpha, t.daniel, held, Some(t.alice)).await?;
     let trx = t.alpha.begin();
-    trx.edit(&t.alpha.get::<TaskView>(held).await?)?
-        .assignee()?
-        .set(&Some(ankurah::property::Ref::new(t.their_alice)))?;
+    trx.edit(&t.alpha.get::<TaskView>(held).await?)?.assignee()?.set(&Some(t.their_alice))?;
     trx.commit().await?;
     let started = ops::start(&t.alpha, t.daniel, held, None).await.expect_err("assigned to beta's implementer");
     assert!(started.to_string().contains("@impl-alice in beta"), "{started}");
@@ -229,7 +227,7 @@ async fn a_step_another_project_made_is_on_the_tasks_checklist_and_is_checked_in
     ops::check_step(&t.alpha, t.alice, step, true).await?;
     let checked = t.beta.relation(step).await?;
     assert_eq!(checked.status()?, RelationStatus::Resolved);
-    assert_eq!(checked.closed_by()?.map(EntityId::from), Some(t.alice), "checked by alpha's implementer");
+    assert_eq!(checked.closed_by()?, Some(t.alice), "checked by alpha's implementer");
     ops::check_step(&t.alpha, t.daniel, step, false).await?;
     assert_eq!(t.beta.relation(step).await?.status()?, RelationStatus::Accepted);
     Ok(())
@@ -449,7 +447,7 @@ async fn whole_file(graph: &ProjectGraph, by: EntityId) -> Result<EntityId> {
             context_after: String::new(),
             pieces: ankurah::property::Json::new(json!([])),
             symbol_path: None,
-            created_by: ankurah::property::Ref::new(by),
+            created_by: by,
             created: fwd_core::now_ms(),
         })
         .await?

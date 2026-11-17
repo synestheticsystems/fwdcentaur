@@ -59,10 +59,10 @@ pub fn found(named: Memo<Option<String>>) -> Memo<Found> {
     });
     Memo::new(move |_| {
         let Some(handle) = named.get() else {
-            return session::acting().get().map_or(Found::Waiting, |p| Found::Principal(p.id()));
+            return session::acting().get().map_or(Found::Waiting, |principal| Found::Principal(principal.id()));
         };
         match store::principal_named(&handle) {
-            Ok(Some(p)) => return Found::Principal(p.id()),
+            Ok(Some((role, _))) => return Found::Principal(role.id()),
             Err(why) => return Found::Refused(format!("{why}.")),
             Ok(None) => {}
         }

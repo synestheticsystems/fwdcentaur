@@ -227,7 +227,8 @@ impl DaemonNode {
     async fn open(store: SqliteStorageEngine) -> Result<DaemonNode> {
         let node = durable::open(store).await?;
         let ctx = node.context_async(DEFAULT_CONTEXT).await?;
-        let routing = services::start(NodeGraph::new(ctx.clone())).await.context("starting the routing service")?;
+        let routing =
+            services::start(NodeGraph::new(ctx.clone()).await?).await.context("starting the routing service")?;
         let upgrade = WebsocketServer::new(node.clone()).route_handler();
         let socket: Socket = Box::new(move |req| {
             let upgrade = upgrade.clone();

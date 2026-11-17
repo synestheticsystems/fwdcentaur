@@ -6,8 +6,10 @@
 //! already and is not checked again, so a second run changes nothing.
 //!
 //! A kind's converter sits beside the kind's own module when it has one, as the intentions' does
-//! (`crate::intentions::conversion`), and here otherwise, as the repositories' does ([`repos`]).
+//! (`crate::intentions::conversion`), and here otherwise, as the repositories' and the principals'
+//! do ([`repos`], [`principals`]).
 
+pub mod principals;
 pub mod repos;
 
 use ankurah::EntityId;

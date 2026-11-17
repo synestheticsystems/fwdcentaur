@@ -394,7 +394,7 @@ impl Page {
             }
             Item::Section(_) | Item::Fold(_) => return None,
         };
-        let author = message.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+        let author = message.author().ok().map(store::handle_of).unwrap_or_default();
         let priority = message.priority().map(|p| p.to_string()).unwrap_or_default();
         Some(format!("{author}, priority {priority}. {}", ops::text(message.content()).unwrap_or_default()))
     }

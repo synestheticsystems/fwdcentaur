@@ -9,6 +9,7 @@ use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::durable;
 use fwd_core::model::*;
+use fwd_core::naming;
 use fwd_core::ops::{self, CreateScope, CreateTask, MessageContext};
 use fwd_core::project_graph::ProjectGraph;
 use fwd_core::routing;
@@ -32,13 +33,23 @@ fn refusal<T: std::fmt::Debug>(result: Result<T>) -> String {
 }
 
 async fn subject_of(graph: &ProjectGraph, principal: EntityId) -> Result<Option<String>> {
-    Ok(graph.get::<PrincipalView>(principal).await?.subject()?)
+    subject::session_bound_to(graph, principal).await
+}
+
+/// Retires the principal `name` names, as it retires itself when its job ends.
+async fn retire(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
+    let (p, _) = naming::principal_named(graph, name, None).await?.expect("a principal of that name");
+    ops::retire_principal(graph, name, p.id()).await
 }
 
 /// The principals that hold lead and are not retired, in id order.
 async fn leads(graph: &ProjectGraph) -> Result<Vec<EntityId>> {
-    let mut found: Vec<EntityId> =
-        ops::principals(graph).await?.iter().filter(|p| ops::holds(p, AgentRole::Lead)).map(|p| p.id()).collect();
+    let mut found: Vec<EntityId> = ops::principals(graph)
+        .await?
+        .iter()
+        .filter(|(role, _)| ops::holds(role, AgentRole::Lead))
+        .map(|(role, _)| role.id())
+        .collect();
     found.sort();
     Ok(found)
 }
@@ -57,7 +68,7 @@ async fn front(graph: &ProjectGraph, scope: Option<EntityId>) -> Result<Option<E
 
 /// What `principal` serves as a triage agent.
 async fn serving(graph: &ProjectGraph, principal: EntityId) -> Result<ops::Serving> {
-    Ok(ops::Serving::of(&graph.get::<PrincipalView>(principal).await?))
+    Ok(ops::Serving::of(&graph.get::<RoleView>(principal).await?))
 }
 
 /// Naming itself binds the agent: the principal `fwd principal add` makes carries the command's
@@ -71,7 +82,11 @@ async fn an_agent_that_names_itself_is_bound_and_acts_as_itself_from_then_on() -
         ops::add_principal(&graph, "impl-alice", Some(AgentRole::Implementer), None, None, None, Some(&a1)).await?;
     assert_eq!(subject_of(&graph, alice).await?, Some(a1.clone()));
     assert_eq!(subject::caller(&graph, &a1, None).await?, Some(alice));
-    assert_eq!(ops::json_of_principal(&graph.get(alice).await?)?["subject"], a1.as_str(), "the JSON says so");
+    assert_eq!(
+        ops::json_of_principal(&graph.principal(alice).await?, subject_of(&graph, alice).await?.as_deref())?["subject"],
+        a1.as_str(),
+        "the JSON says so"
+    );
     // Without a subject, `add` binds nothing, as before the plugin.
     let bob = ops::add_principal(&graph, "impl-bob", Some(AgentRole::Implementer), None, None, None, None).await?;
     assert_eq!(subject_of(&graph, bob).await?, None);
@@ -87,13 +102,13 @@ async fn an_agent_that_names_itself_is_bound_and_acts_as_itself_from_then_on() -
             && second.contains("`fwd principal succeed <its name>`"),
         "{second}"
     );
-    assert!(ops::principals(&graph).await?.iter().all(|p| p.handle().unwrap() != "impl-alice-2"), "none was made");
+    assert!(ops::principals(&graph).await?.iter().all(|(_, p)| p.handle().unwrap() != "impl-alice-2"), "none was made");
     // Adding itself again, run as itself, selects another role and binds nothing new.
     assert_eq!(
         ops::add_principal(&graph, "impl-alice", Some(AgentRole::Reviewer), None, None, Some(alice), Some(&a1)).await?,
         alice
     );
-    assert_eq!(graph.get::<PrincipalView>(alice).await?.agent_role()?, Some(AgentRole::Reviewer));
+    assert_eq!(graph.get::<RoleView>(alice).await?.agent_role()?, Some(AgentRole::Reviewer));
     Ok(())
 }
 
@@ -201,13 +216,10 @@ async fn a_sessions_bound_agents_are_found_by_the_session() -> Result<()> {
         Some("claude-code:s2/main"),
     )
     .await?;
-    let principals = ops::principals(&graph).await?;
-    let mut found: Vec<EntityId> = subject::of_session(&principals, "s1").iter().map(|p| p.id()).collect();
-    found.sort();
     let mut expected = vec![lead, sub];
     expected.sort();
-    assert_eq!(found, expected);
-    assert!(subject::of_session(&principals, "s3").is_empty());
+    assert_eq!(subject::of_session(&graph, "s1").await?, expected);
+    assert!(subject::of_session(&graph, "s3").await?.is_empty());
     let refusal = subject::unstamped("s1", "claude");
     assert!(
         refusal.starts_with("this command runs in the Claude Code session s1, whose agents act as themselves (@claude is bound to one of them), but it carries no agent's stamp")
@@ -231,25 +243,23 @@ async fn a_subject_two_principals_carry_is_the_active_ones_or_refused() -> Resul
     let a1 = agent("a1");
     let first =
         ops::add_principal(&graph, "impl-one", Some(AgentRole::Implementer), None, None, None, Some(&a1)).await?;
-    // The race: a second made as though the first were not there yet.
+    // The race: a second made, and bound to the subject, as though the first were not there yet.
     let trx = graph.begin();
-    let second = trx
-        .create(&Principal {
+    let made = trx
+        .create(&Role {
             project: graph.project(),
-            kind: PrincipalKind::Agent,
-            handle: "impl-two".into(),
-            display_name: "impl-two".into(),
-            auth_subject: None,
             agent_role: Some(AgentRole::Implementer),
-            active: true,
             member: Some(true),
-            subject: Some(a1.clone()),
             succeeded_by: None,
             serves: None,
             last_active: Some(fwd_core::now_ms()),
         })
-        .await?
-        .id();
+        .await?;
+    let record = ankurah::model::Mutable::entity(&*made);
+    let identity = Principal { kind: PrincipalKind::Agent, handle: "impl-two".into(), display_name: "impl-two".into() };
+    trx.add(record, &identity).await?;
+    let second = record.id();
+    subject::bind(&trx, second, &a1, second, None).await?;
     trx.commit().await?;
     let both = refusal(subject::caller(&graph, &a1, None).await);
     assert!(
@@ -258,7 +268,7 @@ async fn a_subject_two_principals_carry_is_the_active_ones_or_refused() -> Resul
             && both.contains(&second.to_base64()[..8]),
         "{both}"
     );
-    ops::retire_principal(&graph, &second.to_base64()).await?;
+    retire(&graph, &second.to_base64()).await?;
     assert_eq!(subject::caller(&graph, &a1, None).await?, Some(first));
     Ok(())
 }
@@ -299,11 +309,11 @@ async fn a_successor_takes_the_old_principals_role_and_its_unread_notifications(
     let new = ops::add_principal(&graph, "lead-2", Some(AgentRole::Reviewer), None, None, None, Some(s2)).await?;
     let done = ops::succeed_principal(&graph, "lead-1", new).await?;
     assert_eq!(done, ops::Succession { successor: new, old, role: Some(AgentRole::Lead), moved: 1 });
-    let old_view: PrincipalView = graph.get(old).await?;
-    assert!(!old_view.active()?, "the old principal is retired");
+    let old_view: RoleView = graph.get(old).await?;
+    assert!(ops::retired(&old_view)?, "the old principal is retired");
     assert_eq!(old_view.succeeded_by()?.map(EntityId::from), Some(new));
     assert_eq!(old_view.agent_role()?, None, "its role moved");
-    assert_eq!(graph.get::<PrincipalView>(new).await?.agent_role()?, Some(AgentRole::Lead), "to the successor");
+    assert_eq!(graph.get::<RoleView>(new).await?.agent_role()?, Some(AgentRole::Lead), "to the successor");
     // The successor is its session's one lead: another agent of that session is refused lead.
     let third = refusal(
         ops::add_principal(&graph, "lead-3", Some(AgentRole::Lead), None, None, None, Some("claude-code:s2/a1")).await,
@@ -311,10 +321,10 @@ async fn a_successor_takes_the_old_principals_role_and_its_unread_notifications(
     assert!(third.starts_with("the Claude Code session s2 has a lead already, @lead-2"), "{third}");
     // The unread notification moved, saying whom it was for; the one read stays where it was.
     let moved: NotificationView = graph.get(waiting).await?;
-    assert_eq!(EntityId::from(moved.recipient()?), new);
+    assert_eq!(moved.recipient()?, new);
     let originator: serde_json::Value = moved.originator()?.into();
     assert_eq!(originator["for_id"], old.to_base64());
-    assert_eq!(EntityId::from(graph.get::<NotificationView>(read).await?.recipient()?), old);
+    assert_eq!(graph.get::<NotificationView>(read).await?.recipient()?, old);
     // The one that stayed is the old principal's: its successor is refused it as anyone else is
     // (task AfhuiHYS), and its own, the one that moved, it dismisses.
     let theirs = refusal(ops::mark_notifications(&graph, new, &[read], NotificationStatus::Dismissed).await);
@@ -329,8 +339,8 @@ async fn a_successor_takes_the_old_principals_role_and_its_unread_notifications(
     assert!(bare.contains("holds no role, and every agent selects one"), "{bare}");
     ops::add_principal(&graph, "lead-1", Some(AgentRole::Reviewer), None, None, Some(old), Some(&agent("main")))
         .await?;
-    let back: PrincipalView = graph.get(old).await?;
-    assert!(back.active()? && back.succeeded_by()?.is_none());
+    let back: RoleView = graph.get(old).await?;
+    assert!(!ops::retired(&back)? && back.succeeded_by()?.is_none());
     Ok(())
 }
 
@@ -466,20 +476,16 @@ async fn a_successor_edits_the_messages_of_the_principal_it_succeeded_and_no_one
     let person = refusal(ops::edit_message(&graph, daniel, answer, "mine now").await);
     assert_eq!(person, stranger);
     let untouched: MessageView = graph.get(answer).await?;
-    assert_eq!(
-        (untouched.edited()?, untouched.edited_by()?.map(EntityId::from)),
-        (None, None),
-        "a refused edit writes nothing"
-    );
+    assert_eq!((untouched.edited()?, untouched.edited_by()?), (None, None), "a refused edit writes nothing");
 
     // The successor corrects it where it stands; the message stays its author's and says who
     // edited it.
     ops::edit_message(&graph, new, answer, "the primer is `docs/using-fwd.md`").await?;
     let edited: MessageView = graph.get(answer).await?;
     assert_eq!(ops::text(edited.content())?, "the primer is `docs/using-fwd.md`");
-    assert_eq!(EntityId::from(edited.author()?), old);
+    assert_eq!(edited.author()?, old);
     assert!(edited.edited()?.is_some());
-    assert_eq!(edited.edited_by()?.map(EntityId::from), Some(new));
+    assert_eq!(edited.edited_by()?, Some(new));
     assert_eq!(ops::json_of_message(&edited)?["edited_by"], new.to_base64());
 
     // Succeeded in turn, the successor passes the right on: the successor of its successor edits
@@ -495,7 +501,7 @@ async fn a_successor_edits_the_messages_of_the_principal_it_succeeded_and_no_one
         "{stranger}"
     );
     ops::edit_message(&graph, third, answer, "@impl-alice, @triage-1 meant `docs/using-fwd.md`").await?;
-    assert_eq!(graph.get::<MessageView>(answer).await?.edited_by()?.map(EntityId::from), Some(third));
+    assert_eq!(graph.get::<MessageView>(answer).await?.edited_by()?, Some(third));
 
     // Alice, named anew, hears of it from the agent that made the edit. The predecessor, named
     // too, would reach its last successor, which made the edit, and so reaches no one.
@@ -542,11 +548,11 @@ async fn succession_is_refused_where_it_would_not_hand_one_agents_job_to_another
     assert_eq!(nobody, "no principal of this project is named `ghost`, so there is none to succeed");
     // Retired, with another agent holding lead since, lead-1's job still passes to its successor,
     // who leads beside that agent.
-    ops::retire_principal(&graph, "lead-1").await?;
+    retire(&graph, "lead-1").await?;
     let lead_x = ops::add_principal(&graph, "lead-x", Some(AgentRole::Lead), None, None, None, None).await?;
     ops::succeed_principal(&graph, "lead-1", new).await?;
     for lead in [lead_x, new] {
-        assert_eq!(graph.get::<PrincipalView>(lead).await?.agent_role()?, Some(AgentRole::Lead));
+        assert_eq!(graph.get::<RoleView>(lead).await?.agent_role()?, Some(AgentRole::Lead));
     }
     let twice = refusal(ops::succeed_principal(&graph, "lead-1", new).await);
     assert_eq!(twice, "@lead-2 succeeded `@lead-1` already");
@@ -561,7 +567,7 @@ async fn succession_is_refused_where_it_would_not_hand_one_agents_job_to_another
     // agent's: a project has one triage agent that serves it whole.
     ops::add_principal(&graph, "triage-1", Some(AgentRole::Triage), Some(ops::Serves::ProjectWide), None, None, None)
         .await?;
-    ops::retire_principal(&graph, "triage-1").await?;
+    retire(&graph, "triage-1").await?;
     ops::add_principal(&graph, "triage-x", Some(AgentRole::Triage), Some(ops::Serves::ProjectWide), None, None, None)
         .await?;
     let held = refusal(ops::succeed_principal(&graph, "triage-1", late).await);
@@ -601,16 +607,16 @@ async fn an_agent_names_itself_as_its_predecessors_successor_in_one_step() -> Re
         ops::add_successor(&graph, "lead-2", Some(AgentRole::Lead), None, None, None, Some(s2), "lead-1").await?;
     let new = done.successor;
     assert_eq!(done, ops::Succession { successor: new, old, role: Some(AgentRole::Lead), moved: 1 });
-    let made: PrincipalView = graph.get(new).await?;
+    let (made, identity) = graph.principal(new).await?;
     assert_eq!(
-        (made.handle()?, made.agent_role()?, made.active()?, made.member()?, made.subject()?),
+        (identity.handle()?, made.agent_role()?, !ops::retired(&made)?, made.member()?, subject_of(&graph, new).await?),
         ("lead-2".to_string(), Some(AgentRole::Lead), true, Some(true), Some(s2.to_string())),
         "named, holding lead, belonging, and bound to its agent"
     );
-    let old_view: PrincipalView = graph.get(old).await?;
-    assert!(!old_view.active()? && old_view.agent_role()?.is_none());
+    let old_view: RoleView = graph.get(old).await?;
+    assert!(ops::retired(&old_view)? && old_view.agent_role()?.is_none());
     assert_eq!(old_view.succeeded_by()?.map(EntityId::from), Some(new));
-    assert_eq!(EntityId::from(graph.get::<NotificationView>(waiting).await?.recipient()?), new, "its mail moved");
+    assert_eq!(graph.get::<NotificationView>(waiting).await?.recipient()?, new, "its mail moved");
     // Without --role, the successor takes the role its predecessor held, and what it served: the
     // scopes move, and the predecessor serves nothing any more.
     let replication =
@@ -635,7 +641,7 @@ async fn an_agent_names_itself_as_its_predecessors_successor_in_one_step() -> Re
         ops::add_successor(&graph, "lead-x", Some(AgentRole::Reviewer), None, None, None, None, "lead-2").await,
     );
     assert_eq!(other, "`@lead-x` carries on `@lead-2`'s job, whose role is lead: leave `--role` off, or give lead");
-    assert!(ops::principals(&graph).await?.iter().all(|p| p.handle().unwrap() != "lead-x"), "none was made");
+    assert!(ops::principals(&graph).await?.iter().all(|(_, p)| p.handle().unwrap() != "lead-x"), "none was made");
     // A name taken is refused: the caller's own, which succeeds with `succeed`, or another's.
     let own = refusal(ops::add_successor(&graph, "lead-2", None, None, None, Some(new), None, "triage-2").await);
     assert_eq!(
@@ -657,7 +663,7 @@ async fn an_agent_names_itself_as_its_predecessors_successor_in_one_step() -> Re
         "`@lead-1` was succeeded by @lead-2 already, who carries on its job: succeed @lead-2 instead, `fwd principal add lead-4 --succeeds lead-2`"
     );
     // Where another principal serves a scope the predecessor served, since it retired, naming it.
-    ops::retire_principal(&graph, "triage-2").await?;
+    retire(&graph, "triage-2").await?;
     ops::add_principal(
         &graph,
         "triage-x",
@@ -700,7 +706,7 @@ async fn succession_moves_a_triage_agents_scopes() -> Result<()> {
     let old = ops::ensure_principal(&graph, "triage-old", "triage-old", PrincipalKind::Agent, Some(AgentRole::Triage))
         .await?;
     let next = ops::add_successor(&graph, "triage-next", None, None, None, None, None, "triage-old").await?;
-    assert!(ops::serves_nothing_yet(&graph.get::<PrincipalView>(next.successor).await?));
+    assert!(ops::serves_nothing_yet(&graph.get::<RoleView>(next.successor).await?));
     let _ = old;
     // Triage taken anew by a successor of an agent that held no role needs a scope.
     ops::ensure_principal(&graph, "impl-old", "impl-old", PrincipalKind::Agent, None).await?;
@@ -749,7 +755,7 @@ async fn a_session_has_one_lead_and_a_project_one_per_session() -> Result<()> {
         named,
         "the Claude Code session s1 has a lead already, @lead-1, and a session has one lead, its own thread: an agent a lead dispatches selects implementer, reviewer or triage instead; `@impl-a1` may hold lead in this session once @lead-1 holds another role or is retired"
     );
-    assert!(ops::principals(&graph).await?.iter().all(|p| p.handle().unwrap() != "impl-a1"), "none was made");
+    assert!(ops::principals(&graph).await?.iter().all(|(_, p)| p.handle().unwrap() != "impl-a1"), "none was made");
     // Named an implementer, it is refused lead by `role`.
     let a1 = ops::add_principal(&graph, "impl-a1", Some(AgentRole::Implementer), None, None, None, Some(&agent("a1")))
         .await?;
@@ -765,21 +771,21 @@ async fn a_session_has_one_lead_and_a_project_one_per_session() -> Result<()> {
     let by_naming =
         refusal(ops::add_successor(&graph, "lead-2b", None, None, None, None, Some(&agent("a3")), "lead-2").await);
     assert!(by_naming.starts_with("the Claude Code session s1 has a lead already, @lead-1,"), "{by_naming}");
-    let untouched: PrincipalView = graph.get(lead_2).await?;
-    assert!(untouched.active()? && untouched.succeeded_by()?.is_none(), "lead-2 carries on its own job");
+    let untouched: RoleView = graph.get(lead_2).await?;
+    assert!(!ops::retired(&untouched)? && untouched.succeeded_by()?.is_none(), "lead-2 carries on its own job");
     // A successor of s1's lead takes lead in s1: the predecessor it retires no longer counts.
     let heir = ops::add_successor(&graph, "lead-1b", None, None, None, None, Some(&agent("a3")), "lead-1").await?;
     assert_eq!(heir.role, Some(AgentRole::Lead));
     assert_eq!(leads(&graph).await?, sorted([heir.successor, lead_2, pilot]));
     // Retired, s1's lead no longer counts, so another agent of s1 selects lead; the retired one is
     // then refused lead as it comes back, and may come back with another role.
-    ops::retire_principal(&graph, "lead-1b").await?;
+    retire(&graph, "lead-1b").await?;
     assert_eq!(ops::set_role(&graph, "impl-a1", AgentRole::Lead, None).await?, a1);
     let back = refusal(
         ops::add_principal(&graph, "lead-1b", None, None, None, Some(heir.successor), Some(&agent("a3"))).await,
     );
     assert!(back.starts_with("the Claude Code session s1 has a lead already, @impl-a1,"), "{back}");
-    assert!(!graph.get::<PrincipalView>(heir.successor).await?.active()?, "it stays retired");
+    assert!(ops::retired(&graph.get::<RoleView>(heir.successor).await?)?, "it stays retired");
     ops::add_principal(
         &graph,
         "lead-1b",
@@ -793,5 +799,86 @@ async fn a_session_has_one_lead_and_a_project_one_per_session() -> Result<()> {
     // An agent of another session, bound to a lead from before the plugin, leads beside s1's.
     assert_eq!(ops::bind_principal(&graph, "pilot", "claude-code:s3/main", Some(pilot)).await?, pilot);
     assert_eq!(leads(&graph).await?, sorted([a1, lead_2, pilot]));
+    Ok(())
+}
+
+/// A binding undone binds no more: its subject acts as no one, the principal it bound is bound to
+/// no session, and the subject may then be bound anew, to another principal.
+#[tokio::test]
+async fn a_binding_undone_binds_its_subject_to_no_one() -> Result<()> {
+    let graph = project().await?;
+    let a1 = agent("a1");
+    let tide =
+        ops::add_principal(&graph, "impl-tide", Some(AgentRole::Implementer), None, None, None, Some(&a1)).await?;
+    let [binding] = &subject::bindings_of(&graph, &a1).await?[..] else { panic!("one binding") };
+    let trx = graph.begin();
+    subject::unbind(&trx, binding, tide).await?;
+    trx.commit().await?;
+    assert_eq!(subject::caller(&graph, &a1, None).await?, None, "its subject acts as no one");
+    assert_eq!(subject_of(&graph, tide).await?, None, "and the principal is bound to no session");
+    assert!(subject::sessions_bound(&graph).await?.is_empty(), "nor in a list's read");
+    assert!(subject::bindings_of(&graph, &a1).await?.is_empty());
+    let reef =
+        ops::add_principal(&graph, "impl-reef", Some(AgentRole::Implementer), None, None, None, Some(&a1)).await?;
+    assert_eq!(subject::caller(&graph, &a1, None).await?, Some(reef), "bound anew");
+    Ok(())
+}
+
+/// A principal bound to the agents of two sessions, which two binds of it at once can leave, acts
+/// for neither: each session's command is refused, naming both subjects, never guessed; a person's
+/// account bound beside a session is no second session.
+#[tokio::test]
+async fn a_principal_bound_to_two_sessions_acts_for_neither() -> Result<()> {
+    let graph = project().await?;
+    let (a1, other) = (agent("a1"), "claude-code:s2/main".to_string());
+    let tide =
+        ops::add_principal(&graph, "impl-tide", Some(AgentRole::Implementer), None, None, None, Some(&a1)).await?;
+    let trx = graph.begin();
+    subject::bind(&trx, tide, &other, tide, None).await?;
+    trx.commit().await?;
+    for (subject, beside) in [(&a1, &other), (&other, &a1)] {
+        let refused = refusal(subject::caller(&graph, subject, None).await);
+        assert!(refused.contains(subject.as_str()) && refused.contains(beside.as_str()), "{refused}");
+        assert!(refused.contains("a principal acts for one session"), "{refused}");
+    }
+
+    let person = ops::ensure_principal(&graph, "ines", "Ines", PrincipalKind::Human, None).await?;
+    let lead =
+        ops::add_principal(&graph, "lead-ines", Some(AgentRole::Lead), None, None, None, Some(&agent("main"))).await?;
+    let trx = graph.begin();
+    subject::bind(&trx, person, "github:4401", person, None).await?;
+    subject::bind(&trx, lead, "github:4402", person, None).await?;
+    trx.commit().await?;
+    assert_eq!(subject::caller(&graph, &agent("main"), None).await?, Some(lead), "an account is no session");
+    Ok(())
+}
+
+/// Succeeding a principal retired before keeps when and by whom it was retired, and the job and
+/// the unread notifications pass to the successor all the same.
+#[tokio::test]
+async fn a_succession_keeps_an_earlier_retirement() -> Result<()> {
+    let graph = project().await?;
+    let person = ops::ensure_principal(&graph, "ines", "Ines", PrincipalKind::Human, None).await?;
+    let old = ops::add_principal(&graph, "impl-a", Some(AgentRole::Implementer), None, None, None, None).await?;
+    let to_old = MessageContext { to: Some(old.to_base64()), ..Default::default() };
+    let question = ops::post_message(&graph, person, "is the retry capped?", Priority::Next, to_old).await?;
+    for p in routing::plan_for_message(&graph, &graph.get::<MessageView>(question).await?).await? {
+        routing::apply(&graph, &[p]).await?;
+    }
+    ops::retire_principal(&graph, "impl-a", person).await?;
+    let closing = |graph: ProjectGraph| async move {
+        let role: RoleView = graph.get(old).await?;
+        let closed: ankurah_commons::records::ClosedView = graph.component_of(&role).await?.expect("closed");
+        anyhow::Ok((closed.closed()?.map(|t| t.unix_millis()), closed.by()?.map(|by| *by)))
+    };
+    let retired = closing(graph.clone()).await?;
+    assert_eq!(retired.1, Some(person));
+
+    let done = ops::add_successor(&graph, "impl-b", None, None, None, None, None, "impl-a").await?;
+    assert_eq!(closing(graph.clone()).await?, retired, "its retirement as it was");
+    let old_role: RoleView = graph.get(old).await?;
+    assert_eq!(old_role.succeeded_by()?.map(|s| *s), Some(done.successor));
+    assert_eq!(done.moved, 1, "its unread notification moved");
+    assert_eq!(ops::inbox(&graph, done.successor, true).await?.len(), 1);
     Ok(())
 }

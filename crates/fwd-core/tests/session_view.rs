@@ -119,27 +119,26 @@ async fn the_person_is_resolved_once_and_strictly_in_each_project() -> Result<()
             .await?;
     // A second person named tester in beta, which the commands would never make, but a store can hold.
     let trx = t.beta.begin();
-    let twin = trx
-        .create(&Principal {
+    let made = trx
+        .create(&Role {
             project: t.beta.project(),
-            kind: PrincipalKind::Human,
-            handle: "tester".into(),
-            display_name: "tester".into(),
-            auth_subject: None,
             agent_role: None,
-            active: true,
             member: Some(true),
-            subject: None,
             succeeded_by: None,
             serves: None,
             last_active: None,
         })
-        .await?
-        .id();
+        .await?;
+    let record = ankurah::model::Mutable::entity(&*made);
+    let identity = Principal { kind: PrincipalKind::Human, handle: "tester".into(), display_name: "tester".into() };
+    trx.add(record, &identity).await?;
+    let twin = record.id();
     trx.commit().await?;
-    let beta_lead =
-        ops::principals(&t.beta).await?.into_iter().find(|p| p.handle().ok().as_deref() == Some("lead-sam"));
-    let beta_lead = beta_lead.map(|p| p.id()).expect("lead-sam in beta");
+    let beta_lead = ops::principals(&t.beta)
+        .await?
+        .into_iter()
+        .find(|(_, principal)| principal.handle().ok().as_deref() == Some("lead-sam"));
+    let beta_lead = beta_lead.map(|(role, _)| role.id()).expect("lead-sam in beta");
     ops::post_message(&t.beta, beta_lead, "Which of you is it?", Priority::Now, asking(t.their_tester)).await?;
 
     let json = view(&t.alpha, Reader::Identity("tester")).await?;
@@ -222,7 +221,7 @@ async fn a_cited_record_is_named_and_linked_and_no_id_shows() -> Result<()> {
     let trx = t.alpha.begin();
     trx.create(&Message {
         project: t.alpha.project(),
-        author: Ref::new(t.lead),
+        author: t.lead,
         content: format!("Was [[{}]] ever finished, and by whom?", gone.to_base64()),
         priority: Priority::Now,
         status: MessageStatus::Active,
@@ -453,7 +452,7 @@ async fn an_assignment_that_cannot_be_followed_is_counted_beside_the_rest() -> R
         from_id: EntityId::from_bytes([0; 32]),
         to_id: t.lead,
         status: RelationStatus::Accepted,
-        created_by: Ref::new(t.lead),
+        created_by: t.lead,
         created: 1,
         via: Json::new(json!({})),
         note: None,

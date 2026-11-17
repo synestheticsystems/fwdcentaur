@@ -9,7 +9,7 @@
 //! they lead. One project's graph changes none of the other's records.
 
 use ankurah::changes::ChangeSet;
-use ankurah::property::{Json, Ref};
+use ankurah::property::Json;
 use ankurah::signals::{Get, Subscribe};
 use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId, LiveQuery, View};
 use ankurah_storage_sqlite::SqliteStorageEngine;
@@ -131,7 +131,7 @@ async fn anchor_in(graph: &ProjectGraph, by: EntityId) -> Result<EntityId> {
             context_after: String::new(),
             pieces: Json::new(json!([])),
             symbol_path: None,
-            created_by: Ref::new(by),
+            created_by: by,
             created: fwd_core::now_ms(),
         })
         .await?
@@ -146,7 +146,7 @@ async fn every_id(graph: &ProjectGraph) -> Result<BTreeSet<EntityId>> {
         views.iter().map(View::id).collect()
     }
     let mut all = BTreeSet::new();
-    all.extend(ids(graph.all::<PrincipalView>().await?));
+    all.extend(ids(graph.all::<RoleView>().await?));
     let repositories = graph.all_placed::<ankurah_commons::git::RepositoryView>().await?;
     all.extend(repositories.iter().map(|(placement, _)| placement.id()));
     all.extend(ids(graph.all::<TaskView>().await?));
@@ -181,11 +181,11 @@ async fn every_list_of_one_project_holds_its_own_records_and_none_of_the_others(
 
     // Each read below finds this project's record, so that none passes by finding nothing.
     let principals = ops::principals(&alpha).await?;
-    none_of(&others, "principals", ids_of(&principals));
+    none_of(&others, "principals", principals.iter().map(|(role, _)| role.id()));
     assert_eq!(principals.len(), 3);
     assert_eq!(ops::people(&alpha).await?, vec![a.daniel]);
     assert_eq!(ops::person_by_handle(&alpha, "dnorman").await?, a.daniel, "a handle the other project shares too");
-    let alice = naming::principal_named(&alpha, "impl-alice", None).await?.map(|p| p.id());
+    let alice = naming::principal_named(&alpha, "impl-alice", None).await?.map(|(role, _)| role.id());
     assert_eq!(alice, Some(a.alice), "a name two projects share is no shared name in either");
     assert_eq!(ops::triage_for(&alpha, None).await?.map(|f| f.agent), Some(a.triage));
     assert_eq!(ops::resolve_scope(&alpha, "Replication").await?, a.scope, "a scope name the other project shares too");
@@ -409,7 +409,7 @@ impl Standing {
             Opened::on("tasks", graph.query_all::<TaskView>()?),
             Opened::on("relations", graph.query_all::<RelationView>()?),
             Opened::on("scopes", graph.query_all::<ScopeView>()?),
-            Opened::on("principals", graph.query_all::<PrincipalView>()?),
+            Opened::on("principals", graph.query_all::<RoleView>()?),
             Opened::on("messages", graph.query_all::<MessageView>()?),
             Opened::on("anchors", graph.query_all::<CodeAnchorView>()?),
             Opened::on("decisions", graph.query_all::<DecisionView>()?),
@@ -487,8 +487,8 @@ async fn routing_tells_whom_each_rule_names_each_in_its_own_project() -> Result<
     let (alpha, beta) = two_projects().await?;
     let a = populate(&alpha).await?;
     let b = populate(&beta).await?;
-    let ours: BTreeSet<EntityId> = ops::principals(&alpha).await?.iter().map(View::id).collect();
-    let theirs: BTreeSet<EntityId> = ops::principals(&beta).await?.iter().map(View::id).collect();
+    let ours: BTreeSet<EntityId> = ops::principals(&alpha).await?.iter().map(|(role, _)| role.id()).collect();
+    let theirs: BTreeSet<EntityId> = ops::principals(&beta).await?.iter().map(|(role, _)| role.id()).collect();
     let before = every_id(&beta).await?;
 
     // A question asked of no one reaches alpha's triage agent; a comment on a claimed task its
@@ -568,7 +568,7 @@ async fn routing_tells_whom_each_rule_names_each_in_its_own_project() -> Result<
 
     // Each notification is in its recipient's project.
     let recipients = |found: Vec<NotificationView>| -> Result<BTreeSet<EntityId>> {
-        Ok(found.iter().map(|n| n.recipient().map(EntityId::from)).collect::<Result<_, _>>()?)
+        Ok(found.iter().map(|n| n.recipient()).collect::<Result<_, _>>()?)
     };
     let in_alpha = recipients(alpha.all::<NotificationView>().await?)?;
     let in_beta = recipients(beta.all::<NotificationView>().await?)?;

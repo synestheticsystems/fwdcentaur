@@ -142,7 +142,7 @@ impl Daemon {
 
 /// The principal of `graph`'s project named `name`.
 async fn named(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
-    naming::principal_named(graph, name, None).await?.map(|p| p.id()).ok_or_else(|| anyhow!("no {name}"))
+    naming::principal_named(graph, name, None).await?.map(|(role, _)| role.id()).ok_or_else(|| anyhow!("no {name}"))
 }
 
 /// The notifications of one recipient as they arrive, from a live query on its project's graph.
@@ -396,7 +396,7 @@ async fn a_reply_through_a_notification_kept_after_its_task_moved_is_made_where_
     let beta = daemon.client(b).await?;
     let made: MessageView = beta.graph.get(reply).await?;
     assert_eq!(made.reply_to()?.map(EntityId::from), Some(comment.parse()?), "a message of the comment's thread");
-    assert_eq!(EntityId::from(made.author()?), alice, "by her, alpha's principal");
+    assert_eq!(made.author()?, alice, "by her, alpha's principal");
     let notification: NotificationView = alpha.graph.get(told.parse()?).await?;
     assert_eq!(notification.status()?, NotificationStatus::Read, "marked read where her inbox is");
     Ok(())
@@ -616,8 +616,8 @@ async fn the_mcp_tool_moves_a_task_as_the_calling_threads_principal_where_the_ta
     assert!(beta.graph.get::<TaskView>(task.parse()?).await.is_ok(), "the task is beta's");
     let comment: EntityId =
         given["result"]["tasks"][0]["comment"].as_str().ok_or_else(|| anyhow!("{given}"))?.parse()?;
-    let mover: EntityId = beta.graph.get::<MessageView>(comment).await?.author()?.into();
-    let bound = alpha.graph.get::<PrincipalView>(mover).await?.subject()?.unwrap_or_default();
+    let mover: EntityId = beta.graph.get::<MessageView>(comment).await?.author()?;
+    let bound = fwd_core::subject::session_bound_to(&alpha.graph, mover).await?.unwrap_or_default();
     assert!(bound.ends_with(thread), "the comment is by the thread's principal in alpha: {bound}");
     Ok(())
 }

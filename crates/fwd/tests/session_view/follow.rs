@@ -269,6 +269,32 @@ fn the_active_intentions_are_followed_as_they_are_assigned_reworded_and_taken_of
     Ok(())
 }
 
+/// A principal of the session brought back shows again, through its own live read and no other
+/// write: one already retired when the stream starts, which no working set shows, and one retired
+/// while the stream runs.
+#[test]
+fn a_principal_of_the_session_brought_back_shows_again() -> Result<()> {
+    let s = Scratch::new()?;
+    s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam", "--role", "lead"])?;
+    s.json(&s.alpha, Some("a1"), &["principal", "add", "impl-sam", "--role", "implementer"])?;
+    s.json(&s.alpha, Some("a1"), &["principal", "retire", "impl-sam"])?;
+    let shown = |document: &Value| -> Vec<String> {
+        let groups = document["principals"].as_array().into_iter().flatten();
+        groups.map(|g| g["title"].as_str().unwrap_or_default().to_string()).collect()
+    };
+    let stream = Stream::start(&s)?;
+    assert_eq!(shown(&stream.document(SOON)?), ["lead-sam"]);
+
+    s.json(&s.alpha, Some("a1"), &["principal", "add", "impl-sam"])?;
+    assert_eq!(shown(&stream.document(SOON)?), ["lead-sam", "impl-sam"], "retired before the stream started");
+
+    s.json(&s.alpha, Some("main"), &["principal", "retire", "lead-sam"])?;
+    assert_eq!(shown(&stream.document(SOON)?), ["impl-sam"]);
+    s.json(&s.alpha, Some("main"), &["principal", "add", "lead-sam"])?;
+    assert_eq!(shown(&stream.document(SOON)?), ["lead-sam", "impl-sam"], "retired while the stream ran");
+    Ok(())
+}
+
 /// While the stream is healthy and nothing changes, an empty line comes every 30 seconds. With
 /// the daemon stopped, the last document comes again saying the daemon is out of reach, with no
 /// page and the principals it showed; with the daemon started again, the fresh document follows.

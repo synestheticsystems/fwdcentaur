@@ -14,12 +14,18 @@
 //! security boundary.
 
 use crate::model::*;
-use crate::project_graph::ProjectGraph;
-use crate::query::with_strings;
+use crate::project_graph::{ProjectGraph, ProjectTransaction};
+use crate::query::{with_id, with_string, with_strings};
 use crate::{naming, ops};
 use ankurah::ankql::ast::{Parsed, Selection};
+use ankurah::model::Mutable;
+use ankurah::property::Ref;
 use ankurah::EntityId;
+use ankurah_commons::identity::{IdentityBinding, IdentityBindingView};
+use ankurah_commons::property::Timestamp;
+use ankurah_commons::records::{Closed, Created};
 use anyhow::{bail, Result};
+use std::collections::BTreeMap;
 
 /// The variable a stamped command carries the Claude Code session's id in.
 pub const SESSION_VAR: &str = "FWD_CLAUDE_SESSION";
@@ -139,61 +145,179 @@ pub fn is_main_thread(subject: &str) -> bool {
     }
 }
 
-/// The principals of `principals` bound to `subject`.
-pub fn bound_to<'a>(principals: &'a [PrincipalView], subject: &str) -> Vec<&'a PrincipalView> {
-    principals.iter().filter(|p| p.subject().ok().flatten().as_deref() == Some(subject)).collect()
+/// The project's identity bindings `args` selects that hold, the undone ones left out: what binds
+/// each subject to the principal it acts as in the project, placed there.
+async fn open_bindings(
+    graph: &ProjectGraph,
+    args: Selection<Parsed>,
+) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
+    let mut held = Vec::new();
+    for (placement, binding) in graph.fetch_placed::<IdentityBindingView>(args).await? {
+        if !graph.is_closed(&binding).await? {
+            held.push((placement, binding));
+        }
+    }
+    Ok(held)
 }
 
-/// The principals of `principals` bound to an agent of the Claude Code session `session`, its own
+/// The principals of the project the bindings `args` selects bind, each once, in the order of their
+/// ids.
+async fn principals_bound(graph: &ProjectGraph, args: Selection<Parsed>) -> Result<Vec<EntityId>> {
+    let mut ids = Vec::new();
+    for (_, binding) in open_bindings(graph, args).await? {
+        ids.push(EntityId::from(binding.principal()?));
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// The principals of the project bound to an agent of the Claude Code session `session`, its own
 /// thread's or a subagent's.
-pub fn of_session<'a>(principals: &'a [PrincipalView], session: &str) -> Vec<&'a PrincipalView> {
-    principals
-        .iter()
-        .filter(|p| {
-            p.subject().ok().flatten().is_some_and(|s| s.starts_with(CLAUDE_CODE) && session_of(&s) == Some(session))
-        })
-        .collect()
+pub async fn of_session(graph: &ProjectGraph, session: &str) -> Result<Vec<EntityId>> {
+    principals_bound(graph, of_session_selection(session)?).await
 }
 
-/// A selection of the principals bound to an agent of the Claude Code session `session`, as
-/// [`of_session`] finds them among a list: every subject that starts with the session's, as one
-/// range of the text the store compares by its bytes, the subjects `claude-code:<session>/` up to,
-/// not including, `claude-code:<session>0`, `0` being the character after `/`. What a view of the
-/// session listens to for an agent of it naming itself, retiring or being renamed (`live_read`),
-/// rather than to every principal, which every write changes as it stamps its author.
-pub fn of_session_selection(session: &str) -> Result<Selection<Parsed>> {
-    let from = format!("{CLAUDE_CODE}{session}/");
-    let before = format!("{CLAUDE_CODE}{session}0");
+/// The bindings of every agent of the session `prefix` and `session` name: every subject that
+/// starts with `<prefix><session>/`, as one range of the text the store compares by its bytes, the
+/// subjects from there up to, not including, `<prefix><session>0`, `0` being the character after
+/// `/`.
+fn session_selection(prefix: &str, session: &str) -> Result<Selection<Parsed>> {
+    let from = format!("{prefix}{session}/");
+    let before = format!("{prefix}{session}0");
     with_strings("subject >= ? AND subject < ?", &[&from, &before])
 }
 
-/// The principals of `principals` bound to an agent of the session `subject` is an agent of, its
-/// own thread's or a subagent's, of either harness ([`same_session`]).
-pub fn of_same_session<'a>(principals: &'a [PrincipalView], subject: &str) -> Vec<&'a PrincipalView> {
-    principals.iter().filter(|p| p.subject().ok().flatten().is_some_and(|s| same_session(&s, subject))).collect()
+/// A selection of the identity bindings of the agents of the Claude Code session `session`, as
+/// [`of_session`] reads them: what a view of the session listens to for an agent of it naming
+/// itself or being unbound (`live_read`), rather than to every binding.
+pub fn of_session_selection(session: &str) -> Result<Selection<Parsed>> {
+    session_selection(CLAUDE_CODE, session)
+}
+
+/// The principals of the project bound to an agent of the session `subject` is an agent of, its
+/// own thread's or a subagent's, of the same harness ([`same_session`]).
+pub async fn of_same_session(graph: &ProjectGraph, subject: &str) -> Result<Vec<EntityId>> {
+    let prefix = if subject.starts_with(CODEX) { CODEX } else { CLAUDE_CODE };
+    let Some(session) = session_of(subject) else { return Ok(Vec::new()) };
+    principals_bound(graph, session_selection(prefix, session)?).await
+}
+
+/// The agent's session or thread bound to `principal` in the project, as `fwd principal list`
+/// prints it: none for a principal no agent is bound to, as a person is, whose account at a service
+/// that signed them in is a binding too. Should two hold, the first by their text.
+pub async fn session_bound_to(graph: &ProjectGraph, principal: EntityId) -> Result<Option<String>> {
+    let mut sessions = Vec::new();
+    for (_, binding) in open_bindings(graph, with_id("principal = ?", principal)?).await? {
+        let subject = binding.subject()?;
+        if session_of(&subject).is_some() {
+            sessions.push(subject);
+        }
+    }
+    Ok(sessions.into_iter().min())
+}
+
+/// The agent's session or thread bound to each of the project's principals that one is bound to,
+/// read at once for a list of them, as [`session_bound_to`] reads one principal's.
+pub async fn sessions_bound(graph: &ProjectGraph) -> Result<BTreeMap<EntityId, String>> {
+    let mut sessions: BTreeMap<EntityId, String> = BTreeMap::new();
+    for prefix in [CLAUDE_CODE, CODEX] {
+        for (_, binding) in harness_bindings(graph, prefix).await? {
+            let subject = binding.subject()?;
+            let principal = EntityId::from(binding.principal()?);
+            match sessions.get(&principal) {
+                Some(first) if *first <= subject => {}
+                _ => {
+                    sessions.insert(principal, subject);
+                }
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+/// The project's bindings that hold of the harness whose subjects start with `prefix` (`codex:`,
+/// `claude-code:`): every subject from the prefix up to, not including, the prefix with its last
+/// character, `:`, made `;`, the character after it.
+async fn harness_bindings(graph: &ProjectGraph, prefix: &str) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
+    let before = format!("{};", prefix.trim_end_matches(':'));
+    open_bindings(graph, with_strings("subject >= ? AND subject < ?", &[prefix, &before])?).await
+}
+
+/// The project's bindings of Codex threads that hold.
+pub async fn codex_bindings(graph: &ProjectGraph) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
+    harness_bindings(graph, CODEX).await
+}
+
+/// The bindings of the project that hold `subject`, which a binding of it to another principal
+/// undoes or is refused by.
+pub async fn bindings_of(graph: &ProjectGraph, subject: &str) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
+    open_bindings(graph, with_string("subject = ?", subject)?).await
+}
+
+/// Binds `subject` to the principal `principal` in `trx`, as `by` does now: an identity binding
+/// placed in the transaction's project, marked as made by the migration that `migrated` names,
+/// where one did. Its id. Nothing routes a binding: should something come to, a binding a
+/// migration made is told by its `Migrated`, and it is made with a creation event as any is.
+pub async fn bind(
+    trx: &ProjectTransaction,
+    principal: EntityId,
+    subject: &str,
+    by: EntityId,
+    migrated: Option<&str>,
+) -> Result<EntityId> {
+    let made =
+        trx.create_placed(&IdentityBinding { principal: Ref::new(principal), subject: subject.to_string() }).await?;
+    let record = Mutable::entity(&*made);
+    trx.add(record, &Created { created: Timestamp::from_unix_millis(crate::now_ms()), by: Ref::new(by) }).await?;
+    if let Some(migration) = migrated {
+        trx.add(record, &Migrated { migration: migration.to_string() }).await?;
+    }
+    Ok(record.id())
+}
+
+/// Undoes `binding` in `trx`, as `by` does now: it is closed, and its subject no longer acts as
+/// its principal.
+pub async fn unbind(
+    trx: &ProjectTransaction,
+    (placement, _): &(PlacementView, IdentityBindingView),
+    by: EntityId,
+) -> Result<()> {
+    let closing = Closed {
+        closed: Some(Timestamp::from_unix_millis(crate::now_ms())),
+        by: Some(Ref::new(by)),
+        outcome: None,
+        reason: None,
+    };
+    Ok(trx.close(placement, &closing).await?)
 }
 
 /// The principal of the project bound to `subject`, as whom a command that carries the subject
 /// acts: none while the agent has not named itself. Should two be bound to it (two `fwd principal
 /// add`s of one agent at once), the one that is not retired; two that are not are refused, listed
-/// by id, for the agent to retire the one it does not mean.
-pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<PrincipalView>> {
-    principal_among(&ops::principals(graph).await?, subject)
-}
-
-/// The principal of `principals`, those of one project, bound to `subject`, as [`principal_of`]
-/// reads it, for a reader that holds them already.
-pub fn principal_among(principals: &[PrincipalView], subject: &str) -> Result<Option<PrincipalView>> {
-    let bound = bound_to(principals, subject);
-    let active: Vec<&PrincipalView> = bound.iter().copied().filter(|p| p.active().unwrap_or(false)).collect();
-    let one = match (bound.as_slice(), active.as_slice()) {
+/// by id, for the agent to retire the one it does not mean. A principal acts for one session, as
+/// the one field that held its session before the Commons did held one: one bound to another
+/// session's agent as well (two binds of one principal at once) is refused, naming both.
+pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<(RoleView, PrincipalView)>> {
+    let mut bound = Vec::new();
+    for id in principals_bound(graph, with_string("subject = ?", subject)?).await? {
+        bound.push(graph.principal(id).await?);
+    }
+    let mut at_work = Vec::new();
+    for p in &bound {
+        let (role, _) = p;
+        if !ops::retired(role)? {
+            at_work.push(p);
+        }
+    }
+    let one = match (bound.as_slice(), at_work.as_slice()) {
         ([], _) => return Ok(None),
         ([one], _) => one,
         (_, [one]) => one,
         (several, _) => {
             let mut listed: Vec<String> = several
                 .iter()
-                .map(|p| format!("{} ({})", p.id().to_base64().chars().take(8).collect::<String>(), naming::what(p)))
+                .map(|p| format!("{} ({})", p.0.id().to_base64().chars().take(8).collect::<String>(), naming::what(p)))
                 .collect();
             listed.sort();
             bail!(
@@ -204,7 +328,24 @@ pub fn principal_among(principals: &[PrincipalView], subject: &str) -> Result<Op
             )
         }
     };
-    Ok(Some((*one).clone()))
+    let (role, principal) = one;
+    let mut others = Vec::new();
+    for (_, binding) in open_bindings(graph, with_id("principal = ?", role.id())?).await? {
+        let bound_to = binding.subject()?;
+        if bound_to != subject && session_of(&bound_to).is_some() {
+            others.push(bound_to);
+        }
+    }
+    if let Some(other) = others.into_iter().min() {
+        bail!(
+            "@{} is bound to {} and to {}, and a principal acts for one session, so neither acts as it: retire it (`fwd principal retire {}`), and the agent of each session names itself anew",
+            principal.handle()?,
+            words(subject),
+            words(&other),
+            role.id().to_base64()
+        );
+    }
+    Ok(Some(one.clone()))
 }
 
 /// Whom a command that carries `subject` acts as, given the `--as` typed on its command line, when
@@ -218,11 +359,11 @@ pub async fn caller(graph: &ProjectGraph, subject: &str, typed_as: Option<&str>)
     if let Some(typed) = typed_as {
         let named = naming::principal_named(graph, naming::bare(typed), None).await?;
         match (&bound, named) {
-            (Some(b), Some(n)) if n.id() == b.id() => {}
+            (Some(b), Some(n)) if n.0.id() == b.0.id() => {}
             (Some(b), _) => bail!(
                 "`--as {typed}` asks to act as another principal, but this command runs as {}, whose principal is @{}, and an agent acts only as itself: leave `--as` off",
                 words(subject),
-                b.handle()?
+                b.1.handle()?
             ),
             (None, _) => bail!(
                 "this command runs as {}, which has not named itself in this project, and an agent acts only as itself, so `--as {typed}` is refused: {}",
@@ -231,7 +372,7 @@ pub async fn caller(graph: &ProjectGraph, subject: &str, typed_as: Option<&str>)
             ),
         }
     }
-    Ok(bound.map(|p| p.id()))
+    Ok(bound.map(|(role, _)| role.id()))
 }
 
 /// How an agent that has not named itself does, for the sentences that refuse it.

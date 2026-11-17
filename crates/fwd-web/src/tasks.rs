@@ -370,7 +370,7 @@ pub fn TaskDetail(id: EntityId) -> impl IntoView {
         };
         let status = t.status().unwrap_or(TaskStatus::Proposed);
         let hold = t.hold().unwrap_or(None);
-        let created_by = t.created_by().ok().map(|p| store::handle_of(EntityId::from(p))).unwrap_or_default();
+        let created_by = t.created_by().ok().map(store::handle_of).unwrap_or_default();
         view! {
             <header class="detail-head">
                 <h3>{t.title().unwrap_or_default()}</h3>

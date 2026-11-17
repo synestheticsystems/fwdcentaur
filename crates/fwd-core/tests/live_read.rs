@@ -6,6 +6,7 @@
 
 use ankurah::signals::Peek;
 use ankurah::{policy::DEFAULT_CONTEXT, EntityId, LiveQuery, View};
+use ankurah_commons::identity::IdentityBindingView;
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
 use fwd_core::durable;
@@ -105,7 +106,7 @@ async fn the_answers_in_a_questions_thread_are_followed_wherever_they_are_writte
     Ok(())
 }
 
-/// The principals bound to an agent of one Claude Code session, its own thread's and its
+/// The bindings of the agents of one Claude Code session, its own thread's and its
 /// subagents', are followed in their project, and a principal of another session, even one whose
 /// id starts with this one's, of a Codex thread, or of no agent, is not among them.
 #[tokio::test]
@@ -115,12 +116,19 @@ async fn the_principals_of_a_session_are_followed_and_no_others() -> Result<()> 
         let alpha = t.alpha.clone();
         async move { ops::add_principal(&alpha, name, Some(AgentRole::Implementer), None, None, None, Some(subject)).await }
     };
-    let bound = t.alpha.query::<PrincipalView>(fwd_core::subject::of_session_selection("s1")?)?;
-    assert_eq!(held(&bound).await?, ids(&[]));
+    let bound = t.alpha.query_placed_matching::<IdentityBindingView>(fwd_core::subject::of_session_selection("s1")?)?;
+    // The principals the bindings the query holds bind.
+    let bound_to = || async {
+        bound.wait_initialized().await?;
+        let principals: Result<BTreeSet<EntityId>, ankurah::property::PropertyError> =
+            bound.peek().iter().map(|(_, b)| Ok(EntityId::from(b.principal()?))).collect();
+        anyhow::Ok(principals?)
+    };
+    assert_eq!(bound_to().await?, ids(&[]));
     let main = add("lead-s1", "claude-code:s1/main").await?;
     let subagent = add("impl-s1", "claude-code:s1/a1").await?;
     add("impl-s10", "claude-code:s10/main").await?;
     add("impl-codex", "codex:s1/s1").await?;
-    assert_eq!(held(&bound).await?, ids(&[main, subagent]));
+    assert_eq!(bound_to().await?, ids(&[main, subagent]));
     Ok(())
 }

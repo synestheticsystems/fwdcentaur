@@ -366,7 +366,7 @@ fn head(scope: Option<EntityId>) -> AnyView {
         .into_any();
     };
     let Some(s) = store::scope(id) else { return ().into_any() };
-    let maker = s.created_by().ok().map(|p| store::handle_of(EntityId::from(p))).unwrap_or_default();
+    let maker = s.created_by().ok().map(store::handle_of).unwrap_or_default();
     let started =
         s.started().ok().flatten().map_or_else(|| "not started".to_string(), |t| format!("started {}", fmt::ago(t)));
     view! {

@@ -11,6 +11,10 @@
 //! (`crate::project_graph`) adds it to every list, every live query and every creation, while the
 //! ids one record holds of another are followed whichever project that other is in (D176).
 //!
+//! A field that names a principal (an assignee, an author, a recipient) holds its id as a plain
+//! `EntityId`, stored as a `Ref` is: a principal is the Commons' `identity.Principal`, which
+//! generates no bindings for the page, and a `Ref` to it in a model that does would need them.
+//!
 //! Enumerations (`string_enum_property!`) are stored as their snake_case names (`"in_progress"`), so predicates read
 //! `status = 'in_progress'` and unknown values survive as strings. Identity is the Ankurah
 //! `EntityId`; there are no short ids in v1 (docs/DECISIONS.md, "Identifiers"), with one
@@ -67,17 +71,12 @@ pub struct Project {
 // ---------------------------------------------------------------------------------------------
 // Principal
 
-#[cfg_attr(feature = "wasm", ::wasm_bindgen::prelude::wasm_bindgen)]
-#[cfg_attr(feature = "uniffi", derive(::uniffi::Enum))]
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, strum::Display, strum::EnumString,
-)]
-#[strum(serialize_all = "snake_case")]
-pub enum PrincipalKind {
-    Human,
-    Agent,
-}
-string_enum_property!(PrincipalKind);
+/// A person or an agent is the Commons' `identity.Principal` (D261): its kind, its handle and its
+/// display name. fwd keeps beside it, on the same entity, its [`Role`] in one project, and a person
+/// or an agent in two projects is two principals with one handle (D180 is not built yet). The
+/// sessions and accounts that act as a principal are `identity.IdentityBinding` records
+/// (`crate::subject`), and a retired principal carries the Commons' `Closed`.
+pub use ankurah_commons::identity::{Principal, PrincipalKind, PrincipalMut, PrincipalView};
 
 /// The role an agent selects for its own principal, from this fixed set, as it names itself (`fwd
 /// principal add --role`) or later (`fwd principal role`); a person holds none, and no role is ever
@@ -86,7 +85,7 @@ string_enum_property!(PrincipalKind);
 /// one lead", which docs/DECISIONS.md, D119, reads as one lead per session or worktree, not per
 /// project; docs/design/agents-and-inbox.md, "Roles"). Of the principals that are not retired, a
 /// scope has at most one triage agent and a project one that serves it whole (docs/DECISIONS.md,
-/// D122; [`Principal::serves`]), and a project has as many leads as sessions coordinate its work,
+/// D122; [`Role::serves`]), and a project has as many leads as sessions coordinate its work,
 /// one per Claude Code session where fwd can tell the sessions apart (`ops::add_principal`,
 /// `ops::set_role`). A principal whose stored role is a word outside the set, as `supervisor` is
 /// until `fwd admin migrate` carries it over (`ops::migrate_roles`), reads as having none.
@@ -102,7 +101,7 @@ pub enum AgentRole {
     /// while no triage agent answers first for the scope it works in (`guidance`).
     Lead,
     /// Answers first for the scopes it serves, or, endorsed, for the whole project
-    /// ([`Principal::serves`]): the questions asked of no one in particular about their work reach
+    /// ([`Role::serves`]): the questions asked of no one in particular about their work reach
     /// it, and so does everything that reached the supervisors until 2026-09-29, comments on tasks
     /// and on code, proposals, reviews and unblocked tasks nobody holds (`routing`, `Why::Triage`).
     /// Until 2026-09-30 a project had at most one, which answered first for all of it.
@@ -115,50 +114,31 @@ pub enum AgentRole {
 }
 string_enum_property!(AgentRole);
 
-/// A person or an agent identity. Agents are principals in their own right so attribution and
-/// inboxes work the same way for both. A principal is someone's part in one project, with its role
-/// and its inbox there, so a person or an agent in two projects is two principals with one handle.
+/// A principal's role in one project (D180: "What is per project is the role"): fwd's component
+/// on the principal's own entity, beside the Commons' `identity.Principal`, which names no project.
+/// It names the project, so a project's lists of principals are read by it, as a placed record's
+/// are by its `Placement` (`crate::project_graph`), and holds what fwd's routing and pickers read of
+/// a principal there: its role, whether it belongs, what it serves as a triage agent, who succeeded
+/// it and when it last wrote.
 #[derive(Model, Debug, Clone, Serialize, Deserialize)]
-pub struct Principal {
-    /// The project the record belongs to, set when it is made; only a move to another project
-    /// changes it.
+#[model(no_ffi)]
+pub struct Role {
+    /// The project the principal is someone's part in, set when it is made.
     pub project: Ref<Project>,
-    #[active_type(LWW)]
-    pub kind: PrincipalKind,
-    /// A name, not a key, which several principals may share: the GitHub login for people
-    /// ("dnorman"), the name an agent gave itself ("impl-alice", "triage-bot").
-    #[active_type(LWW)]
-    pub handle: String,
-    #[active_type(LWW)]
-    pub display_name: String,
-    /// "github:<numeric id>", captured at `fwd init`; a JWT subject later.
-    #[active_type(LWW)]
-    pub auth_subject: Option<String>,
     /// The role an agent selected; none for a person, and for an agent made before the roles were
     /// a fixed set that has not selected one, whose writes are refused until it does.
     #[active_type(LWW)]
     pub agent_role: Option<AgentRole>,
-    /// False once retired (`fwd principal retire`): the principal stays, so that what it did is
-    /// still attributed to it, and no picker offers it and no rule reaches it for its role.
-    pub active: bool,
-    /// Whether the principal belongs to the project it names, which is what the page's
-    /// pickers offer (docs/design/agents-and-inbox.md, "Who belongs to a project"): true for a
-    /// person from `fwd init`, for an agent from `fwd principal add`, by which it names itself, and
-    /// for any principal from its first command that writes work into the project; false for the
-    /// person a command that only reads brought into a project they never joined, and for an agent
-    /// `fwd admin migrate` found had only read, or only written messages, there. None on a
-    /// principal recorded before the field existed (2026-09-29), which belongs while it is active
-    /// until `fwd admin migrate` records whether it does (`ops::belongs`).
+    /// Whether the principal belongs to the project, which is what the page's pickers offer
+    /// (docs/design/agents-and-inbox.md, "Who belongs to a project"): true for a person from `fwd
+    /// init`, for an agent from `fwd principal add`, by which it names itself, and for any
+    /// principal from its first command that writes work into the project; false for the person a
+    /// command that only reads brought into a project they never joined, and for an agent `fwd
+    /// admin migrate` found had only read, or only written messages, there. None on a principal
+    /// recorded before the field existed (2026-09-29), which belongs while it is not retired until
+    /// `fwd admin migrate` records whether it does (`ops::belongs`).
     #[active_type(LWW)]
     pub member: Option<bool>,
-    /// The Claude Code agent whose commands act as this principal, `claude-code:<session>/<agent>`
-    /// (`fwd_core::subject`), so that what an agent writes is attributed to that agent
-    /// (docs/design/agents-and-inbox.md, "An agent's identity"): set as an agent names itself from
-    /// a command the fwd plugin stamped (`fwd principal add`), or takes over a principal from before
-    /// the plugin, once (`fwd principal bind`). None for a person, for an agent no agent is bound
-    /// to, and on a principal recorded before the field existed (2026-09-29).
-    #[active_type(LWW)]
-    pub subject: Option<String>,
     /// The principal that took over this one's job when an agent was relaunched to carry it on
     /// (`fwd principal succeed`; docs/DECISIONS.md, D114): this one was retired as it was set, and
     /// routing delivers to the successor whatever would reach it (`routing::Successors`). None for
@@ -167,29 +147,24 @@ pub struct Principal {
     /// What a triage agent answers first for (docs/DECISIONS.md, D122: "it should be effectively
     /// per scope"; `ops::Serving`), as JSON text: `{"scopes": ["<scope id>", ...]}`, the scopes it
     /// serves, and `"project_wide": true` where it is endorsed to serve the whole project, which
-    /// takes what no scope's own triage agent does. Text rather than a `Json` field because the
-    /// Model derive of the pinned Ankurah (0.9.3) gives every field a getter for the page's wasm
-    /// build, and an optional `Json` has none, while a field added after principals were written
-    /// must be optional, so that those read it as none. Kept on the principal, as a task's assignee
-    /// is on the task (docs/DECISIONS.md, D45), so that the one write that gives an agent triage
-    /// says what it serves, succession moves it with the role in one transaction, and the page
-    /// reads it from the principals it holds. None for every other principal, for a triage agent
-    /// that serves nothing, which receives nothing for its role, and on a principal recorded before
-    /// the field existed (2026-09-30), the triage agents of then among them, until their leads bind
-    /// or endorse them (`fwd principal scope`).
+    /// takes what no scope's own triage agent does. Kept on the role, as a task's assignee is on
+    /// the task (docs/DECISIONS.md, D45), so that the one write that gives an agent triage says what
+    /// it serves, succession moves it with the role in one transaction, and the page reads it from
+    /// the principals it holds. None for every other principal, for a triage agent that serves
+    /// nothing, which receives nothing for its role, and on a principal recorded before the field
+    /// existed (2026-09-30), until its lead binds or endorses it (`fwd principal scope`).
     #[active_type(LWW)]
     pub serves: Option<String>,
     /// When the principal last wrote to the graph, in milliseconds since the epoch by the writer's
     /// clock, so that the pickers and `fwd principal list` show an agent quiet for twelve hours as
     /// dormant, below the others (docs/DECISIONS.md, D123; `dormancy`). `dormancy::wrote` stamps
     /// it after each write: the CLI after every command that writes work or changes a principal,
-    /// and the page and the extension after each of their writes; an agent that names itself, anew
-    /// or as a successor, has it from the moment its principal is made (`ops::add_principal`,
-    /// `ops::add_successor`). Stored rather than read from what the principal wrote, because a
-    /// task's changes after its creation and a principal's changes record no author and no time
-    /// that a reader could find. None on a principal recorded before the field existed
-    /// (2026-09-30), which reads as dormant until its next write, and on a person no write has
-    /// stamped yet.
+    /// and the page after each of its writes; an agent that names itself, anew or as a successor,
+    /// has it from the moment its principal is made (`ops::add_principal`, `ops::add_successor`).
+    /// Stored rather than read from what the principal wrote, because a task's changes after its
+    /// creation and a principal's changes record no author and no time that a reader could find.
+    /// None on a principal recorded before the field existed (2026-09-30), which reads as dormant
+    /// until its next write, and on a person no write has stamped yet.
     #[active_type(LWW)]
     pub last_active: Option<i64>,
 }
@@ -245,7 +220,7 @@ pub struct Task {
     /// someone to take it (docs/DECISIONS.md, "Assignment is an optional field on the task, never
     /// an edge", 2026-09-28). Starting a task sets it to whoever started it. A task written before
     /// the field existed reads as unassigned.
-    pub assignee: Option<Ref<Principal>>,
+    pub assignee: Option<EntityId>,
     /// If true, Done requires `accept` by someone other than the submitter.
     pub needs_review: bool,
     /// Manual hold with reason; an availability overlay, not a status.
@@ -280,7 +255,7 @@ pub struct Task {
     /// no scope; nothing writes or reads it now but `fwd admin migrate`, which gives a task that
     /// records one and has no `worked_in` that scope (`ops::migrate_recorded_scopes`).
     pub context: Json,
-    pub created_by: Ref<Principal>,
+    pub created_by: EntityId,
     pub created: i64,
     pub updated: i64,
     #[active_type(LWW)]
@@ -386,7 +361,7 @@ pub struct Relation {
     pub to_id: EntityId,
     #[active_type(LWW)]
     pub status: RelationStatus,
-    pub created_by: Ref<Principal>,
+    pub created_by: EntityId,
     pub created: i64,
     /// What caused this assertion: `{"message_id": "..."}` or `{"actor_id": "..."}`.
     pub via: Json,
@@ -398,7 +373,7 @@ pub struct Relation {
     /// None on every other kind.
     #[active_type(LWW)]
     pub position: Option<String>,
-    pub closed_by: Option<Ref<Principal>>,
+    pub closed_by: Option<EntityId>,
     #[active_type(LWW)]
     pub closed: Option<i64>,
     #[active_type(LWW)]
@@ -547,7 +522,7 @@ pub struct CodeAnchor {
     /// Optional tree-sitter path, later.
     #[active_type(LWW)]
     pub symbol_path: Option<String>,
-    pub created_by: Ref<Principal>,
+    pub created_by: EntityId,
     pub created: i64,
 }
 
@@ -615,7 +590,7 @@ pub struct Message {
     /// The project the record belongs to, set when it is made; only a move to another project
     /// changes it.
     pub project: Ref<Project>,
-    pub author: Ref<Principal>,
+    pub author: EntityId,
     pub created: i64,
     /// Markdown, in a collaborative text type. Only the author, or an agent that succeeded the
     /// author, edits it (`rules::can_edit_message`), replacing it whole; the text it had before
@@ -636,7 +611,7 @@ pub struct Message {
     /// The root message of the thread, for replies.
     pub thread: Option<Ref<Message>>,
     pub context: Json,
-    pub resolved_by: Option<Ref<Principal>>,
+    pub resolved_by: Option<EntityId>,
     #[active_type(LWW)]
     pub resolved: Option<i64>,
     /// When its author, or an agent that succeeded its author, last edited its text (`edited_by`
@@ -649,7 +624,7 @@ pub struct Message {
     /// succeeded its author (task sVCUXcEg), so that a reader knows whose words the text holds now
     /// when they are not the author's. Absent on a message never edited, and on one last edited
     /// before the field existed (2026-09-30), when only its author edited a message.
-    pub edited_by: Option<Ref<Principal>>,
+    pub edited_by: Option<EntityId>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -733,7 +708,7 @@ pub struct Notification {
     /// The project the record belongs to, set when it is made; only a move to another project
     /// changes it.
     pub project: Ref<Project>,
-    pub recipient: Ref<Principal>,
+    pub recipient: EntityId,
     #[active_type(LWW)]
     pub notification_type: NotificationType,
     #[active_type(LWW)]
@@ -805,7 +780,7 @@ pub struct Scope {
     #[active_type(LWW)]
     pub ended: Option<i64>,
     /// Who made it: a record, which decides nothing about who works in it.
-    pub created_by: Ref<Principal>,
+    pub created_by: EntityId,
     pub created: i64,
 }
 
@@ -898,16 +873,16 @@ pub struct Decision {
     #[active_type(YrsString)]
     pub consequences: String,
     /// Who filed it.
-    pub author: Ref<Principal>,
+    pub author: EntityId,
     /// Who ruled: set when it is accepted or rejected, or at creation for a ruling recorded as
     /// given.
-    pub decided_by: Option<Ref<Principal>>,
+    pub decided_by: Option<EntityId>,
     pub created: i64,
     /// When it was ruled on.
     #[active_type(LWW)]
     pub decided: Option<i64>,
     /// Who repealed or superseded it, so routing leaves them out of the notifications it causes.
-    pub closed_by: Option<Ref<Principal>>,
+    pub closed_by: Option<EntityId>,
     #[active_type(LWW)]
     pub closed: Option<i64>,
     /// Why it was rejected, repealed or superseded: the note as it was typed, which a decision's

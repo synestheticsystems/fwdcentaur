@@ -6,7 +6,7 @@
 
 mod common;
 
-use ankurah::property::{Json, Ref};
+use ankurah::property::Json;
 use ankurah::EntityId;
 use anyhow::{anyhow, Result};
 use common::Scratch;
@@ -139,7 +139,7 @@ async fn written(client: &Client, name: &str, by: Option<EntityId>) -> Result<(E
                 context_after: "fn close() {}\n".into(),
                 pieces: Json::new(json!([])),
                 symbol_path: None,
-                created_by: Ref::new(by),
+                created_by: by,
                 created: 1_700_000_000_000,
             };
             Some(trx.create(&anchor).await?.id())
@@ -160,6 +160,7 @@ fn migrated(moved: Value) -> Value {
         "members": [],
         "visitors": [],
         "readers": [],
+        "principals_moved": [],
         "scopes_cleared": [],
         "placed_in_recorded_scope": [],
         "intentions_moved": [],

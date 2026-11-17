@@ -74,7 +74,12 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 mod catalog;
+mod lifecycle;
 mod placed;
+mod principals;
+
+pub use lifecycle::closed;
+pub use principals::principal_parts;
 
 /// A model whose records each name their project: the nine models of a project's work,
 /// [`FormerId`], and [`Placement`], which places a record built on the Commons' models.
@@ -116,7 +121,8 @@ macro_rules! in_project {
 }
 
 in_project!(
-    Principal => PrincipalView,
+    crate::conversion::principals::before_d261::Principal => crate::conversion::principals::before_d261::PrincipalView,
+    Role => RoleView,
     crate::conversion::repos::before_d261::Repo => crate::conversion::repos::before_d261::RepoView,
     Task => TaskView,
     Relation => RelationView,
@@ -320,8 +326,11 @@ impl ProjectGraph {
         ctx.fetch(equals("uuid", Value::String(uuid.to_string()))).await
     }
 
-    /// The graph of the project `uuid` names, for a client of the daemon that hosts it.
+    /// The graph of the project `uuid` names, for a client of the daemon that hosts it. It binds
+    /// what a principal is read through off its role (`principals`), which a client's lists read
+    /// by its role alone.
     pub async fn open(ctx: Context, uuid: Uuid) -> Result<ProjectGraph, ProjectGraphError> {
+        principals::bind_principal_parts(&ctx).await?;
         let found = Self::records_of(&ctx, uuid).await?;
         match found.as_slice() {
             [one] => Ok(Self::bound(ctx, one.id())),
@@ -598,8 +607,10 @@ impl ProjectGraph {
             let lines = if a.whole_file()?.unwrap_or(false) { None } else { Some((a.start_line()?, a.end_line()?)) };
             return at(a.project_id(), Referent::Anchor { path: a.path()?, lines });
         }
-        if let Some(p) = absent(self.ctx.get::<PrincipalView>(id).await)? {
-            return at(p.project_id(), Referent::Principal { handle: p.handle()? });
+        principals::bind_principal_parts(&self.ctx).await?;
+        if let Some(role) = absent(self.ctx.get::<RoleView>(id).await)? {
+            let (role, principal) = principal_parts(role)?;
+            return at(role.project_id(), Referent::Principal { handle: principal.handle()? });
         }
         if let Some(r) = absent(self.ctx.get::<RelationView>(id).await)? {
             return at(r.project_id(), Referent::Relation { kind: r.kind()? });
@@ -723,9 +734,12 @@ pub struct NodeGraph {
 }
 
 impl NodeGraph {
-    /// The records of every project in the node `ctx` is a context on.
-    pub fn new(ctx: Context) -> NodeGraph {
-        NodeGraph { ctx }
+    /// The records of every project in the node `ctx` is a context on, which binds what a
+    /// principal is read through off its role (`principals`), as a project's graph does as it
+    /// opens.
+    pub async fn new(ctx: Context) -> Result<NodeGraph, RetrievalError> {
+        principals::bind_principal_parts(&ctx).await?;
+        Ok(NodeGraph { ctx })
     }
 
     /// Every record of `V`'s model in the node, of whichever project.

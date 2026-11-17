@@ -871,7 +871,7 @@ pub fn answers(reader: EntityId) -> (Memo<HashSet<EntityId>>, RwSignal<bool>) {
         answered_by(
             reader,
             query.get().iter().filter_map(|m| {
-                let author = EntityId::from(m.author().ok()?);
+                let author = m.author().ok()?;
                 let reply_to = m.reply_to().ok().flatten().map(EntityId::from);
                 let thread = m.thread().ok().flatten().map(EntityId::from);
                 Some((author, reply_to, thread))

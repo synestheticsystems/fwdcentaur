@@ -87,7 +87,7 @@ impl MessageFacts {
     pub fn of(m: &MessageView) -> MessageFacts {
         let context: Value = m.context().map(Into::into).unwrap_or(Value::Null);
         MessageFacts {
-            author: m.author().ok().map(EntityId::from),
+            author: m.author().ok(),
             content: crate::ops::text(m.content()).unwrap_or_default(),
             to: context.get("to").and_then(Value::as_str).map(str::to_string),
             asks_project: context.get(crate::ops::ASKS_KEY).and_then(Value::as_str) == Some(crate::ops::ASKS_PROJECT),
@@ -907,7 +907,7 @@ impl Names for Fetched {
 /// fetched, and it is built again, until it asks for nothing new (a message's thread is a second
 /// step, its first message's author a third).
 pub async fn gather(graph: &ProjectGraph, n: &NotificationView, reader: Option<EntityId>) -> Result<Vec<Part>> {
-    let recipient: EntityId = n.recipient()?.into();
+    let recipient: EntityId = n.recipient()?;
     let reply = reply_id(n.id(), recipient, reader);
     let t = n.notification_type()?;
     let target: Value = n.target()?.into();
@@ -938,7 +938,7 @@ async fn fetch(graph: &ProjectGraph, f: &mut Fetched, want: Want, id: EntityId) 
     use crate::project_graph::{Followed::Held, Whose};
     match want {
         Want::Handle => {
-            if let Held { project, found, .. } = graph.follow::<PrincipalView>(id).await? {
+            if let Held { project, found: (_, found), .. } = graph.follow_principal(id).await? {
                 f.handles.insert(id, in_project(found.handle()?, &project));
             }
         }

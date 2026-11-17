@@ -42,7 +42,7 @@ fn AnchorDetail(id: EntityId) -> impl IntoView {
             return view! { <Empty nothing=Nothing::Highlight/> }.into_any();
         };
         let shown = anchor_row::Shown::of(&a);
-        let made_by = a.created_by().ok().map(|p| store::handle_of(EntityId::from(p))).unwrap_or_default();
+        let made_by = a.created_by().ok().map(store::handle_of).unwrap_or_default();
         let made = a.created().unwrap_or(0);
         view! {
             <header class="detail-head">

@@ -198,7 +198,7 @@ fn offered(slot: Slot) -> Vec<(&'static str, Vec<(EntityId, String)>)> {
             .iter()
             .take(MESSAGES_OFFERED)
             .map(|m| {
-                let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+                let author = m.author().ok().map(store::handle_of).unwrap_or_default();
                 let text = references::plain(&ops::text(m.content()).unwrap_or_default());
                 (m.id(), format!("{author} “{}”", fmt::truncate(&text, 60)))
             })

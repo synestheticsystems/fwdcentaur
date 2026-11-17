@@ -72,7 +72,7 @@ pub fn addressee(m: &MessageView) -> Option<String> {
 /// own only when it is another still (`store::handle_beside`).
 pub fn name(id: EntityId) -> Option<String> {
     let m = store::message(id)?;
-    let author = m.author().ok().map(|a| store::handle_beside(EntityId::from(a), &m)).unwrap_or_default();
+    let author = m.author().ok().map(|a| store::handle_beside(a, &m)).unwrap_or_default();
     let text = references::plain(&ops::text(m.content()).unwrap_or_default());
     Some(store::named(format!("{author} “{}”", fmt::truncate(&text, 60)), &m))
 }
@@ -90,7 +90,7 @@ pub fn list_item(id: EntityId) -> AnyView {
             let absent = format!("{}: {}", fmt::short(id), empty::absent(id, Some(Model::Message)));
             return view! { <span class="list-item muted">{absent}</span> }.into_any();
         };
-        let author = m.author().ok().map(|a| store::handle_of(EntityId::from(a))).unwrap_or_default();
+        let author = m.author().ok().map(store::handle_of).unwrap_or_default();
         let text = references::plain(&ops::text(m.content()).unwrap_or_default());
         let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
         let resolved = m.status().ok() == Some(MessageStatus::Resolved);
@@ -148,7 +148,7 @@ pub fn MessageRow(state: ThreadState, at: RowAt) -> impl IntoView {
     // Changes only when the message arrives or goes: each field below is read inside its own
     // closure, which redraws when the message changes.
     let message = Memo::new(move |_| store::message(id));
-    let author_id = move || message.get().and_then(|m| m.author().ok()).map(EntityId::from);
+    let author_id = move || message.get().and_then(|m| m.author().ok());
     let author = move || author_id().map(store::handle_of);
     let to = move || message.get().and_then(|m| addressee(&m));
     let meta = move || {
@@ -162,8 +162,8 @@ pub fn MessageRow(state: ThreadState, at: RowAt) -> impl IntoView {
             // Its text changed after it was sent, so a reader who saw it before knows to look again;
             // and when an agent that succeeded its author changed it, the row names that agent,
             // since the words are no longer all the author's.
-            let author = m.author().ok().map(EntityId::from);
-            let by = m.edited_by().ok().flatten().map(EntityId::from).filter(|by| Some(*by) != author);
+            let author = m.author().ok();
+            let by = m.edited_by().ok().flatten().filter(|by| Some(*by) != author);
             match (m.edited().ok().flatten(), by) {
                 (Some(edited), Some(by)) => {
                     format!("{said} · edited by {}, {}", store::handle_of(by), fmt::clock(edited))

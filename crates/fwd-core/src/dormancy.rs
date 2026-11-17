@@ -25,8 +25,9 @@ pub const DORMANT_AFTER_MS: i64 = 12 * 60 * 60 * 1000;
 /// agent that is not retired and whose last write is more than twelve hours old, or that has
 /// recorded no write at all, as every agent recorded before 2026-09-30 has not until its next one.
 /// A person is never dormant, and neither is a retired agent, which no picker offers.
-pub fn is_dormant(p: &PrincipalView, now: i64) -> bool {
-    quiet(p.kind().ok(), p.active().unwrap_or(false), p.last_active().ok().flatten(), now)
+pub fn is_dormant((role, principal): &(RoleView, PrincipalView), now: i64) -> bool {
+    let active = !crate::ops::retired(role).unwrap_or(true);
+    quiet(principal.kind().ok(), active, role.last_active().ok().flatten(), now)
 }
 
 /// [`is_dormant`], on the three fields it reads.
@@ -35,13 +36,13 @@ fn quiet(kind: Option<PrincipalKind>, active: bool, last_active: Option<i64>, no
 }
 
 /// Records that `principal` wrote to the graph just now, by this machine's clock, in its
-/// `last_active`, which is what keeps an agent at work out of the dormant list and brings a dormant
+/// role's `last_active`, which is what keeps an agent at work out of the dormant list and brings a dormant
 /// one back at its next write. Every client runs it after each of its writes succeeds but those
 /// that mark notifications read or dismissed: the CLI after every command that writes work into the
 /// project or changes a principal (not after marking notifications, nor after `fwd admin migrate`),
 /// and the page and the extension after each of their other writes.
 pub async fn wrote(graph: &ProjectGraph, principal: EntityId) -> Result<()> {
-    let p: PrincipalView = graph.get(principal).await?;
+    let p: RoleView = graph.get(principal).await?;
     let trx = graph.begin();
     trx.edit(&p)?.last_active()?.set(&Some(crate::now_ms()))?;
     trx.commit().await?;

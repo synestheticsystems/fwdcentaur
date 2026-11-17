@@ -33,7 +33,7 @@ pub use text::one_line;
 use crate::decision_log::date;
 use crate::intentions::{self, Parts};
 use crate::live_read::LiveRead;
-use crate::model::{PlacementView, PrincipalKind, PrincipalView, TaskStatus};
+use crate::model::{PlacementView, PrincipalKind, TaskStatus};
 use crate::naming;
 use crate::project_graph::{Followed, ProjectGraph, ProjectGraphError, ProjectRecord, Whose};
 use crate::reason;
@@ -229,6 +229,9 @@ pub struct Held {
     /// Those of the session's own thread first, then its subagents'
     /// ([`working_set::read_session`]).
     pub holdings: Vec<Holding>,
+    /// Every principal the session's agents are bound to, retired ones included, which the view
+    /// listens to: one brought back changes nothing else the view listens to.
+    pub bound: Vec<EntityId>,
     pub person: Person,
     /// Every project of the node.
     pub projects: Vec<ProjectRecord>,
@@ -265,13 +268,13 @@ fn extent() -> Extent {
 pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Result<Held> {
     let known = Known::read(graph).await?;
     let mut person = Person::resolve(&known, reader);
-    let holdings = working_set::read_session(graph, &known, session, &extent()).await?;
+    let (holdings, bound) = working_set::read_session(graph, &known, session, &extent()).await?;
     let waiting: Vec<EntityId> =
         holdings.iter().flat_map(Holding::asked_by).filter(|(r, to)| person.asked(r, to)).map(|(r, _)| r.id).collect();
     for question in waiting {
         let answers = graph.answers_to(question).await?;
         // An answer whose author cannot be read is not known to be the person's.
-        if answers.iter().any(|m| m.author().is_ok_and(|author| person.is(EntityId::from(author)))) {
+        if answers.iter().any(|m| m.author().is_ok_and(|author| person.is(author))) {
             person.answered.insert(question);
         }
     }
@@ -285,7 +288,7 @@ pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Re
     let texts = records.flat_map(|r| [Some(r.title.as_str()), r.text.as_deref()]).flatten();
     let cited = Cited::read(graph, here, texts).await?;
     let names =
-        known.projects.iter().flat_map(|(_, all)| all).filter_map(|p| Some((p.id(), p.handle().ok()?))).collect();
+        known.projects.iter().flat_map(|(_, all)| all).filter_map(|(r, p)| Some((r.id(), p.handle().ok()?))).collect();
     let projects = known.projects.into_iter().map(|(project, _)| project).collect();
     let (mut intentions, mut unreadable_intentions) = (Vec::new(), 0);
     let (mut assigned, mut quoted) = (Vec::new(), Vec::new());
@@ -313,6 +316,7 @@ pub async fn read(graph: &ProjectGraph, session: &str, reader: Reader<'_>) -> Re
     Ok(Held {
         session: session.to_string(),
         holdings,
+        bound,
         person,
         projects,
         names,
@@ -343,8 +347,8 @@ async fn intention_row(
     quoted.extend(&joined);
     let attribution = match intentions::whose_words_among(there, &joined).await? {
         Some((Some(speaker), recorded)) => {
-            let name = match there.follow::<PrincipalView>(speaker).await? {
-                Followed::Held { found, .. } => found.display_name()?,
+            let name = match there.follow_principal(speaker).await? {
+                Followed::Held { found: (_, found), .. } => found.display_name()?,
                 Followed::NotHeld => NOT_FOUND.into(),
             };
             Some(Byline { by: plain(&name, TITLE_LIMIT), at: date(recorded.created()?.unix_millis()) })
@@ -387,18 +391,19 @@ enum Asked<'a> {
 }
 
 impl Held {
-    /// The live queries whose changes can change the view: the projects, each project's principals
-    /// bound to the session, each principal's working set, the threads of the questions asked of
-    /// the person, the intentions assigned to the principals of the session's own thread, each of
-    /// those intentions with the relations that join its quotations to it, and each record they
-    /// join.
+    /// The live queries whose changes can change the view: the projects, each project's bindings
+    /// of the session's agents, each principal bound, retired or not, each working set, the
+    /// threads of the questions asked of the person, the intentions assigned to the principals of
+    /// the session's own thread, each of those intentions with the relations that join its
+    /// quotations to it, and each record they join.
     pub fn live_reads(&self) -> BTreeSet<LiveRead> {
         let mut reads = BTreeSet::from([LiveRead::Projects]);
-        let session = |project: &ProjectRecord| LiveRead::SessionPrincipals {
+        let session = |project: &ProjectRecord| LiveRead::SessionBindings {
             project: project.clone(),
             session: self.session.clone(),
         };
         reads.extend(self.projects.iter().map(session));
+        reads.extend(self.bound.iter().map(|id| LiveRead::Principal(*id)));
         for h in &self.holdings {
             reads.extend(h.live_reads());
             reads.extend(

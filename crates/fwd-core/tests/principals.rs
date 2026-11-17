@@ -10,6 +10,7 @@
 use ankurah::{policy::DEFAULT_CONTEXT, Context, EntityId};
 use ankurah_storage_sqlite::SqliteStorageEngine;
 use anyhow::Result;
+use fwd_core::conversion;
 use fwd_core::durable;
 use fwd_core::model::*;
 use fwd_core::naming;
@@ -32,14 +33,19 @@ async fn project() -> Result<ProjectGraph> {
     Ok(older_project().await?.1)
 }
 
-async fn principal(graph: &ProjectGraph, id: EntityId) -> Result<PrincipalView> {
-    Ok(graph.get::<PrincipalView>(id).await?)
+/// The role of the principal `id`, what it holds in the project.
+async fn role(graph: &ProjectGraph, id: EntityId) -> Result<RoleView> {
+    Ok(graph.get::<RoleView>(id).await?)
 }
 
 /// The principals that hold lead and are not retired, in id order.
 async fn leads(graph: &ProjectGraph) -> Result<Vec<EntityId>> {
-    let mut found: Vec<EntityId> =
-        ops::principals(graph).await?.iter().filter(|p| ops::holds(p, AgentRole::Lead)).map(|p| p.id()).collect();
+    let mut found: Vec<EntityId> = ops::principals(graph)
+        .await?
+        .iter()
+        .filter(|(role, _)| ops::holds(role, AgentRole::Lead))
+        .map(|(role, _)| role.id())
+        .collect();
     found.sort();
     Ok(found)
 }
@@ -62,7 +68,7 @@ fn told(planned: &[routing::Planned]) -> Vec<(EntityId, NotificationType, String
 
 /// The principal as a build before 2026-09-29 wrote it: its role a word, `supervisor` among them,
 /// which this build's `AgentRole` does not read, and nothing said about belonging; and the project
-/// it names. It is the same collection as `fwd_core::model::Principal`, so what it writes is what
+/// it names. It is the same collection as fwd's own model of a principal had, so what it writes is what
 /// an older graph holds.
 mod before {
     use ankurah::{Context, Model, Ref};
@@ -150,9 +156,9 @@ async fn an_agent_selects_its_role_and_a_scope_has_one_triage_agent() -> Result<
     let bob =
         ops::add_principal(&graph, "@impl-bob", Some(AgentRole::Implementer), None, Some("Bob's agent"), None, None)
             .await?;
-    let b = principal(&graph, bob).await?;
+    let (b, who) = graph.principal(bob).await?;
     assert_eq!(
-        (b.handle()?, b.display_name()?, ops::role_of(&b), ops::belongs(&b)),
+        (who.handle()?, who.display_name()?, ops::role_of(&b), ops::belongs(&b)),
         ("impl-bob".to_string(), "Bob's agent".to_string(), Some(AgentRole::Implementer), true),
         "an agent added belongs, with the role it selected"
     );
@@ -280,17 +286,17 @@ async fn an_agent_selects_its_role_and_a_scope_has_one_triage_agent() -> Result<
         None,
     )
     .await?;
-    assert_eq!(ops::Serving::of(&principal(&graph, carol).await?), ops::Serving::default());
+    assert_eq!(ops::Serving::of(&role(&graph, carol).await?), ops::Serving::default());
     // Reviewers and implementers are as many as the work needs.
     assert_eq!(ops::set_role(&graph, "impl-alice", AgentRole::Reviewer, None).await?, alice);
-    assert_eq!(ops::role_of(&principal(&graph, alice).await?), Some(AgentRole::Reviewer));
+    assert_eq!(ops::role_of(&role(&graph, alice).await?), Some(AgentRole::Reviewer));
     ops::add_principal(&graph, "reviewer-2", Some(AgentRole::Reviewer), None, None, None, None).await?;
     // Selecting the role one already holds changes nothing; a third lead, by `role`, is another
     // lead; and a retired lead no longer counts.
     assert_eq!(ops::set_role(&graph, "claude", AgentRole::Lead, None).await?, lead);
     assert_eq!(ops::set_role(&graph, "impl-bob", AgentRole::Lead, None).await?, bob);
     assert_eq!(leads(&graph).await?, sorted([lead, lead_2, bob]));
-    ops::retire_principal(&graph, "claude").await?;
+    ops::retire_principal(&graph, "claude", lead).await?;
     assert_eq!(leads(&graph).await?, sorted([lead_2, bob]));
 
     // A name no principal has is refused, naming the command that adds it.
@@ -310,15 +316,13 @@ async fn an_agent_selects_its_role_and_a_scope_has_one_triage_agent() -> Result<
     assert!(person.contains("is a person, and a role is an agent's"), "{person}");
     // An agent with no role, as one made before the roles were fixed, lacks one until it selects it.
     let old = ops::ensure_principal(&graph, "impl-old", "impl-old", PrincipalKind::Agent, None).await?;
-    assert!(ops::lacks_role(&principal(&graph, old).await?)?);
+    assert!(ops::lacks_role(&graph.principal(old).await?)?);
     assert_eq!(ops::select_role_command("impl-old"), "`fwd principal role impl-old lead|triage|implementer|reviewer`");
     let bare = ops::add_principal(&graph, "impl-old", None, None, None, Some(old), None).await.unwrap_err().to_string();
     assert!(bare.contains("holds no role, and every agent selects one"), "{bare}");
     ops::set_role(&graph, "impl-old", AgentRole::Implementer, None).await?;
-    assert!(!ops::lacks_role(&principal(&graph, old).await?)?);
-    assert!(!ops::lacks_role(
-        &principal(&graph, naming::principal_named(&graph, "dnorman", None).await?.unwrap().id()).await?
-    )?);
+    assert!(!ops::lacks_role(&graph.principal(old).await?)?);
+    assert!(!ops::lacks_role(&naming::principal_named(&graph, "dnorman", None).await?.unwrap())?);
     Ok(())
 }
 
@@ -345,7 +349,7 @@ async fn a_rule_that_reached_the_supervisors_reaches_one_triage_agent() -> Resul
     // first.
     let first = ops::add_principal(&graph, "a-triage", Some(AgentRole::Implementer), None, None, None, None).await?;
     let trx = graph.begin();
-    let m = trx.edit(&principal(&graph, first).await?)?;
+    let m = trx.edit(&role(&graph, first).await?)?;
     m.agent_role()?.set(&Some(AgentRole::Triage))?;
     m.serves()?.set(&Some(serde_json::json!({"project_wide": true}).to_string()))?;
     trx.commit().await?;
@@ -389,39 +393,45 @@ async fn a_rule_that_reached_the_supervisors_reaches_one_triage_agent() -> Resul
 
 /// A principal a read brings into the graph does not belong; a write makes it belong; retiring
 /// hides it and keeps it, its later writes leave it retired, and adding it brings it back. The
-/// project's people are those of its humans who belong.
+/// project's people are those of its humans who belong. None of it, nor a migration with nothing to
+/// move, defines fwd's model of a principal from before the Commons'.
 #[tokio::test]
 async fn a_principal_belongs_from_its_first_write_or_its_addition_until_it_is_retired() -> Result<()> {
     let graph = project().await?;
     let reader = ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?;
-    let p = principal(&graph, reader).await?;
+    let p = role(&graph, reader).await?;
     assert_eq!((p.member()?, ops::belongs(&p)), (Some(false), false), "a read's principal does not belong");
     assert!(ops::people(&graph).await?.is_empty(), "nor is it one of the project's people");
     assert!(ops::join(&graph, reader).await?, "its first write makes it belong");
-    assert!(ops::belongs(&principal(&graph, reader).await?));
+    assert!(ops::belongs(&role(&graph, reader).await?));
     assert!(!ops::join(&graph, reader).await?, "and its next changes nothing");
     assert_eq!(ops::people(&graph).await?, vec![reader]);
 
     let agent = ops::add_principal(&graph, "impl-alice", Some(AgentRole::Implementer), None, None, None, None).await?;
     let task = ops::create_task(&graph, agent, CreateTask { title: "Mine".into(), ..Default::default() }).await?;
-    assert_eq!(ops::retire_principal(&graph, "@impl-alice").await?, agent);
-    let retired = principal(&graph, agent).await?;
-    assert_eq!((retired.active()?, ops::belongs(&retired)), (false, false), "retired, it belongs no more");
+    assert_eq!(ops::retire_principal(&graph, "@impl-alice", agent).await?, agent);
+    let retired = role(&graph, agent).await?;
+    assert_eq!((ops::retired(&retired)?, ops::belongs(&retired)), (true, false), "retired, it belongs no more");
     let made: TaskView = graph.get(task).await?;
-    assert_eq!(EntityId::from(made.created_by()?), agent, "and what it did is still attributed to it");
+    assert_eq!(made.created_by()?, agent, "and what it did is still attributed to it");
     assert_eq!(
-        naming::principal_named(&graph, "impl-alice", None).await?.map(|p| p.id()),
+        naming::principal_named(&graph, "impl-alice", None).await?.map(|(role, _)| role.id()),
         Some(agent),
         "and it can be named"
     );
     assert!(!ops::join(&graph, agent).await?, "a retired principal's later writes leave it retired");
-    assert!(!ops::belongs(&principal(&graph, agent).await?));
+    assert!(!ops::belongs(&role(&graph, agent).await?));
     assert_eq!(
         ops::add_principal(&graph, "impl-alice", None, None, None, Some(agent), None).await?,
         agent,
         "principal add brings it back"
     );
-    assert!(ops::belongs(&principal(&graph, agent).await?));
+    assert!(ops::belongs(&role(&graph, agent).await?));
+    // A project that never held fwd's model of a principal from before the Commons' has nothing
+    // to carry over or move, and making and migrating principals does not define that model.
+    assert_eq!(ops::migrate_roles(&graph).await?, RoleMigration::default());
+    assert!(conversion::principals::convert(&graph).await?.is_empty());
+    assert!(graph.models_labelled("principal").await?.is_empty(), "no model of before the move is defined");
     Ok(())
 }
 
@@ -441,29 +451,28 @@ async fn a_graph_from_before_the_fixed_roles_is_carried_over_once() -> Result<()
     let worker = before::made(&ctx, graph.project(), "impl-worker", Some("implementer")).await?;
     let visitor = before::made(&ctx, graph.project(), "impl-visitor", Some("implementer")).await?;
     let reader = before::made(&ctx, graph.project(), "claude", Some("implementer")).await?;
-    // Before the migration: the old role reads as none, and every principal belongs while active.
-    let old = principal(&graph, supervisor).await?;
-    assert!(old.agent_role().is_err(), "this build does not read the role `supervisor`");
-    assert_eq!(ops::json_of_principal(&old)?["agent_role"], serde_json::Value::Null, "and prints it as none");
-    assert!(ops::lacks_role(&old)?, "so its writes are refused until the migration");
-    assert!(ops::belongs(&old) && ops::belongs(&principal(&graph, reader).await?));
+    // Before the migration this build reads none of them: each moves onto the Commons with it.
+    assert!(ops::principals(&graph).await?.is_empty());
     assert_eq!(front(&graph, None).await?, None);
 
     // What each did, in this order: the old supervisor proposed a task; Ankurah's own triage agent
-    // owns a scope, written later; the worker holds a task; the visitor wrote two messages, a
-    // question to the role among them.
+    // owns a scope, written later; the worker holds a task, assigned as the older build wrote it;
+    // the visitor wrote two messages, a question to the role among them.
     let proposed =
         ops::create_task(&graph, supervisor, CreateTask { title: "Groom".into(), propose: true, ..Default::default() })
             .await?;
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     ops::create_scope(&graph, replication, CreateScope { title: "Replication".into(), ..Default::default() }).await?;
     let held = ops::create_task(&graph, daniel, CreateTask { title: "Replicate".into(), ..Default::default() }).await?;
-    ops::assign(&graph, daniel, held, Some(worker)).await?;
+    let trx = graph.begin();
+    trx.edit(&graph.get::<TaskView>(held).await?)?.assignee()?.set(&Some(worker))?;
+    trx.commit().await?;
     let to_role = MessageContext { to: Some("supervisor".into()), task_id: Some(held), ..Default::default() };
     let question = ops::post_message(&graph, visitor, "who takes this?", Priority::Now, to_role).await?;
     ops::post_message(&graph, visitor, "and this?", Priority::Next, MessageContext::default()).await?;
 
     let mut done = ops::migrate_roles(&graph).await?;
+    conversion::principals::convert(&graph).await?;
     done.members.sort();
     // The old supervisor did work here, so it belongs until a person retires it, as the migration
     // names it for.
@@ -480,21 +489,17 @@ async fn a_graph_from_before_the_fixed_roles_is_carried_over_once() -> Result<()
             readers: vec![reader],
         }
     );
-    let t = principal(&graph, replication).await?;
+    let (t, who) = graph.principal(replication).await?;
     assert_eq!(
-        (t.handle()?, ops::role_of(&t), ops::belongs(&t)),
+        (who.handle()?, ops::role_of(&t), ops::belongs(&t)),
         ("supervisor-replication".to_string(), Some(AgentRole::Triage), true),
         "the same principal, under its own handle"
     );
     assert!(ops::serves_nothing_yet(&t), "serving nothing");
     assert_eq!(front(&graph, None).await?, None, "so it answers first for nothing");
-    let cleared = principal(&graph, supervisor).await?;
-    assert_eq!(
-        (cleared.handle()?, ops::role_of(&cleared)),
-        ("supervisor".to_string(), None),
-        "no role, for retirement"
-    );
-    assert_eq!(ops::role_of(&principal(&graph, worker).await?), Some(AgentRole::Implementer), "implementer stays");
+    let (cleared, who) = graph.principal(supervisor).await?;
+    assert_eq!((who.handle()?, ops::role_of(&cleared)), ("supervisor".to_string(), None), "no role, for retirement");
+    assert_eq!(ops::role_of(&role(&graph, worker).await?), Some(AgentRole::Implementer), "implementer stays");
     let asked: MessageView = graph.get(question).await?;
     assert_eq!(
         serde_json::Value::from(asked.context()?),
@@ -504,7 +509,7 @@ async fn a_graph_from_before_the_fixed_roles_is_carried_over_once() -> Result<()
     for (who, belongs) in
         [(daniel, true), (supervisor, true), (replication, true), (worker, true), (visitor, false), (reader, false)]
     {
-        assert_eq!(ops::belongs(&principal(&graph, who).await?), belongs, "{who}");
+        assert_eq!(ops::belongs(&role(&graph, who).await?), belongs, "{who}");
     }
     // The rules reach the principal given triage once its lead endorses it, and not before.
     let comment = ops::post_message(
@@ -523,6 +528,7 @@ async fn a_graph_from_before_the_fixed_roles_is_carried_over_once() -> Result<()
 
     let again = ops::migrate_roles(&graph).await?;
     assert_eq!(again, RoleMigration::default(), "nothing twice");
+    assert_eq!(conversion::principals::convert(&graph).await?, vec![], "and no principal moves twice");
     Ok(())
 }
 
@@ -533,24 +539,18 @@ async fn the_migration_gives_triage_only_where_no_agent_holds_it_and_makes_no_pr
     let (ctx, graph) = older_project().await?;
     before::made(&ctx, graph.project(), "dnorman", None).await?;
     let old = before::made(&ctx, graph.project(), "supervisor", Some("supervisor")).await?;
-    let triage = ops::add_principal(
-        &graph,
-        "triage-bot",
-        Some(AgentRole::Triage),
-        Some(ops::Serves::ProjectWide),
-        None,
-        None,
-        None,
-    )
-    .await?;
+    let triage = before::made(&ctx, graph.project(), "triage-bot", Some("triage")).await?;
     let done = ops::migrate_roles(&graph).await?;
     assert_eq!((done.triage, done.roles_cleared), (None, vec![old]));
-    assert_eq!(front(&graph, None).await?, Some(triage));
+    conversion::principals::convert(&graph).await?;
+    assert_eq!(ops::role_of(&role(&graph, triage).await?), Some(AgentRole::Triage));
+    assert_eq!(ops::role_of(&role(&graph, old).await?), None);
 
     let (ctx, graph) = older_project().await?;
     before::made(&ctx, graph.project(), "dnorman", None).await?;
     let done = ops::migrate_roles(&graph).await?;
     assert_eq!(done.triage, None, "no principal held the role, and none is made");
+    conversion::principals::convert(&graph).await?;
     assert_eq!(ops::principals(&graph).await?.len(), 1);
     Ok(())
 }
@@ -565,7 +565,7 @@ async fn the_migration_gives_triage_only_where_no_agent_holds_it_and_makes_no_pr
 async fn a_retired_triage_agent_comes_back_to_a_scope_no_other_serves_and_a_lead_beside_the_others() -> Result<()> {
     let graph = project().await?;
     let claude = ops::add_principal(&graph, "claude", Some(AgentRole::Lead), None, None, None, None).await?;
-    ops::retire_principal(&graph, "claude").await?;
+    ops::retire_principal(&graph, "claude", claude).await?;
     let lead_x = ops::add_principal(&graph, "lead-x", Some(AgentRole::Lead), None, None, None, None).await?;
     ops::add_principal(&graph, "claude", None, None, None, Some(claude), None).await?;
     assert_eq!(leads(&graph).await?, sorted([claude, lead_x]), "two leads, the one brought back among them");
@@ -574,7 +574,7 @@ async fn a_retired_triage_agent_comes_back_to_a_scope_no_other_serves_and_a_lead
     let serves_retry = Some(ops::Serves::Scope(retry));
     let triage =
         ops::add_principal(&graph, "triage-1", Some(AgentRole::Triage), serves_retry, None, None, None).await?;
-    ops::retire_principal(&graph, "triage-1").await?;
+    ops::retire_principal(&graph, "triage-1", triage).await?;
     assert_eq!(front(&graph, Some(retry)).await?, None, "retired, it answers for its scope no more");
     let triage_x =
         ops::add_principal(&graph, "triage-x", Some(AgentRole::Triage), serves_retry, None, None, None).await?;
@@ -587,7 +587,7 @@ async fn a_retired_triage_agent_comes_back_to_a_scope_no_other_serves_and_a_lead
             "the scope \"Retry work\" ({r}) has a triage agent already, @triage-x, and a scope has one: free the scope first (`fwd principal scope remove {r} --for triage-x`), or retire @triage-x (`fwd principal retire triage-x`), for `@triage-1` to serve it"
         )
     );
-    assert!(!principal(&graph, triage).await?.active()?, "it stays retired");
+    assert!(ops::retired(&role(&graph, triage).await?)?, "it stays retired");
     assert_eq!(
         front(&graph, Some(retry)).await?,
         Some(triage_x),
@@ -595,11 +595,11 @@ async fn a_retired_triage_agent_comes_back_to_a_scope_no_other_serves_and_a_lead
     );
     // With another role it comes back, serving nothing.
     ops::add_principal(&graph, "triage-1", Some(AgentRole::Reviewer), None, None, Some(triage), None).await?;
-    let p = principal(&graph, triage).await?;
-    assert!(p.active()? && ops::role_of(&p) == Some(AgentRole::Reviewer));
+    let p = role(&graph, triage).await?;
+    assert!(!ops::retired(&p)? && ops::role_of(&p) == Some(AgentRole::Reviewer));
     assert_eq!(ops::Serving::of(&p), ops::Serving::default(), "another role frees what it served");
     // A retired triage agent whose scope no one serves since comes back serving it.
-    ops::retire_principal(&graph, "triage-x").await?;
+    ops::retire_principal(&graph, "triage-x", triage_x).await?;
     assert_eq!(front(&graph, Some(retry)).await?, None);
     ops::add_principal(&graph, "triage-x", None, None, None, Some(triage_x), None).await?;
     assert_eq!(front(&graph, Some(retry)).await?, Some(triage_x));
@@ -629,11 +629,11 @@ async fn a_lead_binds_and_frees_its_triage_agents_scopes_and_endorses_one_for_th
     .await?;
     // It takes a second scope, and answers first for both.
     ops::serve(&graph, "triage-a", ops::Serves::Scope(storage)).await?;
-    assert_eq!(ops::Serving::of(&principal(&graph, bot).await?).scopes, vec![replication, storage]);
+    assert_eq!(ops::Serving::of(&role(&graph, bot).await?).scopes, vec![replication, storage]);
     assert_eq!((front(&graph, Some(replication)).await?, front(&graph, Some(storage)).await?), (Some(bot), Some(bot)));
     // Taking one it serves already changes nothing.
     ops::serve(&graph, "triage-a", ops::Serves::Scope(storage)).await?;
-    assert_eq!(ops::Serving::of(&principal(&graph, bot).await?).scopes, vec![replication, storage]);
+    assert_eq!(ops::Serving::of(&role(&graph, bot).await?).scopes, vec![replication, storage]);
     // Another triage agent is refused a scope it serves, naming it.
     let other = ops::add_principal(
         &graph,
@@ -662,7 +662,7 @@ async fn a_lead_binds_and_frees_its_triage_agents_scopes_and_endorses_one_for_th
     // The endorsement is withdrawn, and what concerns no scope has no front line then.
     ops::stop_serving(&graph, "triage-b", ops::Serves::ProjectWide).await?;
     assert_eq!(front(&graph, None).await?, None);
-    assert!(ops::serves_nothing_yet(&principal(&graph, other).await?), "left serving nothing, it holds triage still");
+    assert!(ops::serves_nothing_yet(&role(&graph, other).await?), "left serving nothing, it holds triage still");
     let withdrawn = ops::stop_serving(&graph, "triage-b", ops::Serves::ProjectWide).await.unwrap_err().to_string();
     assert_eq!(withdrawn, "`@triage-b` does not serve the whole project: it serves nothing");
     // A triage agent serving nothing is endorsed, and a second endorsement is refused.
@@ -708,16 +708,16 @@ async fn the_scope_a_checkout_finds_is_taken_only_by_a_triage_agent_that_would_s
     // Named again from a checkout of another scope, it keeps what it serves.
     ops::add_principal(&graph, "triage-a", None, Some(ops::Serves::Found(storage)), Some("Triage A"), Some(bot), None)
         .await?;
-    assert_eq!(ops::Serving::of(&principal(&graph, bot).await?).scopes, vec![replication]);
+    assert_eq!(ops::Serving::of(&role(&graph, bot).await?).scopes, vec![replication]);
     // A scope named on the command is taken.
     ops::add_principal(&graph, "triage-a", None, Some(ops::Serves::Scope(storage)), None, Some(bot), None).await?;
-    assert_eq!(ops::Serving::of(&principal(&graph, bot).await?).scopes, vec![replication, storage]);
+    assert_eq!(ops::Serving::of(&role(&graph, bot).await?).scopes, vec![replication, storage]);
     // A triage agent serving nothing, as the migration leaves one, takes the scope its checkout
     // finds as it names itself again, and not without one.
     let old = ops::ensure_principal(&graph, "triage-old", "triage-old", PrincipalKind::Agent, Some(AgentRole::Triage))
         .await?;
     ops::add_principal(&graph, "triage-old", None, None, None, Some(old), None).await?;
-    assert!(ops::serves_nothing_yet(&principal(&graph, old).await?), "no scope, and it stays serving nothing");
+    assert!(ops::serves_nothing_yet(&role(&graph, old).await?), "no scope, and it stays serving nothing");
     let docs = scope(&graph, lead, "Docs").await?;
     ops::add_principal(&graph, "triage-old", None, Some(ops::Serves::Found(docs)), None, Some(old), None).await?;
     assert_eq!(front(&graph, Some(docs)).await?, Some(old));

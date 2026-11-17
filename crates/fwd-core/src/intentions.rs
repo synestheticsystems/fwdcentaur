@@ -13,7 +13,7 @@ mod quotation;
 pub use conversion::{before_d229, convert, Converted};
 pub use quotation::{joined_to, quotation_of, speaker, whose_words, whose_words_among, Quoted};
 
-use crate::model::{PlacementView, PrincipalKind, PrincipalView, RelationKind, RelationStatus, RelationView};
+use crate::model::{PlacementView, PrincipalKind, RelationKind, RelationStatus, RelationView};
 use crate::now_ms;
 use crate::ops;
 use crate::project_graph::{Followed, ProjectGraph, ProjectTransaction};
@@ -23,7 +23,6 @@ use ankurah::model::{ComponentViews, Mutable};
 use ankurah::property::{PropertyError, Ref};
 use ankurah::EntityId;
 use ankurah_commons::cognition::{Intention, IntentionView};
-use ankurah_commons::identity::Principal as CommonsPrincipal;
 use ankurah_commons::property::Timestamp;
 use ankurah_commons::records::{Closed, ClosedView, Created, CreatedView, Edited, EditedView};
 use anyhow::{bail, Result};
@@ -62,13 +61,6 @@ pub fn status(outcome: Option<Outcome>) -> &'static str {
     outcome.map_or("open", Into::into)
 }
 
-/// The principal `id` as a Commons model refers to one (`Created.by`, `Edited.by`, `Closed.by`,
-/// `Attribution.speaker`): the id names a fwd principal (`model::Principal`), which does not carry
-/// the Commons' principal component yet.
-pub(crate) fn principal_ref(id: EntityId) -> Ref<CommonsPrincipal> {
-    Ref::new(id)
-}
-
 /// `millis` since the Unix epoch, as the Commons' models hold a moment.
 fn at(millis: i64) -> Timestamp {
     Timestamp::from_unix_millis(millis)
@@ -81,8 +73,8 @@ async fn followed_principal(
     said_by: Option<EntityId>,
 ) -> Result<Option<(EntityId, PrincipalKind)>> {
     let Some(id) = said_by else { return Ok(None) };
-    match graph.follow::<PrincipalView>(id).await? {
-        Followed::Held { record, found, .. } => Ok(Some((record, found.kind()?))),
+    match graph.follow_principal(id).await? {
+        Followed::Held { record, found: (_, found), .. } => Ok(Some((record, found.kind()?))),
         Followed::NotHeld => bail!("--said-by names no principal the node holds: {}", id.to_base64()),
     }
 }
@@ -106,7 +98,7 @@ pub async fn create(
     let trx = graph.begin();
     let made = trx.create_placed(&Intention { title, description: words.clone() }).await?;
     let record = Mutable::entity(&*made);
-    trx.add(record, &Created { created: at(now), by: principal_ref(by) }).await?;
+    trx.add(record, &Created { created: at(now), by: Ref::new(by) }).await?;
     // Read through the transaction, the views follow the record once it is committed.
     let views = <(PlacementView, Parts)>::views_of(record.read())?;
     quotation::quote_given(&trx, record.id(), words, speaker, by, now).await?;
@@ -175,8 +167,7 @@ pub async fn reword(
 
 /// Closes the intention as fulfilled or withdrawn, as `by` closes it in its speaker's words, as
 /// [`reword`] takes them, with why: a withdrawal says why, as a task's cancellation does. One
-/// reopened carries its `Closed` still, every field cleared, as the Commons reopen a record, so
-/// closing it again fills that in.
+/// reopened is closed again as any record is (`ProjectTransaction::close`).
 pub async fn close(
     graph: &ProjectGraph,
     by: EntityId,
@@ -188,27 +179,14 @@ pub async fn close(
     if ending == Outcome::Withdrawn && reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
         bail!("an intention is withdrawn with a reason: give --reason");
     }
-    let carried = graph.component_of::<ClosedView>(placement).await?;
-    if let Some(ended) = outcome(carried.as_ref())? {
+    if let Some(ended) = outcome(graph.component_of::<ClosedView>(placement).await?.as_ref())? {
         bail!("the intention is {ended} already");
     }
     in_speakers_words(graph, placement, by, said_by).await?;
     let trx = graph.begin();
     let closed =
-        Closed { closed: Some(at(now_ms())), by: Some(principal_ref(by)), outcome: Some(ending.to_string()), reason };
-    match carried {
-        Some(_) => {
-            let m = trx.edit_placed::<Closed>(placement)?;
-            m.closed()?.set(&closed.closed)?;
-            m.by()?.set(&closed.by)?;
-            m.outcome()?.set(&closed.outcome)?;
-            m.reason()?.set(&closed.reason)?;
-        }
-        None => {
-            let m = trx.edit_placed::<Intention>(placement)?;
-            trx.add(Mutable::entity(&*m), &closed).await?;
-        }
-    }
+        Closed { closed: Some(at(now_ms())), by: Some(Ref::new(by)), outcome: Some(ending.to_string()), reason };
+    trx.close(placement, &closed).await?;
     Ok(trx.commit().await?)
 }
 
@@ -222,7 +200,7 @@ async fn record_edit(
     by: EntityId,
     now: i64,
 ) -> Result<()> {
-    let edit = Edited { edited: at(now), by: Some(principal_ref(by)) };
+    let edit = Edited { edited: at(now), by: Some(Ref::new(by)) };
     match graph.component_of::<EditedView>(placement).await? {
         Some(_) => {
             let m = trx.edit_placed::<Edited>(placement)?;
@@ -276,7 +254,7 @@ pub async fn unassign(
     (placement, _): &(PlacementView, Parts),
     to: EntityId,
 ) -> Result<usize> {
-    if to != by && graph.get::<PrincipalView>(by).await?.kind()? != PrincipalKind::Human {
+    if to != by && graph.principal(by).await?.1.kind()? != PrincipalKind::Human {
         bail!(
             "refused: an agent takes an intention off itself alone, since whether one stays assigned to another principal is for that principal or a person to decide; leave out --to"
         );
@@ -289,7 +267,7 @@ pub async fn unassign(
     for r in &holding {
         let m = trx.edit(r)?;
         m.status()?.set(&RelationStatus::Retracted)?;
-        m.closed_by()?.set(&Some(Ref::new(by)))?;
+        m.closed_by()?.set(&Some(by))?;
         m.closed()?.set(&Some(now_ms()))?;
     }
     trx.commit().await?;
