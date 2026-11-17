@@ -87,7 +87,7 @@ pub fn resolve<'a>(
         of_kind().filter(|(role, _)| role.id().to_base64().starts_with(name)).collect();
     for (_, record) in former.starting(name) {
         if let Some(p) = of_kind().find(|(role, _)| role.id() == record) {
-            if !started.iter().any(|(q, _)| q.id() == record) {
+            if !started.iter().any(|(role, _)| role.id() == record) {
                 started.push(p);
             }
         }
@@ -182,7 +182,8 @@ pub fn refusal(
 /// One principal as a refusal lists it: `Ab3dEf12: implementer, retired, in Replication and
 /// Anchoring`.
 fn candidate(p: &(RoleView, PrincipalView), chars: usize, scopes: &[String]) -> String {
-    let id: String = p.0.id().to_base64().chars().take(chars).collect();
+    let (role, _) = p;
+    let id: String = role.id().to_base64().chars().take(chars).collect();
     format!("{id}: {}{}, {}", what(p), standing(p), in_scopes(scopes))
 }
 
@@ -202,10 +203,11 @@ fn standing((role, _): &(RoleView, PrincipalView)) -> &'static str {
 /// it is, whether it is retired or does not belong here, and the scopes its work is in:
 /// `Ab3dEf12 (implementer, in Replication)`.
 pub async fn described(graph: &ProjectGraph, p: &(RoleView, PrincipalView)) -> Result<String> {
-    let loaded = Loaded::of(graph, &[p.0.id()]).await?;
+    let (role, _) = p;
+    let loaded = Loaded::of(graph, &[role.id()]).await?;
     let work = loaded.work();
-    let scopes = scope_titles(&scopes_of(p.0.id(), &work), work.scopes);
-    let id: String = p.0.id().to_base64().chars().take(8).collect();
+    let scopes = scope_titles(&scopes_of(role.id(), &work), work.scopes);
+    let id: String = role.id().to_base64().chars().take(8).collect();
     Ok(format!("{id} ({}{}, {})", what(p), standing(p), in_scopes(&scopes)))
 }
 

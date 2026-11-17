@@ -160,7 +160,7 @@ pub struct StoreNames;
 
 impl Names for StoreNames {
     fn handle(&self, principal: EntityId) -> Option<String> {
-        store::principal(principal).map(|(role, p)| store::named(p.handle().unwrap_or_default(), &role))
+        store::principal(principal).map(|(role, identity)| store::named(identity.handle().unwrap_or_default(), &role))
     }
     fn task_title(&self, id: EntityId) -> Option<String> {
         store::task(id).map(|t| store::named(t.title().unwrap_or_default(), &t))

@@ -304,9 +304,9 @@ impl Operations {
                 _ => None,
             };
             let acting = match bound {
-                Some((p, _)) => Some(p.id()),
+                Some((role, _)) => Some(role.id()),
                 None if needs_actor => Some(self.attach(&graph, caller).await?),
-                None => subject::principal_of(&graph, &caller.subject).await?.map(|(p, _)| p.id()),
+                None => subject::principal_of(&graph, &caller.subject).await?.map(|(role, _)| role.id()),
             };
             let me_handle = match acting {
                 Some(p) => ops::handle_of(&graph, p).await?,
@@ -355,7 +355,7 @@ impl Operations {
             // The principal the command acted as, or the one it named.
             if let Some(principal) = match acting {
                 Some(p) => Some(p),
-                None => subject::principal_of(&graph, &caller.subject).await.ok().flatten().map(|(p, _)| p.id()),
+                None => subject::principal_of(&graph, &caller.subject).await.ok().flatten().map(|(role, _)| role.id()),
             } {
                 self.seen.seen(project.id, principal, caller);
             }
@@ -372,8 +372,8 @@ impl Operations {
     /// calls arriving together make one principal.
     async fn attach(&self, graph: &ProjectGraph, caller: &Caller) -> Result<EntityId> {
         let _attaching = self.attaching.lock().await;
-        if let Some((p, _)) = subject::principal_of(graph, &caller.subject).await? {
-            return Ok(p.id());
+        if let Some((role, _)) = subject::principal_of(graph, &caller.subject).await? {
+            return Ok(role.id());
         }
         let handle = self.free_handle(graph, caller).await?;
         let id =
@@ -420,9 +420,9 @@ async fn refuse_split(graph: &ProjectGraph, caller: &Caller) -> Result<()> {
         if bound == caller.subject || thread(&bound).as_deref() != Some(caller.thread.as_str()) {
             continue;
         }
-        let (p, principal) = graph.principal(EntityId::from(binding.principal()?)).await?;
+        let (role, principal) = graph.principal(EntityId::from(binding.principal()?)).await?;
         // A retired principal does not split the thread: the person retired it.
-        if ops::retired(&p)? {
+        if ops::retired(&role)? {
             continue;
         }
         bail!(
@@ -431,7 +431,7 @@ async fn refuse_split(graph: &ProjectGraph, caller: &Caller) -> Result<()> {
             principal.handle()?,
             caller.session,
             principal.handle()?,
-            p.id().to_base64(),
+            role.id().to_base64(),
             principal.handle()?
         );
     }

@@ -47,8 +47,8 @@ async fn leads(graph: &ProjectGraph) -> Result<Vec<EntityId>> {
     let mut found: Vec<EntityId> = ops::principals(graph)
         .await?
         .iter()
-        .filter(|(p, _)| ops::holds(p, AgentRole::Lead))
-        .map(|(p, _)| p.id())
+        .filter(|(role, _)| ops::holds(role, AgentRole::Lead))
+        .map(|(role, _)| role.id())
         .collect();
     found.sort();
     Ok(found)

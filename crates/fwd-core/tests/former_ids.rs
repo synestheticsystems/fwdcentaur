@@ -149,7 +149,7 @@ async fn a_principal_is_named_by_a_former_id_after_its_handle_and_a_shared_start
     renumbered(&graph, &cited, alice).await?;
     let named = |name: String| {
         let graph = graph.clone();
-        async move { anyhow::Ok(naming::principal_named(&graph, &name, None).await?.map(|(p, _)| p.id())) }
+        async move { anyhow::Ok(naming::principal_named(&graph, &name, None).await?.map(|(role, _)| role.id())) }
     };
     assert_eq!(named(cited.clone()).await?, Some(alice), "whole");
     assert_eq!(named(cited[..8].to_string()).await?, Some(alice), "its start");

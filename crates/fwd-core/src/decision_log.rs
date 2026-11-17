@@ -242,7 +242,7 @@ pub async fn entries(graph: &ProjectGraph) -> Result<Vec<Entry>> {
         principals
             .iter()
             .find(|(role, _)| role.id() == id)
-            .and_then(|(_, p)| p.handle().ok())
+            .and_then(|(_, principal)| principal.handle().ok())
             .unwrap_or_else(|| id.to_base64()[..8].to_string())
     };
     let scopes: Vec<ScopeView> = graph.all().await?;

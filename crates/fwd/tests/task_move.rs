@@ -142,7 +142,7 @@ impl Daemon {
 
 /// The principal of `graph`'s project named `name`.
 async fn named(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
-    naming::principal_named(graph, name, None).await?.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no {name}"))
+    naming::principal_named(graph, name, None).await?.map(|(role, _)| role.id()).ok_or_else(|| anyhow!("no {name}"))
 }
 
 /// The notifications of one recipient as they arrive, from a live query on its project's graph.

@@ -77,7 +77,7 @@ mod catalog;
 mod placed;
 mod principals;
 
-pub use principals::{closed, principal_of};
+pub use principals::{closed, principal_parts};
 
 /// A model whose records each name their project: the nine models of a project's work,
 /// [`FormerId`], and [`Placement`], which places a record built on the Commons' models.
@@ -607,7 +607,7 @@ impl ProjectGraph {
         }
         principals::bind_principal_parts(&self.ctx).await?;
         if let Some(role) = absent(self.ctx.get::<RoleView>(id).await)? {
-            let (role, principal) = principal_of(role)?;
+            let (role, principal) = principal_parts(role)?;
             return at(role.project_id(), Referent::Principal { handle: principal.handle()? });
         }
         if let Some(r) = absent(self.ctx.get::<RelationView>(id).await)? {

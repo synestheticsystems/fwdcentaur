@@ -239,9 +239,9 @@ pub async fn read(graph: &ProjectGraph, holder: Holder<'_>, extent: &Extent) -> 
                 let there = graph.graph_of_project(project);
                 // A retired principal acts for no agent, so what it holds is no agent's to take up.
                 match subject::principal_of(&there, agent).await? {
-                    Some(p) if !ops::retired(&p.0)? => {
+                    Some((role, principal)) if !ops::retired(&role)? => {
                         let principals = ops::principals(&there).await?;
-                        held.push(read.holding(&there, project, &p, &principals).await?)
+                        held.push(read.holding(&there, project, &(role, principal), &principals).await?)
                     }
                     _ => {}
                 }
@@ -300,8 +300,9 @@ pub async fn read_session(
             principals.iter().filter(|(role, _)| of_session.contains(&role.id())).collect();
         bound.sort_by_key(|(role, principal)| (principal.handle().ok(), role.id()));
         for p in bound {
-            every.push(p.0.id());
-            if ops::retired(&p.0)? {
+            let (role, _) = p;
+            every.push(role.id());
+            if ops::retired(role)? {
                 continue;
             }
             let holding = read.holding(&there, project, p, principals).await?;

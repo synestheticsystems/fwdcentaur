@@ -949,8 +949,12 @@ async fn heard_by_triage(projects: &[ProjectGraph]) -> Result<HashSet<EntityId>>
     let mut heard = HashSet::new();
     for graph in projects {
         let principals = ops::principals(graph).await?;
-        let active: HashSet<EntityId> =
-            principals.iter().filter(|(p, _)| !ops::retired(p).unwrap_or(true)).map(|(p, _)| p.id()).collect();
+        let mut active = HashSet::new();
+        for (role, _) in &principals {
+            if !ops::retired(role)? {
+                active.insert(role.id());
+            }
+        }
         let asked: Vec<NotificationView> = graph.fetch(questions.as_str()).await?;
         heard.extend(asked.iter().filter_map(|n| {
             let originator: Value = n.originator().ok()?.into();

@@ -1016,8 +1016,9 @@ fn name_view(target: Target) -> AnyView {
         Target::Principal(id) => {
             let principal = Memo::new(move |_| {
                 store::principal(id).map(|p| {
-                    let agent = p.1.kind().ok() == Some(PrincipalKind::Agent);
-                    (store::named(p.1.handle().unwrap_or_default(), &p.0), agent.then(|| person::role(&p)))
+                    let (role, principal) = &p;
+                    let agent = principal.kind().ok() == Some(PrincipalKind::Agent);
+                    (store::named(principal.handle().unwrap_or_default(), role), agent.then(|| person::role(&p)))
                 })
             });
             view! {
@@ -1513,10 +1514,11 @@ fn person_preview(id: EntityId) -> AnyView {
         let Some(p) = store::principal(id) else {
             return view! { <p class="muted">{empty::absent(id, Some(Model::Principal))}</p> }.into_any();
         };
-        let inactive = ops::retired(&p.0).unwrap_or(true);
+        let (role, principal) = &p;
+        let inactive = ops::retired(role).unwrap_or(true);
         view! {
             <div class="loz-preview-head">
-                <strong>{p.1.display_name().unwrap_or_default()}</strong>" "<span class="muted">{store::named(p.1.handle().unwrap_or_default(), &p.0)}</span>
+                <strong>{principal.display_name().unwrap_or_default()}</strong>" "<span class="muted">{store::named(principal.handle().unwrap_or_default(), role)}</span>
             </div>
             <div class="pills">
                 <span class="pill">{person::role(&p)}</span>

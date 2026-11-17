@@ -369,7 +369,7 @@ async fn every_list_in_one_project_prints_its_own_records_a_typed_id_reaches_the
         let graph = graph.clone();
         async move {
             let named = naming::principal_named(&graph, "impl-alice", None).await?;
-            named.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no impl-alice"))
+            named.map(|(role, _)| role.id()).ok_or_else(|| anyhow!("no impl-alice"))
         }
     };
     let mut alpha_inbox = Inbox::of(&alpha.graph, alice_of(&alpha.graph).await?).await?;
@@ -408,7 +408,7 @@ async fn a_task_shows_what_it_holds_of_the_other_project_with_that_projects_name
     daemon.json(&daemon.alpha, &["link", &a.cap, "worked_in", &b.scope])?;
     daemon.json(&daemon.beta, &["link", &b.retry, "relates_to", &a.cap])?;
     let their_alice =
-        naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|(p, _)| p.id()).expect("hers");
+        naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|(role, _)| role.id()).expect("hers");
     let their_person = ops::person_by_handle(&beta.graph, "dnorman").await?;
     let cap: EntityId = a.cap.parse()?;
     let trx = alpha.graph.begin();
@@ -492,8 +492,10 @@ async fn renumbered(client: &Client, former: &str, record: EntityId) -> Result<(
 async fn a_former_id_names_its_record_wherever_a_command_takes_an_id_and_as_a_records_argument_in_any_project(
 ) -> Result<()> {
     let Two { daemon, a, b, alpha, beta: _ } = Two::new().await?;
-    let alice =
-        naming::principal_named(&alpha.graph, "impl-alice", None).await?.map(|(p, _)| p.id()).expect("impl-alice");
+    let alice = naming::principal_named(&alpha.graph, "impl-alice", None)
+        .await?
+        .map(|(role, _)| role.id())
+        .expect("impl-alice");
     let scope: EntityId = a.scope.parse()?;
     let step: EntityId = daemon.made(&daemon.alpha, &["step", "add", &a.retry, &a.cap])?.parse()?;
     let cited = || EntityId::random().to_base64();
@@ -634,7 +636,10 @@ async fn a_refusal_in_the_project_a_command_ran_in_names_it_and_says_what_it_sug
 async fn a_recipient_of_another_project_replies_and_forwards_through_her_notification() -> Result<()> {
     let Two { daemon, a, b: _, alpha, beta } = Two::new().await?;
     let named = |graph: ProjectGraph, name: &'static str| async move {
-        naming::principal_named(&graph, name, None).await?.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no {name}"))
+        naming::principal_named(&graph, name, None)
+            .await?
+            .map(|(role, _)| role.id())
+            .ok_or_else(|| anyhow!("no {name}"))
     };
     let alice = named(beta.graph.clone(), "impl-alice").await?;
     let daniel = named(beta.graph.clone(), "dnorman").await?;
@@ -759,7 +764,8 @@ async fn a_forward_made_in_another_projects_thread_says_whether_it_waits_where_i
 #[tokio::test]
 async fn the_messages_about_a_record_are_listed_wherever_they_are_each_named_with_its_project() -> Result<()> {
     let Two { daemon, a, b: _, alpha: _, beta } = Two::new().await?;
-    let their_daniel = naming::principal_named(&beta.graph, "dnorman", None).await?.map(|(p, _)| p.id()).expect("his");
+    let their_daniel =
+        naming::principal_named(&beta.graph, "dnorman", None).await?.map(|(role, _)| role.id()).expect("his");
     let about = MessageContext { task_id: Some(a.retry.parse()?), ..Default::default() };
     let theirs = ops::post_message(&beta.graph, their_daniel, "beta's word on it", Priority::Next, about).await?;
 
@@ -781,7 +787,8 @@ async fn the_messages_about_a_record_are_listed_wherever_they_are_each_named_wit
 #[tokio::test]
 async fn a_notifications_whole_id_typed_in_one_project_marks_it_where_it_is() -> Result<()> {
     let Two { daemon, a: _, b: _, alpha: _, beta } = Two::new().await?;
-    let alice = naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|(p, _)| p.id()).expect("hers");
+    let alice =
+        naming::principal_named(&beta.graph, "impl-alice", None).await?.map(|(role, _)| role.id()).expect("hers");
     let told = ops::inbox(&beta.graph, alice, false).await?.first().map(|n| n.id()).expect("her question's notice");
     let read = ran_in_beta(&daemon, &["--as", "impl-alice", "read", &told.to_base64()])?;
     assert_eq!(read["read"], 1, "{read}");

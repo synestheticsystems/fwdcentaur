@@ -81,8 +81,8 @@ impl Person {
             }
             match naming::by_name(all, &handle, Some(PrincipalKind::Human)).as_slice() {
                 [] => {}
-                [one] => {
-                    person.principals.insert(project.record, one.0.id());
+                [(role, _)] => {
+                    person.principals.insert(project.record, role.id());
                 }
                 _ => person.shared.push(project.clone()),
             }

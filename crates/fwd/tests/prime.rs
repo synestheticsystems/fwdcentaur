@@ -581,7 +581,10 @@ async fn the_deadline_ends_the_command_while_its_answer_waits_to_be_read() -> Re
     let client = s.client(&s.alpha).await?;
     let graph = &client.graph;
     let named = |handle: &'static str| async move {
-        naming::principal_named(graph, handle, None).await?.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no {handle}"))
+        naming::principal_named(graph, handle, None)
+            .await?
+            .map(|(role, _)| role.id())
+            .ok_or_else(|| anyhow!("no {handle}"))
     };
     let (tester, agent) = (named("tester").await?, named("impl-sam").await?);
     let trx = graph.begin();
@@ -791,7 +794,10 @@ async fn sparse_records_prime_as_they_did() -> Result<()> {
     let client = s.client(&s.alpha).await?;
     let graph = &client.graph;
     let named = |handle: &'static str| async move {
-        naming::principal_named(graph, handle, None).await?.map(|(p, _)| p.id()).ok_or_else(|| anyhow!("no {handle}"))
+        naming::principal_named(graph, handle, None)
+            .await?
+            .map(|(role, _)| role.id())
+            .ok_or_else(|| anyhow!("no {handle}"))
     };
     let (tester, agent) = (named("tester").await?, named("impl-sam").await?);
     let to_agent = fwd_core::ops::MessageContext { to: Some(agent.to_base64()), ..Default::default() };
@@ -918,7 +924,7 @@ async fn an_assignment_that_cannot_be_followed_is_counted_and_the_rest_printed()
     let graph = &client.graph;
     let agent = naming::principal_named(graph, "impl-sam", None)
         .await?
-        .map(|(p, _)| p.id())
+        .map(|(role, _)| role.id())
         .ok_or_else(|| anyhow!("no agent"))?;
     let gone = EntityId::from_bytes([0; 32]);
     let trx = graph.begin();

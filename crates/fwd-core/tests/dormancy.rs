@@ -121,7 +121,7 @@ async fn an_agent_quiet_for_thirteen_hours_is_dormant_and_its_next_write_brings_
     // still reaches it.
     let p = graph.get::<RoleView>(quiet).await?;
     assert!(ops::belongs(&p), "a picker still offers it");
-    assert_eq!(naming::principal_named(&graph, "impl-quiet", None).await?.map(|(p, _)| p.id()), Some(quiet));
+    assert_eq!(naming::principal_named(&graph, "impl-quiet", None).await?.map(|(role, _)| role.id()), Some(quiet));
     let to = MessageContext { to: Some(quiet.to_base64()), ..Default::default() };
     let asked = ops::post_message(&graph, daniel, "still there?", Priority::Next, to).await?;
     let plan = routing::plan_for_message(&graph, &graph.get::<MessageView>(asked).await?).await?;
@@ -186,12 +186,12 @@ async fn the_mention_search_offers_the_agents_at_work_before_the_dormant_ones() 
     last_wrote(&graph, quiet, now - 13 * HOUR).await?;
     let principals = ops::principals(&graph).await?;
     let offered = |most: usize| -> Vec<EntityId> {
-        naming::mentionable(&principals, "impl", most, now).iter().map(|(p, _)| p.id()).collect()
+        naming::mentionable(&principals, "impl", most, now).iter().map(|(role, _)| role.id()).collect()
     };
     assert_eq!(offered(8), vec![busy, busier, quiet], "the dormant agent after the others, whatever its name");
     assert_eq!(offered(2), vec![busy, busier], "and out of the first offers");
     assert_eq!(
-        naming::mentionable(&principals, "impl-a", 8, now).iter().map(|(p, _)| p.id()).collect::<Vec<_>>(),
+        naming::mentionable(&principals, "impl-a", 8, now).iter().map(|(role, _)| role.id()).collect::<Vec<_>>(),
         vec![quiet],
         "still offered where its name is typed"
     );

@@ -718,7 +718,10 @@ async fn a_write_committed_while_its_daemon_was_gone_is_not_reported_as_made() -
     let (again, made) = away_and_back.map_err(|e| anyhow!("{e:#}; the write ended with {written:?}"))?;
     let error = written.expect_err("the write was reported as made");
     assert_eq!(error.downcast_ref::<daemon::Lost>(), Some(&daemon::Lost::Unconfirmed { port }), "{error:#}");
-    assert!(ops::principals(&again.graph).await?.iter().all(|(p, _)| p.id() != made), "the daemon holds the write");
+    assert!(
+        ops::principals(&again.graph).await?.iter().all(|(role, _)| role.id() != made),
+        "the daemon holds the write"
+    );
 
     drop((client, again));
     assert!(daemon::stop(&paths).await?);

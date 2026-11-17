@@ -63,7 +63,7 @@ fn two(a: (EntityId, &str), b: (EntityId, &str)) -> String {
 }
 
 async fn named(graph: &ProjectGraph, name: &str) -> Result<Option<EntityId>> {
-    Ok(naming::principal_named(graph, name, None).await?.map(|(p, _)| p.id()))
+    Ok(naming::principal_named(graph, name, None).await?.map(|(role, _)| role.id()))
 }
 
 #[tokio::test]
@@ -200,11 +200,11 @@ async fn a_name_two_principals_share_is_refused_listing_each_by_id_role_and_the_
     // The mention search offers the principals that belong whose name starts with what is typed,
     // and writes a shared name's mention by the start of the id, which posting reads back.
     let offered: Vec<EntityId> =
-        naming::mentionable(&principals, "IMPL", 8, fwd_core::now_ms()).iter().map(|(p, _)| p.id()).collect();
+        naming::mentionable(&principals, "IMPL", 8, fwd_core::now_ms()).iter().map(|(role, _)| role.id()).collect();
     let mut both = vec![one, other];
     both.sort();
     assert_eq!(offered, both, "without regard to case, by name, then by id");
-    let view = |id: EntityId| principals.iter().find(|(p, _)| p.id() == id).expect("a principal of the project");
+    let view = |id: EntityId| principals.iter().find(|(role, _)| role.id() == id).expect("a principal of the project");
     assert_eq!(naming::mention_of(&principals, view(other)), format!("@{}", short(other)));
     assert_eq!(naming::mention_of(&principals, view(daniel)), "@dnorman");
 
@@ -237,7 +237,7 @@ async fn a_retired_principal_is_named_still_and_counts_among_those_sharing_its_n
     let new = made(&graph, "builder", PrincipalKind::Agent, Some(AgentRole::Implementer)).await?;
     let principals = ops::principals(&graph).await?;
     let offered: Vec<EntityId> =
-        naming::mentionable(&principals, "build", 8, fwd_core::now_ms()).iter().map(|(p, _)| p.id()).collect();
+        naming::mentionable(&principals, "build", 8, fwd_core::now_ms()).iter().map(|(role, _)| role.id()).collect();
     assert_eq!(offered, vec![new], "the mention search offers only principals that belong");
     assert_eq!(
         refused(naming::principal_named(&graph, "builder", None).await),
@@ -267,7 +267,7 @@ async fn a_person_and_an_agent_sharing_a_name_are_told_apart_only_where_a_comman
     // A ruling is a person's, and the CLI's own person is found among people.
     assert_eq!(ops::person_by_handle(&graph, "@dnorman").await?, person);
     assert_eq!(
-        naming::principal_named(&graph, "dnorman", Some(PrincipalKind::Human)).await?.map(|(p, _)| p.id()),
+        naming::principal_named(&graph, "dnorman", Some(PrincipalKind::Human)).await?.map(|(role, _)| role.id()),
         Some(person)
     );
     assert_eq!(ops::ensure_principal(&graph, "dnorman", "Daniel", PrincipalKind::Human, None).await?, person);

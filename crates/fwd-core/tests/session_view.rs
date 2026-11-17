@@ -134,9 +134,11 @@ async fn the_person_is_resolved_once_and_strictly_in_each_project() -> Result<()
     trx.add(record, &identity).await?;
     let twin = record.id();
     trx.commit().await?;
-    let beta_lead =
-        ops::principals(&t.beta).await?.into_iter().find(|(_, p)| p.handle().ok().as_deref() == Some("lead-sam"));
-    let beta_lead = beta_lead.map(|(p, _)| p.id()).expect("lead-sam in beta");
+    let beta_lead = ops::principals(&t.beta)
+        .await?
+        .into_iter()
+        .find(|(_, principal)| principal.handle().ok().as_deref() == Some("lead-sam"));
+    let beta_lead = beta_lead.map(|(role, _)| role.id()).expect("lead-sam in beta");
     ops::post_message(&t.beta, beta_lead, "Which of you is it?", Priority::Now, asking(t.their_tester)).await?;
 
     let json = view(&t.alpha, Reader::Identity("tester")).await?;

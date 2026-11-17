@@ -65,10 +65,10 @@ pub struct Serving {
 }
 
 impl Serving {
-    /// What `p` serves, as its `serves` records it; nothing where it records none, or text that
+    /// What `role` serves, as its `serves` records it; nothing where it records none, or text that
     /// does not read as what [`Serving::stored`] writes.
-    pub fn of(p: &RoleView) -> Serving {
-        let stored: Value = match p.serves() {
+    pub fn of(role: &RoleView) -> Serving {
+        let stored: Value = match role.serves() {
             Ok(Some(text)) => serde_json::from_str(&text).unwrap_or(Value::Null),
             _ => return Serving::default(),
         };
@@ -212,18 +212,18 @@ pub async fn triage_for_scopes(graph: &ProjectGraph, scopes: &[EntityId]) -> Res
     Ok(found)
 }
 
-/// What `p` answers first for as a triage agent: what it serves while it holds triage and is not
+/// What `role` answers first for as a triage agent: what it serves while it holds triage and is not
 /// retired ([`holds`]), none otherwise, so that the routing service tells a change of who answers
 /// first for something from a change that leaves it as it was.
-pub fn triage_standing(p: &RoleView) -> Option<Serving> {
-    holds(p, AgentRole::Triage).then(|| Serving::of(p))
+pub fn triage_standing(role: &RoleView) -> Option<Serving> {
+    holds(role, AgentRole::Triage).then(|| Serving::of(role))
 }
 
-/// Whether `p` holds triage and serves nothing, as the triage agents of before 2026-09-30 do until
+/// Whether `role` holds triage and serves nothing, as the triage agents of before 2026-09-30 do until
 /// their leads bind or endorse them, so that nothing reaches it for its role and fwd tells it so on
 /// each of its commands (`guidance::unbound`).
-pub fn serves_nothing_yet(p: &RoleView) -> bool {
-    triage_standing(p).is_some_and(|s| s.is_nothing())
+pub fn serves_nothing_yet(role: &RoleView) -> bool {
+    triage_standing(role).is_some_and(|s| s.is_nothing())
 }
 
 /// The sentence that refuses triage to the agent named `handle`, which would serve nothing: a
@@ -304,24 +304,24 @@ pub async fn principals(graph: &ProjectGraph) -> Result<Vec<(RoleView, Principal
     Ok(graph.principals().await?)
 }
 
-/// Whether `p` is retired: its `Closed` holds a time (`fwd principal retire`, or a successor took
+/// Whether `role` is retired: its `Closed` holds a time (`fwd principal retire`, or a successor took
 /// over its job). It stays, so that what it did is still attributed to it, and no picker offers it
 /// and no rule reaches it for its role.
-pub fn retired(p: &RoleView) -> Result<bool> {
-    Ok(closed(p)?)
+pub fn retired(role: &RoleView) -> Result<bool> {
+    Ok(closed(role)?)
 }
 
-/// Whether a picker offers `p`: it is not retired and belongs to the project, or was recorded
+/// Whether a picker offers `role`: it is not retired and belongs to the project, or was recorded
 /// before membership was (2026-09-29), which belongs while it is not retired until `fwd admin
 /// migrate` records whether it does (docs/design/agents-and-inbox.md, "Who belongs to a project").
-pub fn belongs(p: &RoleView) -> bool {
-    !retired(p).unwrap_or(true) && p.member().ok().flatten() != Some(false)
+pub fn belongs(role: &RoleView) -> bool {
+    !retired(role).unwrap_or(true) && role.member().ok().flatten() != Some(false)
 }
 
-/// The role `p` holds, when it holds one this build reads: none for a person and for an agent that
-/// has not selected one.
-pub fn role_of(p: &RoleView) -> Option<AgentRole> {
-    p.agent_role().ok().flatten()
+/// The agent role `role` records, when it records one this build reads: none for a person and for
+/// an agent that has not selected one.
+pub fn role_of(role: &RoleView) -> Option<AgentRole> {
+    role.agent_role().ok().flatten()
 }
 
 /// Whether `p` is an agent that holds no role, whose writes are refused until it selects one.
@@ -334,9 +334,9 @@ pub fn select_role_command(handle: &str) -> String {
     format!("`fwd principal role {handle} {ROLE_WORDS}`")
 }
 
-/// Whether `p` holds `role` so that the role counts: it selected the role and is not retired.
-pub fn holds(p: &RoleView, role: AgentRole) -> bool {
-    role_of(p) == Some(role) && !retired(p).unwrap_or(true)
+/// Whether `role` holds `agent_role` so that the role counts: it selected the role and is not retired.
+pub fn holds(role: &RoleView, agent_role: AgentRole) -> bool {
+    role_of(role) == Some(agent_role) && !retired(role).unwrap_or(true)
 }
 
 /// The principals the graph holds that selected `role`, retired or not.
@@ -481,7 +481,7 @@ pub async fn join(graph: &ProjectGraph, principal: EntityId) -> Result<bool> {
     Ok(true)
 }
 
-/// `fwd principal add`: how an agent names itself and selects its role, `role`, which a new agent
+/// `fwd principal add`: how an agent names itself and selects its role, `agent_role`, which a new agent
 /// must give (docs/design/agents-and-inbox.md, "Roles"). The principal belongs to the project from
 /// then on. `name` is read as every typed name is ([`naming::principal_named`]): a name none has
 /// makes a new agent, and a name two or more principals share is refused, listing them. A name one
@@ -511,7 +511,7 @@ pub async fn join(graph: &ProjectGraph, principal: EntityId) -> Result<bool> {
 pub async fn add_principal(
     graph: &ProjectGraph,
     name: &str,
-    role: Option<AgentRole>,
+    agent_role: Option<AgentRole>,
     serves: Option<Serves>,
     display_name: Option<&str>,
     acting: Option<EntityId>,
@@ -529,11 +529,12 @@ pub async fn add_principal(
         Some((role, _)) => subject::session_bound_to(graph, role.id()).await?,
         None => None,
     };
-    if let Some(p) = existing.as_ref().filter(|(role, _)| acting != Some(role.id())) {
-        let handle = p.1.handle()?;
+    if let Some(named) = existing.as_ref().filter(|(role, _)| acting != Some(role.id())) {
+        let (_, principal) = named;
+        let handle = principal.handle()?;
         // Where the command carries a subject, a principal acts as itself by being bound to it, and
         // an agent from before the plugin is taken over by binding it, not by naming it again.
-        let (acts_as_itself, bind) = match (subject, acting, p.1.kind()?, &bound) {
+        let (acts_as_itself, bind) = match (subject, acting, principal.kind()?, &bound) {
             (Some(_), None, PrincipalKind::Agent, None) => (
                 " (from the Claude Code agent bound to it)",
                 format!(
@@ -545,7 +546,7 @@ pub async fn add_principal(
         };
         bail!(
             "the name `{handle}` is taken: {} has it in this project, and only that principal, acting as itself{acts_as_itself}, adds itself again, to come back or to change its role; choose a name no other principal of this project has, as every agent does (a role and a qualifier reads well: `implementer-replication`; docs/DECISIONS.md, D110){bind}",
-            naming::described(graph, p).await?
+            naming::described(graph, named).await?
         );
     }
     if let (Some(subject), None, Some(bound)) = (subject, &existing, acting) {
@@ -563,19 +564,19 @@ pub async fn add_principal(
     };
     match &existing {
         Some((_, principal)) if principal.kind()? == PrincipalKind::Human => {
-            if role.is_some() {
+            if agent_role.is_some() {
                 bail!("`@{handle}` is a person, and a role is an agent's: a person belongs to the project without one");
             }
         }
-        Some((p, _)) => {
-            if role.is_none() && role_of(p).is_none() {
+        Some((role, _)) => {
+            if agent_role.is_none() && role_of(role).is_none() {
                 bail!(
                     "`@{handle}` holds no role, and every agent selects one: `fwd principal add {handle} --role {ROLE_WORDS}`"
                 );
             }
         }
         None => {
-            if role.is_none() {
+            if agent_role.is_none() {
                 bail!("an agent selects its role as it names itself: `fwd principal add {handle} --role {ROLE_WORDS}`");
             }
         }
@@ -585,10 +586,10 @@ pub async fn add_principal(
     // given now does. Its session is that of the subject it is bound to, or, for an agent made now,
     // of the command's.
     let roles = existing.as_ref().map(|(role, _)| role);
-    let coming_back = roles.filter(|p| retired(p).unwrap_or(true));
-    let taking = role.or_else(|| coming_back.and_then(role_of));
+    let coming_back = roles.filter(|role| retired(role).unwrap_or(true));
+    let taking = agent_role.or_else(|| coming_back.and_then(role_of));
     let serving = serving_after(roles, taking, serves, &handle)?;
-    let itself: Vec<EntityId> = roles.iter().map(|p| p.id()).collect();
+    let itself: Vec<EntityId> = roles.iter().map(|role| role.id()).collect();
     one_triage_per_scope(graph, &serving, &handle, &itself).await?;
     let session = match &existing {
         Some(_) => bound,
@@ -597,31 +598,31 @@ pub async fn add_principal(
     one_lead_per_session(graph, taking, session.as_deref(), &handle, &itself).await?;
     let trx = graph.begin();
     let id = match existing {
-        Some((p, _)) => {
+        Some((role, _)) => {
             // Back, it is no longer retired, as the Commons reopen a record.
-            trx.reopen(&p)?;
-            let m = trx.edit(&p)?;
+            trx.reopen(&role)?;
+            let m = trx.edit(&role)?;
             m.member()?.set(&Some(true))?;
             // Back, it hears what reaches it again, rather than its successor.
-            if p.succeeded_by()?.is_some() {
+            if role.succeeded_by()?.is_some() {
                 m.succeeded_by()?.set(&None)?;
             }
-            if let Some(role) = role {
-                m.agent_role()?.set(&Some(role))?;
+            if let Some(selected) = agent_role {
+                m.agent_role()?.set(&Some(selected))?;
             }
-            if serving != Serving::of(&p) {
+            if serving != Serving::of(&role) {
                 m.serves()?.set(&serving.stored())?;
             }
             if let Some(name) = display_name {
-                trx.edit_placed::<Principal>(&p)?.display_name()?.set(&name.to_string())?;
+                trx.edit_placed::<Principal>(&role)?.display_name()?.set(&name.to_string())?;
             }
-            p.id()
+            role.id()
         }
         None => {
             let made = trx
                 .create(&Role {
                     project: graph.project(),
-                    agent_role: role,
+                    agent_role,
                     member: Some(true),
                     succeeded_by: None,
                     serves: serving.stored(),
@@ -680,7 +681,7 @@ pub async fn bind_principal(
 ) -> Result<EntityId> {
     let name = naming::bare(name);
     refuse_unmoved(graph).await?;
-    let Some((p, principal)) = naming::principal_named(graph, name, None).await? else {
+    let Some((role, principal)) = naming::principal_named(graph, name, None).await? else {
         bail!(
             "no principal of this project is named `{name}`, so there is none to take over: an agent new to the project names itself, `fwd principal add {name} --role {ROLE_WORDS}`"
         );
@@ -693,7 +694,7 @@ pub async fn bind_principal(
             bound.handle()?
         );
     }
-    if named_by_as != Some(p.id()) {
+    if named_by_as != Some(role.id()) {
         bail!(
             "binding makes this Claude Code agent act as @{handle} from now on, so it is said twice: `fwd --as {handle} principal bind {handle}`"
         );
@@ -703,27 +704,27 @@ pub async fn bind_principal(
             "`@{handle}` is a person, and a person acts from their own terminal, never as a Claude Code agent: an agent names itself, `fwd principal add <name> --role {ROLE_WORDS}`"
         );
     }
-    if let Some(successor) = p.succeeded_by()?.map(EntityId::from) {
+    if let Some(successor) = role.succeeded_by()?.map(EntityId::from) {
         let successor = at_handle(graph, successor).await?;
         bail!(
             "`@{handle}` was succeeded by {successor}, who carries on its job: an agent relaunched to carry it on names itself as the successor of {successor}, `fwd principal add <name> --succeeds {}`",
             successor.trim_start_matches('@')
         );
     }
-    if let Some(other) = subject::session_bound_to(graph, p.id()).await? {
+    if let Some(other) = subject::session_bound_to(graph, role.id()).await? {
         bail!(
             "`@{handle}` is bound to another Claude Code agent ({other}), and a principal is bound to one: an agent relaunched to carry on its job names itself as its successor, `fwd principal add <name> --succeeds {handle}`"
         );
     }
     // A lead bound here counts toward the one lead of the subject's session; a retired one counts
     // once `fwd principal add` brings it back, which checks it then.
-    let counted = holds(&p, AgentRole::Lead).then_some(AgentRole::Lead);
-    one_lead_per_session(graph, counted, Some(subject), &handle, &[p.id()]).await?;
+    let counted = holds(&role, AgentRole::Lead).then_some(AgentRole::Lead);
+    one_lead_per_session(graph, counted, Some(subject), &handle, &[role.id()]).await?;
     let trx = graph.begin();
     // The agent takes the principal over itself, saying so twice.
-    subject::bind(&trx, p.id(), subject, p.id(), None).await?;
+    subject::bind(&trx, role.id(), subject, role.id(), None).await?;
     trx.commit().await?;
-    Ok(p.id())
+    Ok(role.id())
 }
 
 /// `fwd admin bind`: the person at this machine binds the lead `name` names to `subject`, a Codex
@@ -746,20 +747,20 @@ pub async fn admin_bind(graph: &ProjectGraph, name: &str, subject: &str, by: Ent
     }
     let name = naming::bare(name);
     refuse_unmoved(graph).await?;
-    let Some((p, principal)) = naming::principal_named(graph, name, None).await? else {
+    let Some((role, principal)) = naming::principal_named(graph, name, None).await? else {
         bail!("no principal of this project is named `{name}`, so there is none to bind");
     };
     let handle = principal.handle()?;
-    if !holds(&p, AgentRole::Lead) {
+    if !holds(&role, AgentRole::Lead) {
         bail!(
             "`@{handle}` is not a lead that is at work (an agent that holds lead and is not retired): `fwd admin bind` carries only a lead from before automatic attachment over to its thread; any other agent names itself from its thread, `principal_add <name> --role <role>`, or succeeds another, `principal_add <name> --succeeds <its name>`"
         );
     }
-    if let Some(successor) = p.succeeded_by()?.map(EntityId::from) {
+    if let Some(successor) = role.succeeded_by()?.map(EntityId::from) {
         bail!("`@{handle}` was succeeded by {}, who carries on its job", at_handle(graph, successor).await?);
     }
-    match subject::session_bound_to(graph, p.id()).await? {
-        Some(bound) if bound == subject => return Ok(p.id()),
+    match subject::session_bound_to(graph, role.id()).await? {
+        Some(bound) if bound == subject => return Ok(role.id()),
         Some(other) => {
             bail!("`@{handle}` is bound to {} already, and a principal is bound to one", subject::words(&other))
         }
@@ -771,29 +772,29 @@ pub async fn admin_bind(graph: &ProjectGraph, name: &str, subject: &str, by: Ent
     let mut held = Vec::new();
     for binding in subject::bindings_of(graph, subject).await? {
         let bound = EntityId::from(binding.1.principal()?);
-        if bound == p.id() {
+        if bound == role.id() {
             continue;
         }
-        let (q, other) = graph.principal(bound).await?;
-        if !retired(&q)? {
+        let (other_role, other) = graph.principal(bound).await?;
+        if !retired(&other_role)? {
             bail!(
                 "{} is @{} already, and a subject binds one principal: nothing was bound; retire @{} first if it is not the thread's (`fwd principal retire {}`), then bind again",
                 subject::words(subject),
                 other.handle()?,
                 other.handle()?,
-                q.id().to_base64()
+                other_role.id().to_base64()
             );
         }
         held.push(binding);
     }
-    one_lead_per_session(graph, Some(AgentRole::Lead), Some(subject), &handle, &[p.id()]).await?;
+    one_lead_per_session(graph, Some(AgentRole::Lead), Some(subject), &handle, &[role.id()]).await?;
     let trx = graph.begin();
     for binding in &held {
         subject::unbind(&trx, binding, by).await?;
     }
-    subject::bind(&trx, p.id(), subject, by, None).await?;
+    subject::bind(&trx, role.id(), subject, by, None).await?;
     trx.commit().await?;
-    Ok(p.id())
+    Ok(role.id())
 }
 
 /// What `fwd principal succeed`, or `fwd principal add --succeeds`, did: the principal that carries
@@ -926,9 +927,9 @@ pub async fn add_successor(
     }
     refuse_unmoved(graph).await?;
     let acting = caller_since_the_move(graph, acting, subject).await?;
-    if let Some((p, principal)) = naming::principal_named(graph, name, None).await? {
+    if let Some((role, principal)) = naming::principal_named(graph, name, None).await? {
         let handle = principal.handle()?;
-        if acting == Some(p.id()) {
+        if acting == Some(role.id()) {
             bail!(
                 "`@{handle}` is a principal already, the one this command acts as: it carries on another's job with `fwd principal succeed {}`",
                 naming::bare(old)
@@ -936,7 +937,7 @@ pub async fn add_successor(
         }
         bail!(
             "the name `{handle}` is taken: {} has it in this project; a relaunched agent names itself with a name no other principal of this project has (docs/DECISIONS.md, D110)",
-            naming::described(graph, &(p, principal)).await?
+            naming::described(graph, &(role, principal)).await?
         );
     }
     if let (Some(subject), Some(bound)) = (subject, acting) {
@@ -1064,7 +1065,7 @@ async fn hand_over(
     Ok(())
 }
 
-/// `fwd principal role`: the agent `name` names ([`naming::principal_named`]) holds `role` from now
+/// `fwd principal role`: the agent `name` names ([`naming::principal_named`]) holds `agent_role` from now
 /// on, and with triage serves what `serves` gives as [`add_principal`] has it serve
 /// ([`serving_after`]), while another role frees what it served. Refused for a person, for a name
 /// no principal of the project has (naming the command that adds it), for a name two or more
@@ -1072,29 +1073,34 @@ async fn hand_over(
 /// project, that another principal that is not retired serves ([`one_triage_per_scope`]), and for
 /// lead while another that is not retired holds it bound to an agent of the principal's own Claude
 /// Code session ([`one_lead_per_session`]).
-pub async fn set_role(graph: &ProjectGraph, name: &str, role: AgentRole, serves: Option<Serves>) -> Result<EntityId> {
+pub async fn set_role(
+    graph: &ProjectGraph,
+    name: &str,
+    agent_role: AgentRole,
+    serves: Option<Serves>,
+) -> Result<EntityId> {
     let name = naming::bare(name);
-    let Some((p, principal)) = naming::principal_named(graph, name, None).await? else {
+    let Some((role, principal)) = naming::principal_named(graph, name, None).await? else {
         bail!(
-            "no principal of this project is named `{name}`: an agent names itself and selects its role at once, `fwd principal add {name} --role {role}`"
+            "no principal of this project is named `{name}`: an agent names itself and selects its role at once, `fwd principal add {name} --role {agent_role}`"
         );
     };
     let handle = principal.handle()?;
     if principal.kind()? == PrincipalKind::Human {
         bail!("`@{handle}` is a person, and a role is an agent's");
     }
-    let serving = serving_after(Some(&p), Some(role), serves, &handle)?;
-    one_triage_per_scope(graph, &serving, &handle, &[p.id()]).await?;
-    let session = subject::session_bound_to(graph, p.id()).await?;
-    one_lead_per_session(graph, Some(role), session.as_deref(), &handle, &[p.id()]).await?;
+    let serving = serving_after(Some(&role), Some(agent_role), serves, &handle)?;
+    one_triage_per_scope(graph, &serving, &handle, &[role.id()]).await?;
+    let session = subject::session_bound_to(graph, role.id()).await?;
+    one_lead_per_session(graph, Some(agent_role), session.as_deref(), &handle, &[role.id()]).await?;
     let trx = graph.begin();
-    let m = trx.edit(&p)?;
-    m.agent_role()?.set(&Some(role))?;
-    if serving != Serving::of(&p) {
+    let m = trx.edit(&role)?;
+    m.agent_role()?.set(&Some(agent_role))?;
+    if serving != Serving::of(&role) {
         m.serves()?.set(&serving.stored())?;
     }
     trx.commit().await?;
-    Ok(p.id())
+    Ok(role.id())
 }
 
 /// `fwd principal scope add` and `fwd principal scope project-wide`: the triage agent `name` names
@@ -1106,10 +1112,10 @@ pub async fn set_role(graph: &ProjectGraph, name: &str, role: AgentRole, serves:
 /// principal that is not retired serves the scope, or the whole project ([`one_triage_per_scope`]);
 /// a scope or an endorsement it has already changes nothing.
 pub async fn serve(graph: &ProjectGraph, name: &str, what: Serves) -> Result<EntityId> {
-    let (p, handle) = triage_named(graph, name, what).await?;
-    let serving = Serving::of(&p).with(what);
-    one_triage_per_scope(graph, &serving, &handle, &[p.id()]).await?;
-    set_serving(graph, &p, &serving).await
+    let (role, handle) = triage_named(graph, name, what).await?;
+    let serving = Serving::of(&role).with(what);
+    one_triage_per_scope(graph, &serving, &handle, &[role.id()]).await?;
+    set_serving(graph, &role, &serving).await
 }
 
 /// `fwd principal scope remove` and `fwd principal scope project-wide --withdraw`: the triage agent
@@ -1120,8 +1126,8 @@ pub async fn serve(graph: &ProjectGraph, name: &str, what: Serves) -> Result<Ent
 /// still, and nothing reaches it for its role. Refused for a principal that does not hold triage,
 /// and for a scope, or an endorsement, it does not have, saying what it serves.
 pub async fn stop_serving(graph: &ProjectGraph, name: &str, what: Serves) -> Result<EntityId> {
-    let (p, handle) = triage_named(graph, name, what).await?;
-    let before = Serving::of(&p);
+    let (role, handle) = triage_named(graph, name, what).await?;
+    let before = Serving::of(&role);
     let after = before.clone().without(what);
     if after == before {
         let what = match what {
@@ -1130,7 +1136,7 @@ pub async fn stop_serving(graph: &ProjectGraph, name: &str, what: Serves) -> Res
         };
         bail!("`@{handle}` does not serve {what}: it serves {}", serving_words(graph, &before).await);
     }
-    set_serving(graph, &p, &after).await
+    set_serving(graph, &role, &after).await
 }
 
 /// The triage agent `name` names, for a command that changes what it serves (`what`), with its
@@ -1138,12 +1144,12 @@ pub async fn stop_serving(graph: &ProjectGraph, name: &str, what: Serves) -> Res
 /// triage, since only a triage agent serves a scope or the whole project.
 async fn triage_named(graph: &ProjectGraph, name: &str, what: Serves) -> Result<(RoleView, String)> {
     let name = naming::bare(name);
-    let Some((p, principal)) = naming::principal_named(graph, name, None).await? else {
+    let Some((role, principal)) = naming::principal_named(graph, name, None).await? else {
         bail!("no principal of this project is named `{name}`");
     };
     let handle = principal.handle()?;
-    if role_of(&p) != Some(AgentRole::Triage) {
-        let holds = match (principal.kind()?, role_of(&p)) {
+    if role_of(&role) != Some(AgentRole::Triage) {
+        let holds = match (principal.kind()?, role_of(&role)) {
             (PrincipalKind::Human, _) => "is a person".to_string(),
             (_, Some(role)) => format!("holds {role}"),
             (_, None) => "holds no role".to_string(),
@@ -1156,17 +1162,17 @@ async fn triage_named(graph: &ProjectGraph, name: &str, what: Serves) -> Result<
             "`@{handle}` {holds}, and only a triage agent serves a scope or the whole project: an agent selects triage with what it serves, `fwd principal role {handle} triage {with}`"
         );
     }
-    Ok((p, handle))
+    Ok((role, handle))
 }
 
 /// Records on `p` that it serves `serving`, in one transaction.
-async fn set_serving(graph: &ProjectGraph, p: &RoleView, serving: &Serving) -> Result<EntityId> {
-    if *serving != Serving::of(p) {
+async fn set_serving(graph: &ProjectGraph, role: &RoleView, serving: &Serving) -> Result<EntityId> {
+    if *serving != Serving::of(role) {
         let trx = graph.begin();
-        trx.edit(p)?.serves()?.set(&serving.stored())?;
+        trx.edit(role)?.serves()?.set(&serving.stored())?;
         trx.commit().await?;
     }
-    Ok(p.id())
+    Ok(role.id())
 }
 
 /// The first eight characters of `id`, which name it wherever an id is typed while no other id
@@ -1224,15 +1230,15 @@ fn and_list(items: &[String]) -> String {
 /// brought back. Its `Closed` says when, and that `by` retired it.
 pub async fn retire_principal(graph: &ProjectGraph, name: &str, by: EntityId) -> Result<EntityId> {
     let name = naming::bare(name);
-    let (p, _) = naming::principal_named(graph, name, None)
+    let (role, _) = naming::principal_named(graph, name, None)
         .await?
         .ok_or_else(|| anyhow!("no one in this project has the handle `@{name}`"))?;
-    if !retired(&p)? {
+    if !retired(&role)? {
         let trx = graph.begin();
-        trx.close(&p, &retirement(by)).await?;
+        trx.close(&role, &retirement(by)).await?;
         trx.commit().await?;
     }
-    Ok(p.id())
+    Ok(role.id())
 }
 
 /// What retiring a principal records in its `Closed`: now, by `by`.
@@ -1240,7 +1246,7 @@ fn retirement(by: EntityId) -> Closed {
     Closed { closed: Some(Timestamp::from_unix_millis(now())), by: Some(Ref::new(by)), outcome: None, reason: None }
 }
 
-/// `fwd principal rename`: the agent `principal`, the one the command acts as, takes the name
+/// `fwd principal rename`: the agent `id`, the one the command acts as, takes the name
 /// `name`, so that an agent whose name turned out to be shared is named by a name again rather than
 /// by its id alone. It keeps its id, which everything that refers to it stores (what it made and
 /// said, its inbox, its role, the Claude Code agent bound to it), so all of that stays its own and
@@ -1252,21 +1258,21 @@ fn retirement(by: EntityId) -> Closed {
 /// ([`naming::resolve`]): one that another principal has, listed as `fwd principal add` lists
 /// the holder of a taken name, since a name no other principal of the project has is the practice
 /// (docs/DECISIONS.md, D110), and one that is, or starts, another principal's id.
-pub async fn rename_principal(graph: &ProjectGraph, principal: EntityId, name: &str) -> Result<EntityId> {
+pub async fn rename_principal(graph: &ProjectGraph, id: EntityId, name: &str) -> Result<EntityId> {
     let name = naming::bare(name);
     if name.is_empty() {
         bail!("a name cannot be blank");
     }
-    let (p, identity) = graph.principal(principal).await?;
-    let old = identity.handle()?;
-    if identity.kind()? == PrincipalKind::Human {
+    let (role, principal) = graph.principal(id).await?;
+    let old = principal.handle()?;
+    if principal.kind()? == PrincipalKind::Human {
         bail!(
             "`@{old}` is a person, whose name is the handle `fwd init` recorded on this machine, by which every command finds them: `fwd principal rename` renames the agent the command acts as"
         );
     }
     let found = principals(graph).await?;
     let others: Vec<&(RoleView, PrincipalView)> =
-        naming::by_name(&found, name, None).into_iter().filter(|q| q.0.id() != principal).collect();
+        naming::by_name(&found, name, None).into_iter().filter(|(role, _)| role.id() != id).collect();
     if !others.is_empty() {
         let has = if others.len() == 1 { "has" } else { "have" };
         bail!(
@@ -1277,11 +1283,11 @@ pub async fn rename_principal(graph: &ProjectGraph, principal: EntityId, name: &
     // No other principal has the name; one whose id it is, or starts, is named by it all the same.
     let former = FormerIds::from_views(&graph.own_former_ids_starting(naming::bare(name)).await?);
     let by_id: Vec<&(RoleView, PrincipalView)> = match naming::resolve(&found, name, None, &former) {
-        naming::Named::One(q) => vec![q],
+        naming::Named::One(one) => vec![one],
         naming::Named::Started(several) => several,
         naming::Named::NoOne | naming::Named::Shared(_) => Vec::new(),
     };
-    let by_id: Vec<&(RoleView, PrincipalView)> = by_id.into_iter().filter(|q| q.0.id() != principal).collect();
+    let by_id: Vec<&(RoleView, PrincipalView)> = by_id.into_iter().filter(|(role, _)| role.id() != id).collect();
     if !by_id.is_empty() {
         bail!(
             "`{name}` names {} by its id, wherever a name is typed; choose a name that starts no principal's id and that no other principal of this project has (a role and a qualifier reads well: `implementer-replication`)",
@@ -1289,16 +1295,16 @@ pub async fn rename_principal(graph: &ProjectGraph, principal: EntityId, name: &
         );
     }
     if name == old {
-        return Ok(principal);
+        return Ok(id);
     }
     let trx = graph.begin();
-    let m = trx.edit_placed::<Principal>(&p)?;
+    let m = trx.edit_placed::<Principal>(&role)?;
     m.handle()?.set(&name.to_string())?;
-    if identity.display_name()? == old {
+    if principal.display_name()? == old {
         m.display_name()?.set(&name.to_string())?;
     }
     trx.commit().await?;
-    Ok(principal)
+    Ok(id)
 }
 
 /// `principals` as a refusal lists them for a reader who must tell each from the others
@@ -1306,7 +1312,7 @@ pub async fn rename_principal(graph: &ProjectGraph, principal: EntityId, name: &
 /// `Ab3dEf12 (implementer, in Replication) and Cd4eFg56 (reviewer, in no scope)`.
 async fn described_all(graph: &ProjectGraph, principals: &[&(RoleView, PrincipalView)]) -> Result<String> {
     let mut principals = principals.to_vec();
-    principals.sort_by_key(|p| p.0.id().to_base64());
+    principals.sort_by_key(|(role, _)| role.id().to_base64());
     let mut listed = Vec::with_capacity(principals.len());
     for p in principals {
         listed.push(naming::described(graph, p).await?);
@@ -1328,8 +1334,8 @@ pub async fn people(graph: &ProjectGraph) -> Result<Vec<EntityId>> {
 /// refused with a sentence saying so.
 pub async fn person_by_handle(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
     let name = naming::bare(name);
-    if let Some((p, _)) = naming::principal_named(graph, name, Some(PrincipalKind::Human)).await? {
-        return Ok(p.id());
+    if let Some((role, _)) = naming::principal_named(graph, name, Some(PrincipalKind::Human)).await? {
+        return Ok(role.id());
     }
     let former = FormerIds::from_views(&graph.own_former_ids_starting(naming::bare(name)).await?);
     match naming::resolve(&principals(graph).await?, name, None, &former) {
@@ -4824,31 +4830,31 @@ pub fn json_of_notification(n: &NotificationView) -> Result<Value> {
 /// A principal as every command prints it: its identity, its role in the project, whether it is
 /// retired (`active`, as fwd has always printed it) and `session`, the agent's session or thread
 /// bound to it (`subject::session_bound_to`, or for a list `subject::sessions_bound`).
-pub fn json_of_principal((p, principal): &(RoleView, PrincipalView), session: Option<&str>) -> Result<Value> {
+pub fn json_of_principal((role, principal): &(RoleView, PrincipalView), session: Option<&str>) -> Result<Value> {
     Ok(json!({
-        "id": p.id().to_base64(),
+        "id": role.id().to_base64(),
         "kind": principal.kind()?.to_string(),
         "handle": principal.handle()?,
         "display_name": principal.display_name()?,
-        "agent_role": role_of(p).map(|r| r.to_string()),
-        "active": !retired(p)?,
-        "member": p.member()?,
-        "belongs": belongs(p),
+        "agent_role": role_of(role).map(|r| r.to_string()),
+        "active": !retired(role)?,
+        "member": role.member()?,
+        "belongs": belongs(role),
         // The Claude Code agent or Codex thread whose commands act as it, when one is bound.
         "subject": session,
         // The principal that took over its job (`fwd principal succeed`), whom what reaches it reaches.
-        "succeeded_by": p.succeeded_by().ok().flatten().map(|s| EntityId::from(s).to_base64()),
+        "succeeded_by": role.succeeded_by().ok().flatten().map(|s| EntityId::from(s).to_base64()),
         // What it answers first for as a triage agent (`Serving`): the ids of the scopes it serves
         // and whether it serves the whole project; null for any other principal.
-        "serves": (role_of(p) == Some(AgentRole::Triage)).then(|| {
-            let serving = Serving::of(p);
+        "serves": (role_of(role) == Some(AgentRole::Triage)).then(|| {
+            let serving = Serving::of(role);
             json!({
                 "scopes": serving.scopes.iter().map(|s| s.to_base64()).collect::<Vec<_>>(),
                 "project_wide": serving.project_wide,
             })
         }),
         // When it last wrote, which `dormancy` reads; null before its first write since 2026-09-30.
-        "last_active": p.last_active().ok().flatten(),
+        "last_active": role.last_active().ok().flatten(),
     }))
 }
 

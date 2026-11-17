@@ -147,7 +147,10 @@ pub fn is_main_thread(subject: &str) -> bool {
 
 /// The project's identity bindings `args` selects that hold, the undone ones left out: what binds
 /// each subject to the principal it acts as in the project, placed there.
-async fn holding(graph: &ProjectGraph, args: Selection<Parsed>) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
+async fn open_bindings(
+    graph: &ProjectGraph,
+    args: Selection<Parsed>,
+) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
     let mut held = Vec::new();
     for (placement, binding) in graph.fetch_placed::<IdentityBindingView>(args).await? {
         if !graph.is_closed(&binding).await? {
@@ -161,7 +164,7 @@ async fn holding(graph: &ProjectGraph, args: Selection<Parsed>) -> Result<Vec<(P
 /// ids.
 async fn principals_bound(graph: &ProjectGraph, args: Selection<Parsed>) -> Result<Vec<EntityId>> {
     let mut ids = Vec::new();
-    for (_, binding) in holding(graph, args).await? {
+    for (_, binding) in open_bindings(graph, args).await? {
         ids.push(EntityId::from(binding.principal()?));
     }
     ids.sort();
@@ -205,7 +208,7 @@ pub async fn of_same_session(graph: &ProjectGraph, subject: &str) -> Result<Vec<
 /// that signed them in is a binding too. Should two hold, the first by their text.
 pub async fn session_bound_to(graph: &ProjectGraph, principal: EntityId) -> Result<Option<String>> {
     let mut sessions = Vec::new();
-    for (_, binding) in holding(graph, with_id("principal = ?", principal)?).await? {
+    for (_, binding) in open_bindings(graph, with_id("principal = ?", principal)?).await? {
         let subject = binding.subject()?;
         if session_of(&subject).is_some() {
             sessions.push(subject);
@@ -238,7 +241,7 @@ pub async fn sessions_bound(graph: &ProjectGraph) -> Result<BTreeMap<EntityId, S
 /// character, `:`, made `;`, the character after it.
 async fn harness_bindings(graph: &ProjectGraph, prefix: &str) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
     let before = format!("{};", prefix.trim_end_matches(':'));
-    holding(graph, with_strings("subject >= ? AND subject < ?", &[prefix, &before])?).await
+    open_bindings(graph, with_strings("subject >= ? AND subject < ?", &[prefix, &before])?).await
 }
 
 /// The project's bindings of Codex threads that hold.
@@ -249,7 +252,7 @@ pub async fn codex_bindings(graph: &ProjectGraph) -> Result<Vec<(PlacementView, 
 /// The bindings of the project that hold `subject`, which a binding of it to another principal
 /// undoes or is refused by.
 pub async fn bindings_of(graph: &ProjectGraph, subject: &str) -> Result<Vec<(PlacementView, IdentityBindingView)>> {
-    holding(graph, with_string("subject = ?", subject)?).await
+    open_bindings(graph, with_string("subject = ?", subject)?).await
 }
 
 /// Binds `subject` to the principal `principal` in `trx`, as `by` does now: an identity binding
@@ -302,7 +305,8 @@ pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<
     }
     let mut at_work = Vec::new();
     for p in &bound {
-        if !ops::retired(&p.0)? {
+        let (role, _) = p;
+        if !ops::retired(role)? {
             at_work.push(p);
         }
     }
@@ -326,7 +330,7 @@ pub async fn principal_of(graph: &ProjectGraph, subject: &str) -> Result<Option<
     };
     let (role, principal) = one;
     let mut others = Vec::new();
-    for (_, binding) in holding(graph, with_id("principal = ?", role.id())?).await? {
+    for (_, binding) in open_bindings(graph, with_id("principal = ?", role.id())?).await? {
         let bound_to = binding.subject()?;
         if bound_to != subject && session_of(&bound_to).is_some() {
             others.push(bound_to);

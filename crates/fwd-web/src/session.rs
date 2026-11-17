@@ -733,7 +733,7 @@ async fn choose_principal() -> Result<PrincipalView, String> {
         .into_iter()
         .filter(|(role, _)| !ops::retired(role).unwrap_or(true))
         .collect();
-    humans.sort_by_key(|(role, p)| (!ops::belongs(role), p.handle().unwrap_or_default()));
+    humans.sort_by_key(|(role, principal)| (!ops::belongs(role), principal.handle().unwrap_or_default()));
     humans
         .into_iter()
         .next()

@@ -43,8 +43,8 @@ async fn leads(graph: &ProjectGraph) -> Result<Vec<EntityId>> {
     let mut found: Vec<EntityId> = ops::principals(graph)
         .await?
         .iter()
-        .filter(|(p, _)| ops::holds(p, AgentRole::Lead))
-        .map(|(p, _)| p.id())
+        .filter(|(role, _)| ops::holds(role, AgentRole::Lead))
+        .map(|(role, _)| role.id())
         .collect();
     found.sort();
     Ok(found)
@@ -415,7 +415,7 @@ async fn a_principal_belongs_from_its_first_write_or_its_addition_until_it_is_re
     let made: TaskView = graph.get(task).await?;
     assert_eq!(made.created_by()?, agent, "and what it did is still attributed to it");
     assert_eq!(
-        naming::principal_named(&graph, "impl-alice", None).await?.map(|(p, _)| p.id()),
+        naming::principal_named(&graph, "impl-alice", None).await?.map(|(role, _)| role.id()),
         Some(agent),
         "and it can be named"
     );

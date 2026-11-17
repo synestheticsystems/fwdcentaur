@@ -286,7 +286,7 @@ async fn each_principal_moves_whole_and_every_command_finds_and_prints_it_as_bef
     assert_eq!(subject::caller(&alpha, "claude-code:s1/a1", None).await?, Some(tide));
     assert_eq!(subject::caller(&alpha, "codex:t9/t9", None).await?, Some(reef));
     assert_eq!(ops::triage_for(&alpha, None).await?.map(|f| f.agent), Some(reef));
-    assert_eq!(subject::principal_of(&alpha, "github:4401").await?.map(|(p, _)| p.id()), Some(person));
+    assert_eq!(subject::principal_of(&alpha, "github:4401").await?.map(|(role, _)| role.id()), Some(person));
 
     // The subjects bind them, made by each itself as the move states them, and marked as the move's.
     assert_eq!(binding(&alpha, "github:4401").await?, (person, person, Some("principal_auth_subject".into())));

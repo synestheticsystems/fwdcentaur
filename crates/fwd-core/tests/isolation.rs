@@ -181,11 +181,11 @@ async fn every_list_of_one_project_holds_its_own_records_and_none_of_the_others(
 
     // Each read below finds this project's record, so that none passes by finding nothing.
     let principals = ops::principals(&alpha).await?;
-    none_of(&others, "principals", principals.iter().map(|(p, _)| p.id()));
+    none_of(&others, "principals", principals.iter().map(|(role, _)| role.id()));
     assert_eq!(principals.len(), 3);
     assert_eq!(ops::people(&alpha).await?, vec![a.daniel]);
     assert_eq!(ops::person_by_handle(&alpha, "dnorman").await?, a.daniel, "a handle the other project shares too");
-    let alice = naming::principal_named(&alpha, "impl-alice", None).await?.map(|(p, _)| p.id());
+    let alice = naming::principal_named(&alpha, "impl-alice", None).await?.map(|(role, _)| role.id());
     assert_eq!(alice, Some(a.alice), "a name two projects share is no shared name in either");
     assert_eq!(ops::triage_for(&alpha, None).await?.map(|f| f.agent), Some(a.triage));
     assert_eq!(ops::resolve_scope(&alpha, "Replication").await?, a.scope, "a scope name the other project shares too");
@@ -487,8 +487,8 @@ async fn routing_tells_whom_each_rule_names_each_in_its_own_project() -> Result<
     let (alpha, beta) = two_projects().await?;
     let a = populate(&alpha).await?;
     let b = populate(&beta).await?;
-    let ours: BTreeSet<EntityId> = ops::principals(&alpha).await?.iter().map(|(p, _)| p.id()).collect();
-    let theirs: BTreeSet<EntityId> = ops::principals(&beta).await?.iter().map(|(p, _)| p.id()).collect();
+    let ours: BTreeSet<EntityId> = ops::principals(&alpha).await?.iter().map(|(role, _)| role.id()).collect();
+    let theirs: BTreeSet<EntityId> = ops::principals(&beta).await?.iter().map(|(role, _)| role.id()).collect();
     let before = every_id(&beta).await?;
 
     // A question asked of no one reaches alpha's triage agent; a comment on a claimed task its

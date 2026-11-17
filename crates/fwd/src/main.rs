@@ -2035,10 +2035,11 @@ fn render_object(map: &serde_json::Map<String, Value>, indent: usize) -> String 
 /// answers first for the scope the command works in.
 async fn roles_changed(app: &App, principal: EntityId, before: Option<ops::Serving>) -> Result<()> {
     let graph = app.graph();
-    let (p, identity) = graph.principal(principal).await?;
+    let (role, identity) = graph.principal(principal).await?;
     let handle = identity.handle()?;
-    let after = ops::triage_standing(&p).unwrap_or_default();
-    let unread = if !ops::retired(&p)? { String::new() } else { format!(", those @{handle} left unread among them") };
+    let after = ops::triage_standing(&role).unwrap_or_default();
+    let unread =
+        if !ops::retired(&role)? { String::new() } else { format!(", those @{handle} left unread among them") };
     if let Some(before) = before {
         let principals = ops::principals(graph).await?;
         for &scope in before.scopes.iter().filter(|s| !after.serves_scope(**s)) {
@@ -2059,7 +2060,7 @@ async fn roles_changed(app: &App, principal: EntityId, before: Option<ops::Servi
             ));
         }
     }
-    if principal != app.me && ops::serves_nothing_yet(&p) {
+    if principal != app.me && ops::serves_nothing_yet(&role) {
         app.note(format!("fwd: {}", fwd_core::guidance::unbound(&handle)));
     }
     if let Some(guidance) = lead_guidance(graph, principal, app.scope).await? {
@@ -2071,8 +2072,8 @@ async fn roles_changed(app: &App, principal: EntityId, before: Option<ops::Servi
 /// What the principal `name` names serves as a triage agent now (`ops::triage_standing`), for
 /// [`roles_changed`] to compare once a command has changed it; none for a name no principal has.
 async fn standing_of(graph: &ProjectGraph, name: &str) -> Option<ops::Serving> {
-    let (p, _) = naming::principal_named(graph, naming::bare(name), None).await.ok().flatten()?;
-    ops::triage_standing(&p)
+    let (role, _) = naming::principal_named(graph, naming::bare(name), None).await.ok().flatten()?;
+    ops::triage_standing(&role)
 }
 
 /// A principal as every command prints it (`ops::json_of_principal`), with each scope a triage
@@ -2140,8 +2141,8 @@ async fn print_succession(app: &App, done: &ops::Succession, made: bool) -> Resu
 
 /// Where a principal comes in `fwd principal list`: people, then the leads, the triage agents,
 /// implementers and reviewers, then agents with no role, as the page's pickers group them.
-fn listing_rank((role, p): &(RoleView, PrincipalView)) -> u8 {
-    match (p.kind().ok(), ops::role_of(role)) {
+fn listing_rank((role, principal): &(RoleView, PrincipalView)) -> u8 {
+    match (principal.kind().ok(), ops::role_of(role)) {
         (Some(PrincipalKind::Human), _) => 0,
         (_, Some(AgentRole::Lead)) => 1,
         (_, Some(AgentRole::Triage)) => 2,
@@ -3181,7 +3182,7 @@ async fn caller(
         Some(subject) => {
             let binds = matches!(cli.command, Command::Principal { command: PrincipalCommand::Bind { .. } });
             let bound = if binds {
-                subject::principal_of(graph, subject).await?.map(|(p, _)| p.id())
+                subject::principal_of(graph, subject).await?.map(|(role, _)| role.id())
             } else if let Some(stand_in) = thread_hook_stand_in(cli, graph, subject, thread_hook).await? {
                 stand_in
             } else {
@@ -3220,7 +3221,7 @@ async fn caller(
                 None if no_one => None,
                 None => Some(me),
                 Some(name) => match naming::principal_named(graph, name, None).await {
-                    Ok(p) => p.map(|(p, _)| p.id()),
+                    Ok(named) => named.map(|(role, _)| role.id()),
                     // A name several principals share names none of them as the caller.
                     Err(e) if e.downcast_ref::<naming::Refused>().is_some() => None,
                     Err(e) => return Err(e),
@@ -3823,7 +3824,7 @@ fn no_principal_named(handle: &str) -> String {
 async fn act_as(graph: &ProjectGraph, name: &str) -> Result<EntityId> {
     let name = naming::bare(name);
     match naming::principal_named(graph, name, None).await? {
-        Some((p, _)) => Ok(p.id()),
+        Some((role, _)) => Ok(role.id()),
         None => bail!(no_principal_named(name)),
     }
 }
@@ -3836,7 +3837,8 @@ async fn refuse_without_role(graph: &ProjectGraph, principal: EntityId) -> Resul
     if !ops::lacks_role(&p)? {
         return Ok(());
     }
-    let handle = p.1.handle()?;
+    let (_, identity) = &p;
+    let handle = identity.handle()?;
     bail!("`@{handle}` holds no role, and an agent selects one before it writes: {}", ops::select_role_command(&handle))
 }
 
@@ -3849,18 +3851,18 @@ async fn refuse_without_role(graph: &ProjectGraph, principal: EntityId) -> Resul
 /// the role the principal holds, and for one succeeded, which holds none since its role moved, with
 /// the roles to choose from and the name of its successor, which carries on its job.
 async fn refuse_retired(graph: &ProjectGraph, principal: EntityId, typed_as: bool) -> Result<()> {
-    let (p, identity) = graph.principal(principal).await?;
-    if !ops::retired(&p)? {
+    let (role, identity) = graph.principal(principal).await?;
+    if !ops::retired(&role)? {
         return Ok(());
     }
     let handle = identity.handle()?;
-    let role = match identity.kind()? {
+    let role_words = match identity.kind()? {
         PrincipalKind::Human => String::new(),
         PrincipalKind::Agent => {
-            format!(" --role {}", ops::role_of(&p).map_or_else(|| ops::ROLE_WORDS.to_string(), |r| r.to_string()))
+            format!(" --role {}", ops::role_of(&role).map_or_else(|| ops::ROLE_WORDS.to_string(), |r| r.to_string()))
         }
     };
-    let succeeded = match p.succeeded_by()?.map(EntityId::from) {
+    let succeeded = match role.succeeded_by()?.map(EntityId::from) {
         Some(successor) => {
             format!(", succeeded by @{}, which carries on its job", ops::handle_of(graph, successor).await?)
         }
@@ -3868,7 +3870,7 @@ async fn refuse_retired(graph: &ProjectGraph, principal: EntityId, typed_as: boo
     };
     let as_it = if typed_as { format!("--as {handle} ") } else { String::new() };
     bail!(
-        "`@{handle}` is retired{succeeded}, and a retired principal writes nothing, since no picker offers it: to write again, bring it back first with `fwd {as_it}principal add {handle}{role}`, run as it"
+        "`@{handle}` is retired{succeeded}, and a retired principal writes nothing, since no picker offers it: to write again, bring it back first with `fwd {as_it}principal add {handle}{role_words}`, run as it"
     )
 }
 
@@ -4006,8 +4008,8 @@ async fn say_unbound(app: &App) -> Result<()> {
 
 /// The notice for `principal`, when it holds triage and serves nothing.
 async fn unbound_notice(graph: &ProjectGraph, principal: EntityId) -> Result<Option<String>> {
-    let (p, identity) = graph.principal(principal).await?;
-    Ok(ops::serves_nothing_yet(&p).then(|| fwd_core::guidance::unbound(&identity.handle().unwrap_or_default())))
+    let (role, identity) = graph.principal(principal).await?;
+    Ok(ops::serves_nothing_yet(&role).then(|| fwd_core::guidance::unbound(&identity.handle().unwrap_or_default())))
 }
 
 /// The principal a handle names on the command line (`--to`, `--for`, `task assign`,
@@ -5199,7 +5201,7 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 // work is in, as the pickers show them; `null` beside any other.
                 let shared: Vec<EntityId> = found
                     .iter()
-                    .filter(|(_, p)| naming::shows_scopes(&every, &p.handle().unwrap_or_default()))
+                    .filter(|(_, principal)| naming::shows_scopes(&every, &principal.handle().unwrap_or_default()))
                     .map(|(role, _)| role.id())
                     .collect();
                 let loaded = if shared.is_empty() { None } else { Some(naming::Loaded::of(graph, &shared).await?) };
@@ -5207,16 +5209,17 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 let sessions = subject::sessions_bound(graph).await?;
                 let mut list: Vec<Value> = Vec::with_capacity(found.len());
                 for p in &found {
-                    let mut v = principal_json(graph, p, sessions.get(&p.0.id()).map(String::as_str)).await?;
+                    let (role, _) = p;
+                    let mut v = principal_json(graph, p, sessions.get(&role.id()).map(String::as_str)).await?;
                     v["dormant"] = json!(dormancy::is_dormant(p, now));
-                    if let Some(successor) = p.0.succeeded_by().ok().flatten().map(EntityId::from) {
-                        v["succeeded_by_handle"] =
-                            json!(every.iter().find(|(q, _)| q.id() == successor).and_then(|(_, q)| q.handle().ok()));
+                    if let Some(successor) = role.succeeded_by().ok().flatten().map(EntityId::from) {
+                        let heir = every.iter().find(|(role, _)| role.id() == successor);
+                        v["succeeded_by_handle"] = json!(heir.and_then(|(_, principal)| principal.handle().ok()));
                     }
-                    v["scopes"] = match loaded.as_ref().filter(|_| shared.contains(&p.0.id())) {
+                    v["scopes"] = match loaded.as_ref().filter(|_| shared.contains(&role.id())) {
                         Some(loaded) => {
                             let work = loaded.work();
-                            json!(naming::scope_titles(&naming::scopes_of(p.0.id(), &work), work.scopes))
+                            json!(naming::scope_titles(&naming::scopes_of(role.id(), &work), work.scopes))
                         }
                         None => Value::Null,
                     };
@@ -5319,7 +5322,9 @@ async fn run(app: &App, command: Command) -> Result<()> {
                 };
                 // The principal the typed `--as` names, which must be the one bound: it is said twice.
                 let named_by_as = match app.typed_as.as_deref() {
-                    Some(name) => naming::principal_named(graph, naming::bare(name), None).await?.map(|(p, _)| p.id()),
+                    Some(name) => {
+                        naming::principal_named(graph, naming::bare(name), None).await?.map(|(role, _)| role.id())
+                    }
                     None => None,
                 };
                 let id = ops::bind_principal(graph, &handle, subject, named_by_as).await?;

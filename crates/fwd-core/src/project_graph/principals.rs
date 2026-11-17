@@ -15,7 +15,7 @@ use ankurah_commons::records::{Closed, ClosedView};
 
 /// Binds the components every reader of a principal reads off its role, `identity.Principal` and
 /// `Closed`, so that a principal named by a role alone, as the page's lists and the routing
-/// service's standing query hold one, is read whole ([`principal_of`], [`closed`]): a view of a
+/// service's standing query hold one, is read whole ([`principal_parts`], [`closed`]): a view of a
 /// model the node has not bound reads nothing. A client's graph and the routing service's bind them
 /// as they open, and every read here that hands out a principal binds them first.
 pub(super) async fn bind_principal_parts(ctx: &Context) -> Result<(), RetrievalError> {
@@ -24,8 +24,9 @@ pub(super) async fn bind_principal_parts(ctx: &Context) -> Result<(), RetrievalE
     Ok(())
 }
 
-/// The principal `role` is the role of: the role and the Commons' principal on its entity.
-pub fn principal_of(role: RoleView) -> Result<(RoleView, PrincipalView), RetrievalError> {
+/// The parts of the principal `role` is the role of: the role and the Commons' principal on its
+/// entity.
+pub fn principal_parts(role: RoleView) -> Result<(RoleView, PrincipalView), RetrievalError> {
     let principal = role.entity().cast::<PrincipalView>()?;
     Ok((role, principal))
 }
@@ -73,7 +74,7 @@ impl ProjectGraph {
     /// [`ProjectGraph::get`] refuses a record of it.
     pub async fn principal(&self, id: EntityId) -> Result<(RoleView, PrincipalView), ProjectGraphError> {
         bind_principal_parts(&self.ctx).await?;
-        Ok(principal_of(self.get(id).await?)?)
+        Ok(principal_parts(self.get(id).await?)?)
     }
 
     /// The principal `id` that a record holds, wherever in the node it is, as
@@ -85,7 +86,7 @@ impl ProjectGraph {
         bind_principal_parts(&self.ctx).await?;
         Ok(match self.follow::<RoleView>(id).await? {
             Followed::Held { record, project, found } => {
-                Followed::Held { record, project, found: principal_of(found)? }
+                Followed::Held { record, project, found: principal_parts(found)? }
             }
             Followed::NotHeld => Followed::NotHeld,
         })
